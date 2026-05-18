@@ -1,5 +1,5 @@
 error: field `party_id`: #[edifact(qualifier = ...)] is only valid on message struct fields
-  --> $DIR/fail_segment_field_qualifier.rs:16:15
+  --> tests/ui/fail_segment_field_qualifier.rs:17:15
    |
-16 |     #[edifact(qualifier = "MS")]
+17 |     #[edifact(qualifier = "MS")]
    |               ^^^^^^^^^

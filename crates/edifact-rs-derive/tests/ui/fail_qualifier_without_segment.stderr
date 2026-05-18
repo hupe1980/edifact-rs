@@ -1,5 +1,5 @@
 error: #[edifact(qualifier = ...)] / #[edifact(qualifier_from = ...)] require #[edifact(segment = ...)]
-  --> $DIR/fail_qualifier_without_segment.rs:14:11
+  --> tests/ui/fail_qualifier_without_segment.rs:15:11
    |
-14 | #[edifact(qualifier = "MS")]
+15 | #[edifact(qualifier = "MS")]
    |           ^^^^^^^^^

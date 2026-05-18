@@ -2,9 +2,10 @@
 mod support;
 
 pub use support::edifact_rs::{
-    Element, EdifactCompositeDeserialize, EdifactCompositeSerialize, EdifactDeserialize,
-    EdifactError, EdifactEvent, EdifactSegmentTag, EdifactSerialize, EventEmitter, Segment,
-    composite_element, find_qualified_segment, find_segment,
+    CompositeElement, Element, EdifactCompositeDeserialize, EdifactCompositeSerialize,
+    EdifactDeserialize, EdifactError, EdifactEvent, EdifactSegmentTag, EdifactSerialize,
+    EventEmitter, OwnedSegment, Segment, composite_element, find_qualified_segment,
+    find_segment, find_segment_owned,
 };
 
 extern crate self as edifact_rs;
