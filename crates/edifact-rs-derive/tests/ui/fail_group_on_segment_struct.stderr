@@ -1,0 +1,5 @@
+error: field `parties`: #[edifact(group)] is only valid on message structs
+  --> $DIR/fail_group_on_segment_struct.rs:16:15
+   |
+16 |     #[edifact(group)]
+   |               ^^^^^

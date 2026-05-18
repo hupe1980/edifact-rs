@@ -1,0 +1,5 @@
+error: #[edifact(qualifier = ...)] / #[edifact(qualifier_from = ...)] require #[edifact(segment = ...)]
+  --> $DIR/fail_qualifier_from_without_segment.rs:14:11
+   |
+14 | #[edifact(qualifier_from = 0)]
+   |           ^^^^^^^^^^^^^^

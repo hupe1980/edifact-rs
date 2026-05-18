@@ -1,0 +1,40 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/edifact-rs",
+    "crates/edifact-rs-derive",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+authors = ["hupe1980"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1"
+bolero = { version = "0.13", features = ["arbitrary"] }
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+divan = "0.1"
+memchr = "2"
+miette = { version = "7", features = ["fancy"] }
+proc-macro2 = "1"
+quote = "1"
+# `union` enables a union-based inline/heap discriminant, eliminating the
+# redundant bool tag field per SmallVec instance. This is `unsafe`-sound per
+# smallvec's own safety guarantees and provides a measurable reduction in
+# struct size on hot paths (e.g., Element.components).
+smallvec = { version = "1", features = ["union"] }
+syn = { version = "2", features = ["full"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync"] }
+trybuild = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "debuginfo"
+
+[profile.bench]
+inherits = "release"
+debug = true

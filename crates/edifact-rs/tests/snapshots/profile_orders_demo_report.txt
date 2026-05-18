@@ -1,0 +1,5 @@
+Validation Report:
+  Errors (1)
+    - profile rule DEMO-P001 violated: BGM document code 220 is rejected in this demo pack [segment=BGM] [rule=DEMO-P001] [element=0] [hint=Use a different BGM document code in this demo pack]
+  Warnings (1)
+    - profile rule DEMO-P002 warning: purchase-order reference PO-4711 is reserved in this demo pack [segment=BGM] [rule=DEMO-P002] [element=1] [hint=Use a non-reserved reference in this demo pack]

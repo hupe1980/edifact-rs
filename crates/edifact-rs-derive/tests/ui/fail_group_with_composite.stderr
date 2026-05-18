@@ -1,0 +1,5 @@
+error: field `lines`: #[edifact(composite)] cannot be combined with #[edifact(group)]
+  --> $DIR/fail_group_with_composite.rs:15:15
+   |
+15 |     #[edifact(composite, group)]
+   |               ^^^^^^^^^

@@ -1,0 +1,1337 @@
+//! Custom deserialization trait for EDIFACT.
+//!
+//! [`EdifactDeserialize`] maps a slice of parsed [`Segment`]s to a Rust value.
+//! [`EdifactSegmentTag`] is a companion trait that carries the segment tag and
+//! optional qualifier at the type level, enabling the blanket
+//! `impl EdifactDeserialize for Vec<T>`.
+
+use crate::{EdifactError, Segment};
+use std::io::Read;
+use std::str::FromStr;
+
+// ── traits ────────────────────────────────────────────────────────────────────
+
+/// Types that can be deserialized from a slice of EDIFACT segments.
+///
+/// Implement manually or derive with `#[derive(EdifactDeserialize)]` from the
+/// `edifact-rs-derive` crate.
+pub trait EdifactDeserialize: Sized {
+    /// Deserialize `Self` from the provided segment slice.
+    ///
+    /// The slice may contain any number of segments; implementations extract
+    /// only the ones they care about and ignore the rest.
+    fn edifact_deserialize(segments: &[Segment<'_>]) -> Result<Self, EdifactError>;
+
+    /// Deserialize `Self` from a slice of owned EDIFACT segments.
+    ///
+    /// The default implementation converts each segment to its borrowed form
+    /// via [`OwnedSegment::as_borrowed`] and calls
+    /// [`edifact_deserialize`][Self::edifact_deserialize].  Types derived with
+    /// `#[derive(EdifactDeserialize)]` override this method to work directly on
+    /// the owned data, avoiding the `Vec<Segment>` allocation entirely.
+    ///
+    /// Manual implementations only need to override this when performance of
+    /// the reader-based streaming path matters.
+    fn edifact_deserialize_owned(segments: &[crate::OwnedSegment]) -> Result<Self, EdifactError> {
+        let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
+        Self::edifact_deserialize(&borrowed)
+    }
+}
+
+/// Types that can be deserialized from a composite EDIFACT element.
+///
+/// Implement this for custom composite structs used with
+/// `#[edifact(composite)]` in derive macros.
+pub trait EdifactCompositeDeserialize: Sized {
+    /// Deserialize `Self` from a composite element.
+    fn edifact_deserialize_composite(composite: CompositeElement<'_>)
+    -> Result<Self, EdifactError>;
+}
+
+impl EdifactCompositeDeserialize for Vec<String> {
+    fn edifact_deserialize_composite(
+        composite: CompositeElement<'_>,
+    ) -> Result<Self, EdifactError> {
+        Ok(composite.iter().map(str::to_owned).collect())
+    }
+}
+
+/// Companion trait that declares a type's segment tag (and optional qualifier).
+///
+/// Required for the `Vec<T>` blanket impl and for finding the right segment in
+/// a message-level struct deserialization.
+pub trait EdifactSegmentTag {
+    /// The 3-character EDIFACT segment tag (e.g. `"BGM"`, `"NAD"`).
+    const SEGMENT_TAG: &'static str;
+
+    /// Optional qualifier pattern to further constrain segment matching.
+    ///
+    /// Examples:
+    /// - `Some("MS")` for exact qualifier matching.
+    /// - `Some("M*")` for wildcard prefix matching (matches `"MS"`, `"MR"`, etc.).
+    const QUALIFIER_PATTERN: Option<&'static str> = None;
+
+    /// Return `true` if `seg`'s qualifier matches this type's qualifier pattern.
+    fn matches_qualifier(seg: &Segment<'_>) -> bool {
+        match Self::QUALIFIER_PATTERN {
+            Some(pattern) => seg
+                .element_str(0)
+                .is_some_and(|q| qualifier_matches_pattern(q, pattern)),
+            None => true,
+        }
+    }
+
+    /// Return `true` if `seg` is the segment this type maps to.
+    ///
+    /// Default: `seg.tag == Self::SEGMENT_TAG`.  Override to also match on a
+    /// qualifier (e.g. `NAD+BY` — element 0 = `"BY"`).
+    fn matches_segment(seg: &Segment<'_>) -> bool {
+        seg.tag == Self::SEGMENT_TAG && Self::matches_qualifier(seg)
+    }
+
+    /// Like [`matches_segment`][Self::matches_segment] but works directly on an
+    /// [`OwnedSegment`] without incurring the `Vec` allocation of
+    /// [`OwnedSegment::as_borrowed`].
+    fn matches_owned_segment(seg: &crate::OwnedSegment) -> bool {
+        if seg.tag != Self::SEGMENT_TAG {
+            return false;
+        }
+        match Self::QUALIFIER_PATTERN {
+            None => true,
+            Some(pattern) => {
+                let q = seg
+                    .elements
+                    .first()
+                    .and_then(|e| e.components.first())
+                    .map(|c| c.as_str())
+                    .unwrap_or("");
+                qualifier_matches_pattern(q, pattern)
+            }
+        }
+    }
+}
+
+// ── blanket impl for Vec<T> ───────────────────────────────────────────────────
+
+/// Deserializes each segment matching `T::matches_segment` as an independent
+/// single-segment slice, collecting the results.
+impl<T> EdifactDeserialize for Vec<T>
+where
+    T: EdifactDeserialize + EdifactSegmentTag,
+{
+    fn edifact_deserialize(segments: &[Segment<'_>]) -> Result<Self, EdifactError> {
+        segments
+            .iter()
+            .filter(|s| T::matches_segment(s))
+            .map(|seg| T::edifact_deserialize(std::slice::from_ref(seg)))
+            .collect()
+    }
+
+    fn edifact_deserialize_owned(segments: &[crate::OwnedSegment]) -> Result<Self, EdifactError> {
+        segments
+            .iter()
+            .filter(|s| T::matches_owned_segment(s))
+            .map(|seg| T::edifact_deserialize_owned(std::slice::from_ref(seg)))
+            .collect()
+    }
+}
+
+// ── public API ────────────────────────────────────────────────────────────────
+
+/// Deserialize a value of type `T` from EDIFACT bytes.
+///
+/// Unlike [`crate::from_bytes`], which parses bytes into raw [`Segment`]s, this
+/// function fully deserializes the payload into a typed Rust value via [`EdifactDeserialize`].
+///
+/// This API currently buffers all parsed segments into a `Vec` before invoking
+/// typed deserialization.
+pub fn deserialize<T: EdifactDeserialize>(input: &[u8]) -> Result<T, EdifactError> {
+    let segments: Vec<Segment<'_>> = crate::from_bytes(input).collect::<Result<_, _>>()?;
+    T::edifact_deserialize(&segments)
+}
+
+/// Stream-parse EDIFACT bytes and deserialize the first matching segment as `T`.
+///
+/// This avoids allocating a full `Vec<Segment>` and is intended for low-memory
+/// extraction of segment-scoped types.
+pub fn deserialize_first_streaming<T>(input: &[u8]) -> Result<T, EdifactError>
+where
+    T: EdifactDeserialize + EdifactSegmentTag,
+{
+    for segment in crate::from_bytes(input) {
+        let segment = segment?;
+        if T::matches_segment(&segment) {
+            return T::edifact_deserialize(std::slice::from_ref(&segment));
+        }
+    }
+
+    Err(EdifactError::MissingSegment {
+        tag: T::SEGMENT_TAG.to_owned(),
+        expected_position: "any position in input".to_owned(),
+    })
+}
+
+/// Stream-parse EDIFACT bytes and deserialize all matching segments as `Vec<T>`.
+///
+/// This avoids buffering non-matching segments in memory.
+pub fn deserialize_all_streaming<T>(input: &[u8]) -> Result<Vec<T>, EdifactError>
+where
+    T: EdifactDeserialize + EdifactSegmentTag,
+{
+    let mut out = Vec::new();
+    for segment in crate::from_bytes(input) {
+        let segment = segment?;
+        if T::matches_segment(&segment) {
+            out.push(T::edifact_deserialize(std::slice::from_ref(&segment))?);
+        }
+    }
+    Ok(out)
+}
+
+/// Stream-parse EDIFACT from a reader and deserialize the first matching segment as `T`.
+///
+/// This is the low-memory typed path for large payloads read from I/O streams.
+pub fn deserialize_first_from_reader<T, R>(reader: R) -> Result<T, EdifactError>
+where
+    T: EdifactDeserialize + EdifactSegmentTag,
+    R: Read,
+{
+    for segment in crate::from_reader_iter(reader) {
+        let segment = segment?;
+        // O(1) tag + qualifier check before paying for as_borrowed().
+        if !T::matches_owned_segment(&segment) {
+            continue;
+        }
+        let borrowed = segment.as_borrowed();
+        return T::edifact_deserialize(std::slice::from_ref(&borrowed));
+    }
+
+    Err(EdifactError::MissingSegment {
+        tag: T::SEGMENT_TAG.to_owned(),
+        expected_position: "any position in input".to_owned(),
+    })
+}
+
+/// Stream-parse EDIFACT from a reader and deserialize all matching segments as `Vec<T>`.
+pub fn deserialize_all_from_reader<T, R>(reader: R) -> Result<Vec<T>, EdifactError>
+where
+    T: EdifactDeserialize + EdifactSegmentTag,
+    R: Read,
+{
+    let mut out = Vec::new();
+    for segment in crate::from_reader_iter(reader) {
+        let segment = segment?;
+        // O(1) tag + qualifier check before paying for as_borrowed().
+        if !T::matches_owned_segment(&segment) {
+            continue;
+        }
+        let borrowed = segment.as_borrowed();
+        out.push(T::edifact_deserialize(std::slice::from_ref(&borrowed))?);
+    }
+    Ok(out)
+}
+
+/// Deserialize a value of type `T` from an EDIFACT string.
+pub fn deserialize_str<T: EdifactDeserialize>(input: &str) -> Result<T, EdifactError> {
+    deserialize(input.as_bytes())
+}
+
+// ── helper functions ──────────────────────────────────────────────────────────
+
+/// Find the first segment with the given tag.
+pub fn find_segment<'s, 'd>(segments: &'s [Segment<'d>], tag: &str) -> Option<&'s Segment<'d>> {
+    segments.iter().find(|s| s.tag == tag)
+}
+
+/// Iterate over all segments with the given tag without allocating a `Vec`.
+pub fn find_segments_iter<'s, 'd: 's>(
+    segments: &'s [Segment<'d>],
+    tag: &'s str,
+) -> impl Iterator<Item = &'s Segment<'d>> {
+    segments.iter().filter(move |s| s.tag == tag)
+}
+
+/// Find the first segment matching `tag` whose element 0 equals `qualifier`.
+pub fn find_qualified_segment<'s, 'd>(
+    segments: &'s [Segment<'d>],
+    tag: &str,
+    qualifier: &str,
+) -> Option<&'s Segment<'d>> {
+    segments
+        .iter()
+        .find(|s| s.tag == tag && s.element_str(0).unwrap_or("") == qualifier)
+}
+
+/// Find the first segment by type-level qualifier pattern.
+pub fn find_segment_typed<'s, 'd, T>(segments: &'s [Segment<'d>]) -> Option<&'s Segment<'d>>
+where
+    T: EdifactSegmentTag,
+{
+    segments.iter().find(|s| T::matches_segment(s))
+}
+
+/// Collect all segments by type-level qualifier pattern.
+pub fn find_segments_typed<'s, 'd, T>(
+    segments: &'s [Segment<'d>],
+) -> Vec<&'s Segment<'d>>
+where
+    T: EdifactSegmentTag,
+{
+    segments.iter().filter(|s| T::matches_segment(s)).collect()
+}
+
+/// Collect contiguous groups of segments that match `T`.
+pub fn contiguous_groups_by_qualifier<'s, 'd, T>(
+    segments: &'s [Segment<'d>],
+) -> Vec<&'s [Segment<'d>]>
+where
+    T: EdifactSegmentTag,
+{
+    let mut groups = Vec::new();
+    let mut idx = 0;
+
+    while idx < segments.len() {
+        if T::matches_segment(&segments[idx]) {
+            let start = idx;
+            idx += 1;
+            while idx < segments.len() && T::matches_segment(&segments[idx]) {
+                idx += 1;
+            }
+            groups.push(&segments[start..idx]);
+        } else {
+            idx += 1;
+        }
+    }
+
+    groups
+}
+
+/// Return `true` if all segments matching `T` are in one contiguous block.
+pub fn groups_are_contiguous_by_qualifier<T>(segments: &[Segment<'_>]) -> bool
+where
+    T: EdifactSegmentTag,
+{
+    let mut seen_match = false;
+    let mut seen_gap_after_match = false;
+
+    for seg in segments {
+        if T::matches_segment(seg) {
+            if seen_gap_after_match {
+                return false;
+            }
+            seen_match = true;
+        } else if seen_match {
+            seen_gap_after_match = true;
+        }
+    }
+
+    true
+}
+
+/// Match a qualifier value against an exact or wildcard pattern.
+///
+/// Rules:
+/// - If `pattern` contains `*`, it is treated as a glob wildcard (e.g. `"M*"` matches `"MS"`, `"MR"`).
+/// - If no wildcard is present, exact match is required.
+///
+/// Prefix matching without an explicit `*` was deliberately removed: `"M"` matches only `"M"`,
+/// not `"MS"` or `"MR"`.  Use `"M*"` for prefix semantics.
+pub fn qualifier_matches_pattern(value: &str, pattern: &str) -> bool {
+    if pattern.is_empty() {
+        return value.is_empty();
+    }
+
+    if !pattern.contains('*') {
+        return value == pattern;
+    }
+
+    // Fast path: single wildcard (dominant case — e.g. "M*" or "*:MS")
+    if let Some((prefix, suffix)) = pattern.split_once('*') {
+        // Only one wildcard — prefix and suffix cannot overlap in a second split.
+        if !pattern[prefix.len() + 1..].contains('*') {
+            return value.len() >= prefix.len() + suffix.len()
+                && value.starts_with(prefix)
+                && value.ends_with(suffix)
+                && {
+                    // Ensure prefix and suffix don't overlap.
+                    let mid_start = prefix.len();
+                    let mid_end = value.len().saturating_sub(suffix.len());
+                    mid_start <= mid_end
+                };
+        }
+    }
+
+    // General multi-wildcard path.
+    let parts: smallvec::SmallVec<[&str; 4]> = pattern.split('*').collect();
+    let prefix = parts[0];
+    let suffix = parts[parts.len() - 1];
+
+    if !value.starts_with(prefix) || !value.ends_with(suffix) {
+        return false;
+    }
+
+    let mid_start = prefix.len();
+    let mid_end = value.len().saturating_sub(suffix.len());
+
+    if mid_start > mid_end {
+        return parts[1..parts.len() - 1].iter().all(|p| p.is_empty());
+    }
+
+    let mut remaining = &value[mid_start..mid_end];
+
+    for part in &parts[1..parts.len() - 1] {
+        if part.is_empty() {
+            continue;
+        }
+        match remaining.find(part) {
+            Some(idx) => remaining = &remaining[idx + part.len()..],
+            None => return false,
+        }
+    }
+
+    true
+}
+
+/// Extract the string value of element `idx` from `seg`, or `""` if absent.
+#[inline]
+pub fn element_str<'s>(seg: &'s Segment<'_>, idx: usize) -> &'s str {
+    seg.element_str(idx).unwrap_or("")
+}
+
+// ── segment accessor helpers ───────────────────────────────────────────────────
+
+/// Extract a required text element from a segment.
+///
+/// Returns the element's first component, or an error if absent or empty.
+pub fn required_element<'a>(seg: &'a Segment<'_>, idx: usize) -> Result<&'a str, EdifactError> {
+    seg.element_str(idx)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| EdifactError::MissingRequiredElement {
+            tag: seg.tag.to_owned(),
+            element_index: idx,
+        })
+}
+
+/// Extract an optional text element from a segment.
+///
+/// Returns the element's first component, or None if absent or empty.
+pub fn optional_element<'a>(seg: &'a Segment<'_>, idx: usize) -> Option<&'a str> {
+    seg.element_str(idx)
+        .filter(|s| !s.is_empty())
+}
+
+/// Extract a required component from a segment element.
+///
+/// Returns the component value, or an error if the element or component is absent.
+pub fn required_component<'a>(
+    seg: &'a Segment<'_>,
+    elem_idx: usize,
+    comp_idx: usize,
+) -> Result<&'a str, EdifactError> {
+    seg.elements
+        .get(elem_idx)
+        .and_then(|elem| elem.get_component(comp_idx))
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| EdifactError::MissingRequiredElement {
+            tag: seg.tag.to_owned(),
+            element_index: elem_idx,
+        })
+}
+
+/// Extract an optional component from a segment element.
+///
+/// Returns the component value, or None if absent or empty.
+pub fn optional_component<'a>(seg: &'a Segment<'_>, elem_idx: usize, comp_idx: usize) -> Option<&'a str> {
+    seg.elements
+        .get(elem_idx)
+        .and_then(|elem| elem.get_component(comp_idx))
+        .filter(|s| !s.is_empty())
+}
+
+/// Iterate over all components of an element without allocating a `Vec`.
+///
+/// Yields an empty iterator if the element is absent.
+pub fn get_components_iter<'a>(
+    seg: &'a Segment<'_>,
+    idx: usize,
+) -> impl Iterator<Item = &'a str> {
+    seg.elements
+        .get(idx)
+        .into_iter()
+        .flat_map(|elem| elem.components.iter().map(|c| c.as_ref()))
+}
+
+/// A composite data element wrapper for clearer ergonomics.
+pub struct CompositeElement<'a> {
+    components: &'a [std::borrow::Cow<'a, str>],
+}
+
+impl<'a> CompositeElement<'a> {
+    /// Get the component at index `i`, or None if absent.
+    pub fn get(&self, i: usize) -> Option<&'a str> {
+        self.components.get(i).map(|c| c.as_ref())
+    }
+
+    /// Get the component at index `i`, or empty string if absent.
+    pub fn get_or_empty(&self, i: usize) -> &'a str {
+        self.get(i).unwrap_or("")
+    }
+
+    /// Get the number of components.
+    pub fn len(&self) -> usize {
+        self.components.len()
+    }
+
+    /// Check if the composite is empty.
+    pub fn is_empty(&self) -> bool {
+        self.components.is_empty()
+    }
+
+    /// Iterate over all components.
+    pub fn iter(&self) -> impl Iterator<Item = &'a str> {
+        self.components.iter().map(|c| c.as_ref())
+    }
+
+    /// Create a `CompositeElement` from a pre-existing component slice.
+    ///
+    /// Used internally by [`edifact_deserialize_owned`][EdifactDeserialize::edifact_deserialize_owned]
+    /// generated code to pass component data without converting the whole segment.
+    pub fn from_slice(components: &'a [std::borrow::Cow<'a, str>]) -> Self {
+        Self { components }
+    }
+}
+
+/// Get a composite element from a segment with clearer ergonomics.
+pub fn composite_element<'a>(seg: &'a Segment<'_>, idx: usize) -> Option<CompositeElement<'a>> {
+    seg.elements.get(idx).map(|elem| CompositeElement {
+        components: &elem.components,
+    })
+}
+
+/// Find the first [`OwnedSegment`] with the given tag.
+///
+/// Zero-allocation counterpart of [`find_segment`] for use in
+/// [`EdifactDeserialize::edifact_deserialize_owned`] implementations.
+///
+/// [`OwnedSegment`]: crate::OwnedSegment
+pub fn find_segment_owned<'s>(
+    segments: &'s [crate::OwnedSegment],
+    tag: &str,
+) -> Option<&'s crate::OwnedSegment> {
+    segments.iter().find(|s| s.tag == tag)
+}
+
+/// Find the first [`OwnedSegment`] with the given tag **and** qualifier.
+///
+/// The qualifier is compared against the first component of element 0.
+/// Zero-allocation counterpart of [`find_qualified_segment`] for use in
+/// [`EdifactDeserialize::edifact_deserialize_owned`] implementations.
+///
+/// [`OwnedSegment`]: crate::OwnedSegment
+pub fn find_qualified_segment_owned<'s>(
+    segments: &'s [crate::OwnedSegment],
+    tag: &str,
+    qualifier: &str,
+) -> Option<&'s crate::OwnedSegment> {
+    segments.iter().find(|s| {
+        s.tag == tag && s.element_str(0).unwrap_or("") == qualifier
+    })
+}
+
+/// Segment accessor trait for ergonomic typed extraction.
+pub trait SegmentAccessor<'a> {
+    /// Get non-empty element text at index `idx`.
+    fn get_element(&'a self, idx: usize) -> Option<&'a str>;
+    /// Get non-empty component text at element/component indexes.
+    fn get_component(&'a self, elem: usize, comp: usize) -> Option<&'a str>;
+    /// Get a composite wrapper for element `idx`.
+    fn get_composite(&'a self, idx: usize) -> Option<CompositeElement<'a>>;
+
+    /// Get required non-empty element text.
+    fn text_element(&'a self, idx: usize) -> Result<&'a str, EdifactError>;
+    /// Get optional non-empty element text.
+    fn optional_element(&'a self, idx: usize) -> Option<&'a str>;
+    /// Parse a typed code value from a required element.
+    fn code_element<T: FromStr>(&'a self, idx: usize) -> Result<T, EdifactError>;
+    /// Get required non-empty composite component.
+    fn required_composite(&'a self, elem: usize, comp: usize) -> Result<&'a str, EdifactError>;
+    /// Get `count` required components starting at `start_idx` from element `elem`.
+    fn repeating_components(
+        &'a self,
+        elem: usize,
+        start_idx: usize,
+        count: usize,
+    ) -> Result<Vec<&'a str>, EdifactError>;
+
+    /// Iterate over `count` required components starting at `start_idx` from element `elem`.
+    ///
+    /// Allocation-free alternative to [`repeating_components`][Self::repeating_components];
+    /// the caller supplies the iteration budget and consumes results on the fly.
+    fn repeating_components_iter(
+        &'a self,
+        elem: usize,
+        start_idx: usize,
+        count: usize,
+    ) -> impl Iterator<Item = Result<&'a str, EdifactError>> + 'a;
+}
+
+impl<'s, 'd> SegmentAccessor<'s> for Segment<'d>
+where
+    'd: 's,
+{
+    fn get_element(&'s self, idx: usize) -> Option<&'s str> {
+        self.element_str(idx).filter(|s| !s.is_empty())
+    }
+
+    fn get_component(&'s self, elem: usize, comp: usize) -> Option<&'s str> {
+        self.elements
+            .get(elem)
+            .and_then(|e| e.get_component(comp))
+            .filter(|s| !s.is_empty())
+    }
+
+    fn get_composite(&'s self, idx: usize) -> Option<CompositeElement<'s>> {
+        composite_element(self, idx)
+    }
+
+    fn text_element(&'s self, idx: usize) -> Result<&'s str, EdifactError> {
+        <Self as SegmentAccessor>::get_element(self, idx).ok_or_else(|| {
+            EdifactError::MissingRequiredElement {
+                tag: self.tag.to_owned(),
+                element_index: idx,
+            }
+        })
+    }
+
+    fn optional_element(&'s self, idx: usize) -> Option<&'s str> {
+        <Self as SegmentAccessor>::get_element(self, idx)
+    }
+
+    fn code_element<T: FromStr>(&'s self, idx: usize) -> Result<T, EdifactError> {
+        let raw = self.text_element(idx)?;
+        raw.parse::<T>().map_err(|_| EdifactError::InvalidText {
+            offset: self.element_span(idx).map(|s| s.start).unwrap_or(self.span.start),
+        })
+    }
+
+    fn required_composite(&'s self, elem: usize, comp: usize) -> Result<&'s str, EdifactError> {
+        <Self as SegmentAccessor>::get_component(self, elem, comp).ok_or_else(|| {
+            EdifactError::MissingRequiredElement {
+                tag: self.tag.to_owned(),
+                element_index: elem,
+            }
+        })
+    }
+
+    fn repeating_components(
+        &'s self,
+        elem: usize,
+        start_idx: usize,
+        count: usize,
+    ) -> Result<Vec<&'s str>, EdifactError> {
+        let comp =
+            self.get_composite(elem)
+                .ok_or_else(|| EdifactError::MissingRequiredElement {
+                    tag: self.tag.to_owned(),
+                    element_index: elem,
+                })?;
+
+        (start_idx..start_idx + count)
+            .map(|idx| {
+                comp.get(idx).filter(|s| !s.is_empty()).ok_or_else(|| {
+                    EdifactError::MissingRequiredElement {
+                        tag: self.tag.to_owned(),
+                        element_index: elem,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    fn repeating_components_iter(
+        &'s self,
+        elem: usize,
+        start_idx: usize,
+        count: usize,
+    ) -> impl Iterator<Item = Result<&'s str, EdifactError>> + 's {
+        let tag = self.tag;
+        let components = self
+            .elements
+            .get(elem)
+            .map(|e| e.components.as_slice())
+            .unwrap_or(&[]);
+        (start_idx..start_idx + count).map(move |idx| {
+            components
+                .get(idx)
+                .map(|c| c.as_ref())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| EdifactError::MissingRequiredElement {
+                    tag: tag.to_owned(),
+                    element_index: elem,
+                })
+        })
+    }
+}
+
+// ── message-window streaming ──────────────────────────────────────────────────
+
+/// An iterator that groups borrowed EDIFACT segments into per-message windows.
+///
+/// Zero-copy counterpart to [`MessageWindowsIter`] for in-memory byte slices.
+/// Each yielded `Vec<Segment<'_>>` borrows from the original input; no heap
+/// allocations occur per segment.  Envelope segments outside a `UNH..UNT` pair
+/// are silently skipped.
+///
+/// Obtain this via [`message_windows_bytes`].
+pub struct MessageWindowsSliceIter<'a> {
+    inner: crate::FromBytesIter<'a>,
+    buf: Vec<crate::Segment<'a>>,
+    in_message: bool,
+    done: bool,
+}
+
+impl<'a> MessageWindowsSliceIter<'a> {
+    fn new(inner: crate::FromBytesIter<'a>) -> Self {
+        Self {
+            inner,
+            buf: Vec::new(),
+            in_message: false,
+            done: false,
+        }
+    }
+}
+
+impl<'a> Iterator for MessageWindowsSliceIter<'a> {
+    type Item = Result<Vec<crate::Segment<'a>>, EdifactError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        loop {
+            let segment = match self.inner.next() {
+                Some(Ok(s)) => s,
+                Some(Err(e)) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
+                None => {
+                    self.done = true;
+                    if self.in_message && !self.buf.is_empty() {
+                        self.in_message = false;
+                        let offset = self.buf.last().map(|s| s.span.end).unwrap_or(0);
+                        return Some(Err(EdifactError::UnexpectedEof { offset }));
+                    }
+                    return None;
+                }
+            };
+
+            match segment.tag {
+                "UNH" => {
+                    if self.in_message {
+                        self.buf.clear();
+                        self.in_message = false;
+                        self.done = true;
+                        return Some(Err(EdifactError::ValidationFailed {
+                            error_count: 1,
+                            first_message:
+                                "UNH seen while a message window is already open (missing UNT)"
+                                    .to_owned(),
+                        }));
+                    }
+                    self.buf.clear();
+                    self.in_message = true;
+                    self.buf.push(segment);
+                }
+                "UNT" if self.in_message => {
+                    self.buf.push(segment);
+                    self.in_message = false;
+                    return Some(Ok(std::mem::take(&mut self.buf)));
+                }
+                _ if self.in_message => {
+                    self.buf.push(segment);
+                }
+                _ => {
+                    // Envelope segment outside a window — skip.
+                }
+            }
+        }
+    }
+}
+
+/// An iterator that groups owned EDIFACT segments into per-message windows.
+///
+/// Each yielded item is a `Vec<OwnedSegment>` containing the segments for one
+/// complete `UNH..UNT` message, inclusive of both service segments.
+/// Envelope-level segments (`UNB`, `UNG`, `UNZ`, `UNE`) that sit outside any
+/// `UNH..UNT` pair are silently skipped.
+///
+/// # Errors
+///
+/// - An inner-iterator error is forwarded immediately and iteration stops.
+/// - A `UNH` seen while a prior window is still open (missing `UNT`) is an error.
+/// - Input that ends while a `UNH` window is open (stream truncation) yields
+///   `Err(EdifactError::UnexpectedEof { … })` before returning `None`.
+///
+/// # Construction
+///
+/// Use [`message_windows_from_reader`] or [`message_windows_bytes`] to
+/// obtain a `MessageWindowsIter` directly.  For fully custom sources, call
+/// [`MessageWindowsIter::new`] with any `Iterator<Item = Result<OwnedSegment,
+/// EdifactError>>`.
+pub struct MessageWindowsIter<I> {
+    inner: I,
+    buf: Vec<crate::OwnedSegment>,
+    in_message: bool,
+    /// Set to `true` after any terminal condition (error or clean EOF) so that
+    /// subsequent `next()` calls immediately return `None`.
+    done: bool,
+}
+
+impl<I: Iterator<Item = Result<crate::OwnedSegment, EdifactError>>> MessageWindowsIter<I> {
+    /// Wrap any owned-segment iterator as a message-window iterator.
+    pub fn new(inner: I) -> Self {
+        Self {
+            inner,
+            buf: Vec::new(),
+            in_message: false,
+            done: false,
+        }
+    }
+}
+
+impl<I: Iterator<Item = Result<crate::OwnedSegment, EdifactError>>> Iterator
+    for MessageWindowsIter<I>
+{
+    type Item = Result<Vec<crate::OwnedSegment>, EdifactError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+        loop {
+            let segment = match self.inner.next() {
+                Some(Ok(s)) => s,
+                Some(Err(e)) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
+                None => {
+                    self.done = true;
+                    // A window that opened (UNH seen) but never closed (no UNT)
+                    // means the stream was truncated — surface as an error.
+                    if self.in_message && !self.buf.is_empty() {
+                        self.in_message = false;
+                        let offset = self.buf.last().map(|s| s.span.end).unwrap_or(0);
+                        return Some(Err(EdifactError::UnexpectedEof { offset }));
+                    }
+                    return None;
+                }
+            };
+
+            match segment.tag.as_str() {
+                "UNH" => {
+                    if self.in_message {
+                        // Malformed: new UNH without a prior UNT.
+                        self.buf.clear();
+                        self.in_message = false;
+                        self.done = true;
+                        return Some(Err(EdifactError::ValidationFailed {
+                            error_count: 1,
+                            first_message:
+                                "UNH seen while a message window is already open (missing UNT)"
+                                    .to_owned(),
+                        }));
+                    }
+                    self.buf.clear();
+                    self.in_message = true;
+                    self.buf.push(segment);
+                }
+                "UNT" if self.in_message => {
+                    self.buf.push(segment);
+                    self.in_message = false;
+                    return Some(Ok(std::mem::take(&mut self.buf)));
+                }
+                _ if self.in_message => {
+                    self.buf.push(segment);
+                }
+                _ => {
+                    // Envelope segment outside a window — skip.
+                }
+            }
+        }
+    }
+}
+
+/// Stream-parse EDIFACT bytes into an iterator of per-message windows.
+///
+/// Each window is a `Vec<Segment<'_>>` spanning one `UNH..UNT` pair, with
+/// segments borrowing from `input` — **zero heap allocations per segment**.
+/// Envelope segments (`UNB`, `UNZ`, …) are skipped automatically.
+///
+/// # Example
+/// ```
+/// use edifact_rs::message_windows_bytes;
+/// let input = b"UNB+UNOA:1+SENDER+RECEIVER+200101:0900+1'\
+///               UNH+1+ORDERS:D:96A:UN'\
+///               BGM+220+PO-001+9'\
+///               UNT+3+1'\
+///               UNZ+1+1'";
+///
+/// let windows: Vec<_> = message_windows_bytes(input)
+///     .collect::<Result<_, _>>()
+///     .unwrap();
+/// assert_eq!(windows.len(), 1);
+/// assert_eq!(windows[0][0].tag, "UNH");
+/// assert_eq!(windows[0].last().unwrap().tag, "UNT");
+/// ```
+pub fn message_windows_bytes(input: &[u8]) -> MessageWindowsSliceIter<'_> {
+    MessageWindowsSliceIter::new(crate::from_bytes(input))
+}
+
+/// Stream-parse EDIFACT from a reader into an iterator of per-message windows.
+///
+/// Each window is a `Vec<OwnedSegment>` spanning one `UNH..UNT` pair.
+/// This variant reads lazily — only enough input to complete one window is
+/// consumed per [`Iterator::next`] call.
+pub fn message_windows_from_reader<R: Read>(
+    reader: R,
+) -> MessageWindowsIter<crate::FromReaderIter<R>> {
+    MessageWindowsIter::new(crate::from_reader_iter(reader))
+}
+
+/// Stream typed messages from a reader by deserializing each `UNH..UNT` window.
+///
+/// This is the highest-level streaming API: it returns one `T` per message,
+/// reading only as much data as needed to complete each window.
+///
+/// Each message window is deserialized via
+/// [`EdifactDeserialize::edifact_deserialize_owned`], which avoids the
+/// intermediate `Vec<Segment<'_>>` allocation incurred by the slice-based path.
+/// Types derived with `#[derive(EdifactDeserialize)]` provide an efficient
+/// override; manual implementations fall back to [`OwnedSegment::as_borrowed`].
+///
+/// # Example
+/// ```ignore
+/// // Assuming `OrdersMessage` implements `EdifactDeserialize`:
+/// let messages: Vec<OrdersMessage> =
+///     deserialize_messages_from_reader::<OrdersMessage, _>(reader)
+///         .collect::<Result<_, _>>()?;
+/// ```
+pub fn deserialize_messages_from_reader<T, R>(
+    reader: R,
+) -> impl Iterator<Item = Result<T, EdifactError>>
+where
+    T: EdifactDeserialize,
+    R: Read,
+{
+    message_windows_from_reader(reader).map(|window| {
+        let window = window?;
+        T::edifact_deserialize_owned(&window)
+    })
+}
+
+/// Stream typed messages from a byte slice by deserializing each `UNH..UNT` window.
+pub fn deserialize_messages_bytes<T>(
+    input: &[u8],
+) -> impl Iterator<Item = Result<T, EdifactError>> + '_
+where
+    T: EdifactDeserialize,
+{
+    message_windows_bytes(input).map(|window| {
+        let window = window?;
+        T::edifact_deserialize(&window)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── manual test impl ──────────────────────────────────────────────────────
+    #[derive(Debug, PartialEq)]
+    struct BgmSegment {
+        doc_name_code: String,
+        pruef_id: String,
+        msg_function: Option<String>,
+    }
+
+    impl EdifactSegmentTag for BgmSegment {
+        const SEGMENT_TAG: &'static str = "BGM";
+    }
+
+    struct NadM;
+
+    impl EdifactSegmentTag for NadM {
+        const SEGMENT_TAG: &'static str = "NAD";
+        const QUALIFIER_PATTERN: Option<&'static str> = Some("M*");
+    }
+
+    struct NadWildcard;
+
+    impl EdifactSegmentTag for NadWildcard {
+        const SEGMENT_TAG: &'static str = "NAD";
+        const QUALIFIER_PATTERN: Option<&'static str> = Some("M*");
+    }
+
+    impl EdifactDeserialize for BgmSegment {
+        fn edifact_deserialize(segments: &[Segment<'_>]) -> Result<Self, EdifactError> {
+            let seg = find_segment(segments, "BGM").ok_or_else(|| {
+                EdifactError::MissingRequiredElement {
+                    tag: "BGM".to_owned(),
+                    element_index: 0,
+                }
+            })?;
+            Ok(Self {
+                doc_name_code: element_str(seg, 0).to_owned(),
+                pruef_id: element_str(seg, 1).to_owned(),
+                msg_function: seg
+                    .element_str(2)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned),
+            })
+        }
+    }
+
+    #[test]
+    fn deserialize_single_segment() {
+        let input = b"BGM+E03+11042+9'";
+        let bgm: BgmSegment = deserialize(input).unwrap();
+        assert_eq!(bgm.doc_name_code, "E03");
+        assert_eq!(bgm.pruef_id, "11042");
+        assert_eq!(bgm.msg_function, Some("9".to_owned()));
+    }
+
+    #[test]
+    fn streaming_deserialize_first_from_bytes() {
+        let input = b"UNH+1+ORDERS:D:11A:UN'BGM+E03+11042+9'UNT+3+1'";
+        let bgm: BgmSegment = deserialize_first_streaming(input).unwrap();
+        assert_eq!(bgm.pruef_id, "11042");
+    }
+
+    #[test]
+    fn streaming_deserialize_all_from_bytes() {
+        let input = b"BGM+E03+11042+9'RFF+AA:1'BGM+E01+11043+9'";
+        let bgms: Vec<BgmSegment> = deserialize_all_streaming(input).unwrap();
+        assert_eq!(bgms.len(), 2);
+        assert_eq!(bgms[0].pruef_id, "11042");
+        assert_eq!(bgms[1].pruef_id, "11043");
+    }
+
+    #[test]
+    fn streaming_deserialize_first_from_reader() {
+        let input = std::io::Cursor::new(b"UNH+1+ORDERS:D:11A:UN'BGM+E03+11042+9'UNT+3+1'".to_vec());
+        let bgm: BgmSegment = deserialize_first_from_reader(input).unwrap();
+        assert_eq!(bgm.pruef_id, "11042");
+    }
+
+    #[test]
+    fn streaming_deserialize_all_from_reader() {
+        let input = std::io::Cursor::new(b"BGM+E03+11042+9'BGM+E01+11043+9'".to_vec());
+        let bgms: Vec<BgmSegment> = deserialize_all_from_reader(input).unwrap();
+        assert_eq!(bgms.len(), 2);
+        assert_eq!(bgms[0].pruef_id, "11042");
+        assert_eq!(bgms[1].pruef_id, "11043");
+    }
+
+    #[test]
+    fn missing_segment_returns_error() {
+        let input = b"DTM+137:20230401:102'";
+        let result: Result<BgmSegment, _> = deserialize(input);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn vec_collects_all_matching_segments() {
+        let input = b"DTM+137:20230401:102'BGM+E03+11042+9'BGM+E01+11043+9'";
+        let bgms: Vec<BgmSegment> = deserialize(input).unwrap();
+        assert_eq!(bgms.len(), 2);
+        assert_eq!(bgms[0].pruef_id, "11042");
+        assert_eq!(bgms[1].pruef_id, "11043");
+    }
+
+    #[test]
+    fn find_qualified_segment_matches_qualifier() {
+        let input = b"NAD+MS+9900001+293'NAD+MR+9900002+293'";
+        let segments: Vec<Segment<'_>> =
+            crate::from_bytes(input).collect::<Result<_, _>>().unwrap();
+        let nad_ms = find_qualified_segment(&segments, "NAD", "MS");
+        let nad_mr = find_qualified_segment(&segments, "NAD", "MR");
+        assert!(nad_ms.is_some());
+        assert!(nad_mr.is_some());
+        assert_eq!(element_str(nad_ms.unwrap(), 0), "MS");
+        assert_eq!(element_str(nad_mr.unwrap(), 0), "MR");
+    }
+
+    #[test]
+    fn round_trip_str_api() {
+        let input = "BGM+E03+11042+9'";
+        let bgm: BgmSegment = deserialize_str(input).unwrap();
+        assert_eq!(bgm.pruef_id, "11042");
+    }
+
+    #[test]
+    fn required_element_extraction() {
+        let input = b"BGM+E03+11042+9'";
+        let segments: Vec<Segment<'_>> =
+            crate::from_bytes(input).collect::<Result<_, _>>().unwrap();
+        let seg = &segments[0];
+
+        assert_eq!(required_element(seg, 0).unwrap(), "E03");
+        assert_eq!(required_element(seg, 1).unwrap(), "11042");
+        // Element 5 doesn't exist
+        assert!(required_element(seg, 5).is_err());
+    }
+
+    #[test]
+    fn optional_element_extraction() {
+        let input = b"BGM+E03+11042+9'BGM+E01++absent'";
+        let segments: Vec<Segment<'_>> =
+            crate::from_bytes(input).collect::<Result<_, _>>().unwrap();
+
+        // First segment
+        assert_eq!(optional_element(&segments[0], 0), Some("E03"));
+        assert_eq!(optional_element(&segments[0], 1), Some("11042"));
+        assert_eq!(optional_element(&segments[0], 5), None);
+
+        // Second segment with empty element
+        assert_eq!(optional_element(&segments[1], 1), None);
+    }
+
+    #[test]
+    fn component_extraction() {
+        let input = b"UNB+UNOA:1+SENDER+RECEIVER+200101:0900+1'";
+        let segments: Vec<Segment<'_>> =
+            crate::from_bytes(input).collect::<Result<_, _>>().unwrap();
+        let seg = &segments[0];
+
+        assert_eq!(required_component(seg, 0, 0).unwrap(), "UNOA");
+        assert_eq!(required_component(seg, 0, 1).unwrap(), "1");
+        // Non-existent component
+        assert!(required_component(seg, 0, 5).is_err());
+    }
+
+    #[test]
+    fn composite_element_helper() {
+        let input = b"UNB+UNOA:1+SENDER+RECEIVER+200101:0900+1'";
+        let segments: Vec<Segment<'_>> =
+            crate::from_bytes(input).collect::<Result<_, _>>().unwrap();
+        let seg = &segments[0];
+
+        let comp = composite_element(seg, 0).unwrap();
+        assert_eq!(comp.len(), 2);
+        assert_eq!(comp.get(0), Some("UNOA"));
+        assert_eq!(comp.get(1), Some("1"));
+        assert_eq!(comp.get(5), None);
+        assert_eq!(comp.get_or_empty(5), "");
+    }
+
+    #[test]
+    fn get_all_components() {
+        // UNB has composite element: UNOA:1
+        let input = b"UNB+UNOA:1+SENDER+RECEIVER+200101:0900+1'";
+        let segments: Vec<Segment<'_>> =
+            crate::from_bytes(input).collect::<Result<_, _>>().unwrap();
+        let seg = &segments[0];
+
+        let comps: Vec<&str> = get_components_iter(seg, 0).collect(); // First element is UNOA:1
+        assert!(!comps.is_empty(), "Expected components but got empty");
+        assert_eq!(comps.len(), 2);
+        assert_eq!(comps[0], "UNOA");
+        assert_eq!(comps[1], "1");
+    }
+
+    #[test]
+    fn qualifier_pattern_matching_supports_exact_and_wildcard() {
+        // Exact match (no wildcard)
+        assert!(qualifier_matches_pattern("MS", "MS"));
+        assert!(!qualifier_matches_pattern("MS", "M")); // Not a prefix match after R-003
+        // Wildcard patterns
+        assert!(qualifier_matches_pattern("MS", "M*"));
+        assert!(qualifier_matches_pattern("MRY", "M*Y"));
+        assert!(!qualifier_matches_pattern("AB", "M*"));
+    }
+
+    /// Comprehensive table-driven tests for `qualifier_matches_pattern`.
+    #[test]
+    fn qualifier_matches_pattern_table() {
+        // (value, pattern, expected)
+        let cases: &[(&str, &str, bool)] = &[
+            // ── empty inputs ────────────────────────────────────────────────
+            ("", "", true),        // empty matches empty
+            ("", "*", true),       // wildcard matches empty string
+            ("A", "", false),      // non-empty does not match empty pattern
+            ("", "A", false),      // empty does not match non-empty literal
+            // ── literal (no wildcard) ────────────────────────────────────────
+            ("MS", "MS", true),
+            ("BY", "BY", true),
+            ("ms", "MS", false),   // case-sensitive
+            ("MSX", "MS", false),  // prefix is NOT a match without wildcard
+            ("M", "MS", false),    // too short
+            // ── single wildcard at the end (prefix match) ────────────────────
+            ("MS", "M*", true),
+            ("MULTI", "MUL*", true),
+            ("AB", "M*", false),
+            ("", "M*", false),     // empty does not start with 'M'
+            // ── single wildcard at the start (suffix match) ──────────────────
+            ("MSG", "*G", true),
+            ("G", "*G", true),
+            ("MSG", "*X", false),
+            ("", "*G", false),
+            // ── wildcard in the middle ───────────────────────────────────────
+            ("MRY", "M*Y", true),
+            ("MAY", "M*Y", true),
+            ("MY", "M*Y", true),   // zero-width wildcard: "M" + "" + "Y"
+            ("MYY", "M*Y", true),  // last 'Y' matches, wildcard = 'Y'
+            ("MAYZ", "M*Y", false),// does not end with 'Y'
+            ("AB", "M*Y", false),
+            // ── bare wildcard (match-all) ────────────────────────────────────
+            ("*", "*", true),      // literal '*' value vs wildcard pattern
+            ("anything", "*", true),
+            ("", "*", true),
+            // ── multiple wildcards ────────────────────────────────────────────
+            ("ABCDE", "A*C*E", true),
+            ("ACE", "A*C*E", true),  // zero-width wildcards
+            ("AXCYE", "A*C*E", true),
+            ("ABCDF", "A*C*E", false),
+            // ── wildcard with empty segment between stars ─────────────────────
+            ("AB", "A**B", true),   // "A**B" → parts ["A", "", "B"] → ends_with_wildcard?
+            // ── pattern longer than value ─────────────────────────────────────
+            ("AB", "A*B*C", false),
+            // ── value contains pattern as substring but must anchor start ─────
+            ("XMS", "MS", false),
+        ];
+
+        for (value, pattern, expected) in cases {
+            let got = qualifier_matches_pattern(value, pattern);
+            assert_eq!(
+                got, *expected,
+                "qualifier_matches_pattern({value:?}, {pattern:?}) expected {expected} but got {got}"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_qualifier_helpers_work() {
+        let input = b"NAD+MS+9900001+293'NAD+MR+9900002+293'";
+        let segments: Vec<Segment<'_>> =
+            crate::from_bytes(input).collect::<Result<_, _>>().unwrap();
+
+        let first = find_segment_typed::<NadM>(&segments).unwrap();
+        assert_eq!(first.element_str(0), Some("MS"));
+
+        let all = find_segments_typed::<NadWildcard>(&segments);
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn segment_accessor_trait_methods_work() {
+        let input = b"UNB+UNOA:1+SENDER+RECEIVER+200101:0900+1'";
+        let segments: Vec<Segment<'_>> =
+            crate::from_bytes(input).collect::<Result<_, _>>().unwrap();
+        let seg = &segments[0];
+
+        assert_eq!(SegmentAccessor::get_element(seg, 1), Some("SENDER"));
+        assert_eq!(SegmentAccessor::required_composite(seg, 0, 1).unwrap(), "1");
+        let parsed: i32 = SegmentAccessor::code_element(seg, 4).unwrap();
+        assert_eq!(parsed, 1);
+        let reps = SegmentAccessor::repeating_components(seg, 3, 0, 2).unwrap();
+        assert_eq!(reps, vec!["200101", "0900"]);
+    }
+
+    #[test]
+    fn group_helpers_detect_contiguity() {
+        struct NadAny;
+        impl EdifactSegmentTag for NadAny {
+            const SEGMENT_TAG: &'static str = "NAD";
+        }
+
+        let contiguous_input = b"NAD+MS+1'NAD+MR+2'RFF+AA:1'";
+        let contiguous_segments: Vec<Segment<'_>> = crate::from_bytes(contiguous_input)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(groups_are_contiguous_by_qualifier::<NadAny>(
+            &contiguous_segments
+        ));
+
+        let non_contiguous_input = b"NAD+MS+1'RFF+AA:1'NAD+MR+2'";
+        let non_contiguous_segments: Vec<Segment<'_>> = crate::from_bytes(non_contiguous_input)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(!groups_are_contiguous_by_qualifier::<NadAny>(
+            &non_contiguous_segments
+        ));
+    }
+
+    #[test]
+    fn group_helpers_collect_contiguous_groups() {
+        struct NadAny;
+        impl EdifactSegmentTag for NadAny {
+            const SEGMENT_TAG: &'static str = "NAD";
+        }
+
+        let input = b"NAD+MS+1'NAD+MR+2'RFF+AA:1'NAD+BY+3'";
+        let segments: Vec<Segment<'_>> =
+            crate::from_bytes(input).collect::<Result<_, _>>().unwrap();
+        let groups = contiguous_groups_by_qualifier::<NadAny>(&segments);
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].len(), 2);
+        assert_eq!(groups[1].len(), 1);
+    }
+
+    // ── MessageWindowsIter tests ──────────────────────────────────────────────
+
+    #[test]
+    fn message_windows_bytes_yields_complete_windows() {
+        let input = b"UNB+UNOA:1+S+R+200101:0900+1'\
+                      UNH+1+ORDERS:D:96A:UN'\
+                      BGM+220+PO-001+9'\
+                      UNT+3+1'\
+                      UNZ+1+1'";
+        let windows: Vec<_> = message_windows_bytes(input)
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0][0].tag, "UNH");
+        assert_eq!(windows[0].last().unwrap().tag, "UNT");
+    }
+
+    #[test]
+    fn message_windows_truncated_stream_returns_error() {
+        // Stream ends after UNH and BGM but without UNT — truncation must be an error
+        let input = b"UNH+1+ORDERS:D:96A:UN'BGM+220+PO-001+9'";
+        let results: Vec<_> = message_windows_bytes(input).collect();
+        assert_eq!(results.len(), 1);
+        assert!(
+            matches!(results[0], Err(EdifactError::UnexpectedEof { .. })),
+            "expected UnexpectedEof for truncated window, got: {:?}",
+            results[0]
+        );
+    }
+
+    #[test]
+    fn message_windows_subsequent_calls_return_none_after_truncation() {
+        let input = b"UNH+1+ORDERS:D:96A:UN'BGM+220+PO-001+9'";
+        let mut iter = message_windows_bytes(input);
+        assert!(matches!(
+            iter.next(),
+            Some(Err(EdifactError::UnexpectedEof { .. }))
+        ));
+        // After the error, the iterator must be fused (done = true)
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn message_windows_unh_without_unt_before_next_unh_returns_error() {
+        let input = b"UNH+1+ORDERS:D:96A:UN'BGM+220+PO-001+9'\
+                      UNH+2+ORDERS:D:96A:UN'BGM+220+PO-002+9'UNT+3+2'";
+        let results: Vec<_> = message_windows_bytes(input).collect();
+        // First item must be an error (UNH before UNT)
+        assert!(
+            matches!(results[0], Err(EdifactError::ValidationFailed { .. })),
+            "expected ValidationFailed, got: {:?}",
+            results[0]
+        );
+    }
+}

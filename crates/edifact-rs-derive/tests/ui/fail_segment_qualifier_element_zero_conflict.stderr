@@ -1,0 +1,5 @@
+error: field `qualifier`: cannot use #[edifact(qualifier = ...)] with a field at element = 0 without component >= 1; the qualifier occupies component 0
+  --> $DIR/fail_segment_qualifier_element_zero_conflict.rs:16:15
+   |
+16 |     #[edifact(element = 0)]
+   |               ^^^^^^^

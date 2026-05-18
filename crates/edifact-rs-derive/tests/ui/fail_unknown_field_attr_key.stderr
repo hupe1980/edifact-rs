@@ -1,0 +1,5 @@
+error: unknown field-level `edifact` key; expected `element`, `component`, `composite`, `group`, or `qualifier`
+  --> $DIR/fail_unknown_field_attr_key.rs:16:28
+   |
+16 |     #[edifact(element = 0, foo = 1)]
+   |                            ^^^

@@ -1,0 +1,54 @@
+error: field `rff`: #[edifact(composite)] is only valid on segment structs
+  --> tests/ui/fail_composite_on_message.rs:26:15
+   |
+26 |     #[edifact(composite)]
+   |               ^^^^^^^^^
+
+error[E0412]: cannot find type `OwnedSegment` in module `edifact_rs`
+  --> tests/ui/fail_composite_on_message.rs:17:34
+   |
+17 | #[derive(DeriveEdifactSerialize, DeriveEdifactDeserialize)]
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^^^ not found in `edifact_rs`
+   |
+   = note: this error originates in the derive macro `DeriveEdifactDeserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider importing this struct
+   |
+ 4 + use crate::support::edifact_rs::OwnedSegment;
+   |
+
+error[E0425]: cannot find function `find_segment_owned` in module `edifact_rs`
+  --> tests/ui/fail_composite_on_message.rs:17:34
+   |
+17 | #[derive(DeriveEdifactSerialize, DeriveEdifactDeserialize)]
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+  ::: tests/ui/support.rs
+   |
+   |     pub fn find_segment<'s, 'd>(segments: &'s [Segment<'d>], tag: &str) -> Option<&'s Segment<'d>> {
+   |     ---------------------------------------------------------------------------------------------- similarly named function `find_segment` defined here
+   |
+   = note: this error originates in the derive macro `DeriveEdifactDeserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider importing this function
+   |
+ 4 + use crate::support::edifact_rs::find_segment_owned;
+   |
+
+error[E0433]: failed to resolve: could not find `CompositeElement` in the crate root
+  --> tests/ui/fail_composite_on_message.rs:17:34
+   |
+17 | #[derive(DeriveEdifactSerialize, DeriveEdifactDeserialize)]
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^^^ could not find `CompositeElement` in the crate root
+   |
+   = note: this error originates in the derive macro `DeriveEdifactDeserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: consider importing this struct
+   |
+ 4 + use crate::support::edifact_rs::CompositeElement;
+   |
+
+error[E0282]: type annotations needed
+  --> tests/ui/fail_composite_on_message.rs:17:34
+   |
+17 | #[derive(DeriveEdifactSerialize, DeriveEdifactDeserialize)]
+   |                                  ^^^^^^^^^^^^^^^^^^^^^^^^ cannot infer type
+   |
+   = note: this error originates in the derive macro `DeriveEdifactDeserialize` (in Nightly builds, run with -Z macro-backtrace for more info)

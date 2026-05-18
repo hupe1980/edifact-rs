@@ -1,0 +1,5 @@
+error: use either #[edifact(qualifier = ...)] or #[edifact(qualifier_from = ...)], not both
+  --> $DIR/fail_qualifier_conflict.rs:14:47
+   |
+14 | #[edifact(segment = "RFF", qualifier = "AGI", qualifier_from = 0)]
+   |                                               ^^^^^^^^^^^^^^

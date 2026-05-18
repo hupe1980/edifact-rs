@@ -1,0 +1,5 @@
+error: expected integer literal
+  --> $DIR/fail_qualifier_from_invalid_format.rs:14:45
+   |
+14 | #[edifact(segment = "RFF", qualifier_from = "0")]
+   |                                             ^^^

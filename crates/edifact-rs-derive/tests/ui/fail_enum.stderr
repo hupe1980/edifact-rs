@@ -1,0 +1,5 @@
+error: EdifactSerialize/EdifactDeserialize only support structs
+  --> tests/ui/fail_enum.rs:14:1
+   |
+14 | enum Message {
+   | ^^^^

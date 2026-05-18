@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  msrv-check:
+    runs-on: ubuntu-latest
+    name: msrv-check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify workspace builds on MSRV
+        run: cargo check --workspace
+
+  docsrs-check:
+    runs-on: ubuntu-latest
+    name: docsrs-check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-01-01
+      - uses: Swatinem/rust-cache@v2
+      - name: Build docs.rs-style docs with warnings denied
+        env:
+          RUSTDOCFLAGS: --cfg docsrs -D warnings
+        run: cargo +nightly doc -p edifact-rs --all-features --no-deps
+
+  feature-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: check-workspace
+            command: cargo check --workspace
+          - name: test-workspace
+            command: cargo test --workspace
+          - name: test-no-default-features
+            command: cargo test -p edifact-rs --no-default-features
+          - name: test-all-features
+            command: cargo test -p edifact-rs --all-features
+          - name: test-all-features-examples
+            command: cargo test -p edifact-rs --all-features --examples
+    name: ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run ${{ matrix.name }}
+        run: ${{ matrix.command }}
+
+  benchmark-smoke:
+    runs-on: ubuntu-latest
+    name: benchmark-smoke
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run criterion benchmark smoke suite
+        run: cargo bench -p edifact-rs --bench bench_criterion -- --noplot --sample-size 10
+      - name: Download latest main benchmark baseline artifact
+        id: download-baseline
+        continue-on-error: true
+        uses: dawidd6/action-download-artifact@v3
+        with:
+          workflow: ci.yml
+          workflow_conclusion: success
+          branch: main
+          name: criterion-baseline-main
+          path: target/
+          if_no_artifact_found: warn
+      - name: Install critcmp
+        if: steps.download-baseline.outcome == 'success'
+        run: cargo install critcmp --locked
+      - name: Save PR benchmark baseline
+        if: steps.download-baseline.outcome == 'success'
+        run: cargo bench -p edifact-rs --bench bench_criterion -- --noplot --sample-size 20 --save-baseline pr
+      - name: Compare PR performance against main baseline
+        if: steps.download-baseline.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # critcmp exits non-zero when any benchmark exceeds --threshold percent.
+          # Uses structured Criterion JSON output — not text-grep on human-readable
+          # output, so the gate is stable across Criterion version upgrades.
+          critcmp main pr --threshold 5 | tee bench-compare.log
+      - name: Baseline unavailable notice
+        if: steps.download-baseline.outcome != 'success'
+        run: echo "No main baseline artifact available yet; skipped PR baseline comparison."
+
+  benchmark-full-baseline:
+    runs-on: ubuntu-latest
+    name: benchmark-full-baseline
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run full criterion suite and save main baseline
+        run: cargo bench -p edifact-rs --bench bench_criterion -- --noplot --sample-size 50 --warm-up-time 2 --measurement-time 8 --save-baseline main
+      - name: Upload criterion baseline artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-baseline-main
+          path: target/criterion
+          if-no-files-found: error
+      - name: Check large-message memory behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/time -v cargo run -p edifact-rs --release --example bench_large_message_memory 2> memory.log
+          peak_rss_kb="$(awk -F': +' '/Maximum resident set size/ {print $2}' memory.log | tail -n1)"
+          if [[ -z "${peak_rss_kb}" ]]; then
+            echo "Failed to read peak RSS from /usr/bin/time output"
+            cat memory.log
+            exit 1
+          fi
+          echo "peak_rss_kb=${peak_rss_kb}"
+          limit_kb=550000
+          if (( peak_rss_kb > limit_kb )); then
+            echo "Peak RSS ${peak_rss_kb}KB exceeds limit ${limit_kb}KB"
+            exit 1
+          fi
+
+  release-check:
+    runs-on: ubuntu-latest
+    name: release-check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify derive crate packages cleanly
+        run: cargo publish --dry-run -p edifact-rs-derive
+      - name: Verify main crate packages cleanly
+        run: cargo publish --dry-run -p edifact-rs
+      - name: Verify crate versions match across workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          derive_ver=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; \
+              print(next(p['version'] for p in pkgs if p['name']=='edifact-rs-derive'))")
+          main_ver=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; \
+              print(next(p['version'] for p in pkgs if p['name']=='edifact-rs'))")
+          echo "edifact-rs-derive=${derive_ver}  edifact-rs=${main_ver}"
+          if [[ "${derive_ver}" != "${main_ver}" ]]; then
+            echo "Version mismatch between crates: derive=${derive_ver} main=${main_ver}"
+            exit 1
+          fi

@@ -1,0 +1,5 @@
+error: field `line`: #[edifact(group)] requires Vec<T>
+  --> $DIR/fail_group_requires_vec.rs:15:15
+   |
+15 |     #[edifact(group)]
+   |               ^^^^^

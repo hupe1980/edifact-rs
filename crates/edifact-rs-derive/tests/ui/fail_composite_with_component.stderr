@@ -1,0 +1,5 @@
+error: field `reference`: #[edifact(component = ...)] cannot be combined with #[edifact(composite)]
+  --> $DIR/fail_composite_with_component.rs:17:28
+   |
+17 |     #[edifact(element = 0, component = 1, composite)]
+   |                            ^^^^^^^^^

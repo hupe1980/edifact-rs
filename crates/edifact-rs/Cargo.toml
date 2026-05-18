@@ -1,0 +1,81 @@
+[package]
+name        = "edifact-rs"
+version     = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Zero-copy EDIFACT parser, writer, serde traits, and extensible validation support"
+readme = "../../README.md"
+repository = "https://github.com/hupe1980/edifact-rs"
+homepage = "https://github.com/hupe1980/edifact-rs"
+documentation = "https://docs.rs/edifact-rs"
+keywords = ["edifact", "edi", "parser", "serde", "unedifact"]
+categories = ["parser-implementations", "encoding"]
+
+[features]
+default = ["derive"]
+derive = ["dep:edifact-rs-derive"]
+diagnostics = ["dep:miette"]
+
+[dependencies]
+memchr    = { workspace = true }
+smallvec  = { workspace = true }
+thiserror = { workspace = true }
+miette    = { workspace = true, optional = true }
+edifact-rs-derive = { version = "0.1.0", path = "../edifact-rs-derive", optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+divan  = { workspace = true }
+bolero = { workspace = true }
+tokio  = { workspace = true }
+
+[[bench]]
+name    = "bench_core"
+harness = false
+
+[[bench]]
+name    = "bench_criterion"
+harness = false
+
+[[example]]
+name = "cookbook_parse_map_validate_write"
+
+[[example]]
+name = "cookbook_typed_derive"
+required-features = ["derive"]
+
+[[example]]
+name = "cookbook_typed_streaming"
+required-features = ["derive"]
+
+[[example]]
+name = "cookbook_diagnostics"
+
+[[example]]
+name = "cookbook_fixture_validation"
+
+[[example]]
+name = "cookbook_profile_error_mapping"
+
+[[example]]
+name = "cookbook_profile_packs"
+
+[[example]]
+name = "cookbook_message_window_streaming"
+required-features = ["derive"]
+
+[[example]]
+name = "cookbook_async_tokio_integration"
+
+[[example]]
+name = "cookbook_streamed_progressive_validation"
+
+[[test]]
+name = "bolero_harness"
+path = "tests/bolero_harness.rs"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

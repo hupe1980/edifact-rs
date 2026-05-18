@@ -1,0 +1,5 @@
+error: EdifactSerialize/EdifactDeserialize only support structs with named fields
+  --> $DIR/fail_tuple_struct.rs:14:1
+   |
+14 | struct Tuple(String);
+   | ^^^^^^

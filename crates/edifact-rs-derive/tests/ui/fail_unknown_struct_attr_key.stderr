@@ -1,0 +1,5 @@
+error: unknown struct-level `edifact` key; expected `segment`, `qualifier`, or `qualifier_from`
+  --> $DIR/fail_unknown_struct_attr_key.rs:14:28
+   |
+14 | #[edifact(segment = "BGM", unknown = "X")]
+   |                            ^^^^^^^

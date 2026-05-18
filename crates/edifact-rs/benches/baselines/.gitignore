@@ -1,0 +1,6 @@
+# Keep named baseline snapshots (e.g. m5), ignore transient comparison output
+**/new/
+**/change/
+
+# Criterion-generated report caches are local artifacts
+report/
