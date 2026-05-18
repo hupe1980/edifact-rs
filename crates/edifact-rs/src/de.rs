@@ -25,7 +25,7 @@ pub trait EdifactDeserialize: Sized {
     /// Deserialize `Self` from a slice of owned EDIFACT segments.
     ///
     /// The default implementation converts each segment to its borrowed form
-    /// via [`OwnedSegment::as_borrowed`] and calls
+    /// via [`crate::OwnedSegment::as_borrowed`] and calls
     /// [`edifact_deserialize`][Self::edifact_deserialize].  Types derived with
     /// `#[derive(EdifactDeserialize)]` override this method to work directly on
     /// the owned data, avoiding the `Vec<Segment>` allocation entirely.
@@ -90,8 +90,8 @@ pub trait EdifactSegmentTag {
     }
 
     /// Like [`matches_segment`][Self::matches_segment] but works directly on an
-    /// [`OwnedSegment`] without incurring the `Vec` allocation of
-    /// [`OwnedSegment::as_borrowed`].
+    /// [`crate::OwnedSegment`] without incurring the `Vec` allocation of
+    /// [`crate::OwnedSegment::as_borrowed`].
     fn matches_owned_segment(seg: &crate::OwnedSegment) -> bool {
         if seg.tag != Self::SEGMENT_TAG {
             return false;
@@ -909,7 +909,7 @@ pub fn message_windows_from_reader<R: Read>(
 /// [`EdifactDeserialize::edifact_deserialize_owned`], which avoids the
 /// intermediate `Vec<Segment<'_>>` allocation incurred by the slice-based path.
 /// Types derived with `#[derive(EdifactDeserialize)]` provide an efficient
-/// override; manual implementations fall back to [`OwnedSegment::as_borrowed`].
+/// override; manual implementations fall back to [`crate::OwnedSegment::as_borrowed`].
 ///
 /// # Example
 /// ```ignore

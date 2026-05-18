@@ -121,7 +121,7 @@ impl DirectoryValidator {
     /// Override the code-list rules function.
     ///
     /// Directories can supply a directory-specific implementation that extends or
-    /// replaces the base rules from [`base_code_list_rules`].
+    /// replaces the base rules from `base_code_list_rules`.
     pub fn with_code_list_rules(mut self, f: CodeListRulesFn) -> Self {
         self.code_list_rules = f;
         self
