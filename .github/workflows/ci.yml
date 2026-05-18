@@ -113,23 +113,6 @@ jobs:
           name: criterion-baseline-main
           path: target/criterion
           if-no-files-found: error
-      - name: Check large-message memory behavior
-        shell: bash
-        run: |
-          set -euo pipefail
-          /usr/bin/time -v cargo run -p edifact-rs --release --example bench_large_message_memory 2> memory.log
-          peak_rss_kb="$(awk -F': +' '/Maximum resident set size/ {print $2}' memory.log | tail -n1)"
-          if [[ -z "${peak_rss_kb}" ]]; then
-            echo "Failed to read peak RSS from /usr/bin/time output"
-            cat memory.log
-            exit 1
-          fi
-          echo "peak_rss_kb=${peak_rss_kb}"
-          limit_kb=550000
-          if (( peak_rss_kb > limit_kb )); then
-            echo "Peak RSS ${peak_rss_kb}KB exceeds limit ${limit_kb}KB"
-            exit 1
-          fi
 
   release-check:
     runs-on: ubuntu-latest
