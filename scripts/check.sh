@@ -90,14 +90,11 @@ step "cargo clippy --all-targets --all-features -- -D warnings" \
 step "cargo doc -p edifact-rs --all-features --no-deps" \
   env RUSTDOCFLAGS="-D warnings" cargo doc -p edifact-rs --all-features --no-deps
 
-# ── 8-9. Publish dry-run ───────────────────────────────────────────────────────
+# ── 8. Publish dry-run (derive only — main crate requires derive to be on crates.io first) ───
 step "cargo publish --dry-run -p edifact-rs-derive" \
   cargo publish --dry-run -p edifact-rs-derive
 
-step "cargo publish --dry-run -p edifact-rs" \
-  cargo publish --dry-run -p edifact-rs
-
-# ── 10. Crate versions match ─────────────────────────────────────────────────
+# ── 9. Crate versions match ────────────────────────────────────────────────────
 step "Crate versions match across workspace" bash -c '
   set -euo pipefail
   derive_ver=$(cargo metadata --no-deps --format-version 1 \

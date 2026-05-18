@@ -123,8 +123,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Verify derive crate packages cleanly
         run: cargo publish --dry-run -p edifact-rs-derive
-      - name: Verify main crate packages cleanly
-        run: cargo package -p edifact-rs
       - name: Verify crate versions match across workspace
         shell: bash
         run: |
