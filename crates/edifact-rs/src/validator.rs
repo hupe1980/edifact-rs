@@ -623,7 +623,7 @@ mod tests {
             .as_deref()
             .expect("expected default hint to be set");
         assert!(hint.contains("Release character"));
-        assert_eq!(issue.error_code, Some("E020"));
+        assert_eq!(issue.error_code, Some("E019"));
     }
 
     #[test]
@@ -642,7 +642,7 @@ mod tests {
             .errors
             .first()
             .expect("expected one issue");
-        assert_eq!(issue.error_code, Some("E009"));
+        assert_eq!(issue.error_code, Some("E021"));
         assert_eq!(issue.segment_tag.as_deref(), Some("BGM"));
         assert_eq!(issue.element_index, Some(2));
         assert_eq!(issue.component_index, Some(1));
