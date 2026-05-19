@@ -710,13 +710,10 @@ impl ValidationReport {
     ///
     /// Searches errors, warnings, and infos in that order.  Returns a lazy
     /// iterator; collect into `Vec` if you need random access.
-    pub fn issues_for_rule_id<'s, 'r>(
-        &'s self,
-        rule_id: &'r str,
-    ) -> impl Iterator<Item = &'s ValidationIssue> + 's
-    where
-        'r: 's,
-    {
+    pub fn issues_for_rule_id<'a>(
+        &'a self,
+        rule_id: &'a str,
+    ) -> impl Iterator<Item = &'a ValidationIssue> + 'a {
         self.iter_issues()
             .filter(move |issue| issue.rule_id.as_deref() == Some(rule_id))
     }
