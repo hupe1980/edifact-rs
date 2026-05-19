@@ -25,14 +25,14 @@ impl<W: Write> Writer<W> {
 
     /// Create a writer with custom delimiters and write a UNA segment first.
     pub fn with_una(mut inner: W, ssa: ServiceStringAdvice) -> Result<Self, EdifactError> {
-        // UNA: component_sep, element_sep, decimal_mark('.'), release_char, space, segment_term
+        // UNA: component_sep, element_sep, decimal_mark, release_char, space, segment_term
         let una = [
             b'U',
             b'N',
             b'A',
             ssa.component_sep,
             ssa.element_sep,
-            b'.',
+            ssa.decimal_mark,
             ssa.release_char,
             b' ',
             ssa.segment_term,
@@ -292,6 +292,7 @@ mod tests {
         assert!(s.contains('!'), "missing element sep: {s}");
         assert!(s.contains('|'), "missing component sep: {s}");
         assert!(s.ends_with('~'), "missing segment term: {s}");
+        assert!(s.contains(','), "missing decimal mark: {s}");
         assert!(!s.contains('+'), "default element sep leaked: {s}");
         assert!(!s.contains(':'), "default component sep leaked: {s}");
         // segment_term '~' is not the default; ensure no default ' leaks (UNA itself aside)

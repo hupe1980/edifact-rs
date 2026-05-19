@@ -613,7 +613,7 @@ mod tests {
             .as_deref()
             .expect("expected default hint to be set");
         assert!(hint.contains("Release character"));
-        assert_eq!(issue.error_code, Some("E019"));
+        assert_eq!(issue.error_code, Some("E020"));
     }
 
     #[test]

@@ -419,7 +419,7 @@ mod tests {
         let result = validate_envelope(&segs);
         // UNH element 1 = "ORDERS:D:11A" — component 3 (controlling agency) is absent.
         assert!(
-            matches!(result, Err(EdifactError::MissingRequiredComponent { ref tag, element_index: 1, .. }) if tag == "UNH"),
+            matches!(result, Err(EdifactError::MissingRequiredComponent { ref tag, element_index: 1, component_index: 3 }) if tag == "UNH"),
             "expected MissingRequiredComponent for truncated UNH message type, got: {result:?}"
         );
     }

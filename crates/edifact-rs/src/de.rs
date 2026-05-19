@@ -318,9 +318,9 @@ where
 /// contiguous run of `T`-matching segments.  No outer `Vec` is allocated —
 /// the caller can break early or collect only as many groups as needed.
 ///
-/// This function uses a single lifetime `'a` for both the slice reference and
-/// the segment data lifetime.  When the slice and data have different lifetimes,
-/// use [`contiguous_groups_by_qualifier`] which separates them.
+/// This function uses separate lifetimes for the slice reference (`'s`) and
+/// the segment data (`'d`), matching the signature of
+/// [`contiguous_groups_by_qualifier`].
 ///
 /// # Example
 /// ```rust,ignore
@@ -328,9 +328,9 @@ where
 ///     process_group(group);
 /// }
 /// ```
-pub fn contiguous_groups_iter<'a, T>(
-    segments: &'a [Segment<'a>],
-) -> impl Iterator<Item = &'a [Segment<'a>]>
+pub fn contiguous_groups_iter<'s, 'd, T>(
+    segments: &'s [Segment<'d>],
+) -> impl Iterator<Item = &'s [Segment<'d>]> + 's
 where
     T: EdifactSegmentTag,
 {
@@ -681,12 +681,20 @@ where
     }
 
     fn required_composite(&'s self, elem: usize, comp: usize) -> Result<&'s str, EdifactError> {
-        <Self as SegmentAccessor>::get_component(self, elem, comp).ok_or_else(|| {
-            EdifactError::MissingRequiredElement {
+        match self.elements.get(elem) {
+            None => Err(EdifactError::MissingRequiredElement {
                 tag: self.tag.to_owned(),
                 element_index: elem,
-            }
-        })
+            }),
+            Some(e) => e
+                .get_component(comp)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| EdifactError::MissingRequiredComponent {
+                    tag: self.tag.to_owned(),
+                    element_index: elem,
+                    component_index: comp,
+                }),
+        }
     }
 
     fn repeating_components_iter(
@@ -696,6 +704,7 @@ where
         count: usize,
     ) -> impl Iterator<Item = Result<&'s str, EdifactError>> + 's {
         let tag = self.tag;
+        let element_exists = self.elements.get(elem).is_some();
         let components = self
             .elements
             .get(elem)
@@ -706,9 +715,19 @@ where
                 .get(idx)
                 .map(|c| c.as_ref())
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| EdifactError::MissingRequiredElement {
-                    tag: tag.to_owned(),
-                    element_index: elem,
+                .ok_or_else(|| {
+                    if element_exists {
+                        EdifactError::MissingRequiredComponent {
+                            tag: tag.to_owned(),
+                            element_index: elem,
+                            component_index: idx,
+                        }
+                    } else {
+                        EdifactError::MissingRequiredElement {
+                            tag: tag.to_owned(),
+                            element_index: elem,
+                        }
+                    }
                 })
         })
     }
