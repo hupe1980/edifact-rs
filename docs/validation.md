@@ -163,8 +163,9 @@ println!("{text}");
 let profile_issues = report.filter_by_rule_prefix("ORDERS-DEMO-");
 println!("{} ORDERS-DEMO issues", profile_issues.total_issues());
 
-// Get issues for a specific rule
-let issues = report.issues_for_rule_id("ORDERS-P001");
+// Get issues for a specific rule (lazy iterator; collect or count as needed)
+let count = report.issues_for_rule_id("ORDERS-P001").count();
+println!("ORDERS-P001 findings: {count}");
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 

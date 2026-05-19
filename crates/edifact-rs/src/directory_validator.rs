@@ -78,7 +78,7 @@ pub(crate) fn base_code_list_rules(tag: &str) -> &'static [(usize, usize, &'stat
 /// appears in the wrong position.  Full sequence validation requires a
 /// state-machine per message type (UN/EDIFACT Segment Tables) which is outside
 /// the scope of this implementation.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DirectoryValidator {
     directory_id: &'static str,
     segment_lookup: SegmentLookupFn,
@@ -91,6 +91,18 @@ pub struct DirectoryValidator {
     enforce_known_tags: bool,
     structure_checks: bool,
     code_list_checks: bool,
+}
+
+impl std::fmt::Debug for DirectoryValidator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DirectoryValidator")
+            .field("directory_id", &self.directory_id)
+            .field("message_type", &self.message_type)
+            .field("enforce_known_tags", &self.enforce_known_tags)
+            .field("structure_checks", &self.structure_checks)
+            .field("code_list_checks", &self.code_list_checks)
+            .finish_non_exhaustive()
+    }
 }
 
 impl DirectoryValidator {

@@ -1,7 +1,7 @@
 # Error Reference 🔴
 
 All errors returned by `edifact-rs` are variants of `EdifactError`. Every variant
-carries a stable, semver-protected code (`E001`–`E020`) accessible via
+carries a stable, semver-protected code (`E001`–`E021`) accessible via
 `err.stable_code()`. The enum is marked `#[non_exhaustive]` so future variants can
 be added without breaking existing match arms.
 
@@ -31,6 +31,7 @@ be added without breaking existing match arms.
 | E018 | `ValidationFailed` | Strict validation | — |
 | E019 | `InvalidReleaseSequence` | Parser | `offset` |
 | E020 | `SegmentTooLong` | Reader parser | `offset` |
+| E021 | `MissingRequiredComponent` | Deserializer | — |
 
 ---
 
@@ -333,6 +334,22 @@ guard against adversarially crafted or truncated input.
 
 **Fix**: Increase `ReaderConfig::max_segment_bytes` if the segment is legitimately
 large, or investigate why the terminator is missing.
+
+---
+
+### E021 — `MissingRequiredComponent`
+
+```
+missing required component {component_index} in element {element_index} of segment {tag}
+```
+
+**When**: The typed deserializer expected a mandatory component within a composite
+element that was present but did not contain the required component.
+
+**Fields**: `tag: String`, `element_index: usize`, `component_index: usize`.
+
+**Fix**: Provide the missing component inside the composite element, or mark the
+field `Option<T>` if it is truly optional.
 
 ---
 

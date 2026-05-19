@@ -71,6 +71,20 @@ impl ProfileRulePack {
     }
 
     /// Restrict this pack to one or more EDIFACT message types from the `UNH` segment.
+    ///
+    /// When a pack has one or more message-type restrictions, its rules are only evaluated
+    /// against messages whose `UNH` element 1, component 0 matches one of the registered
+    /// types (e.g. `"ORDERS"`, `"INVOIC"`).
+    ///
+    /// # Silent-skip behaviour
+    ///
+    /// If the input segments do not contain a `UNH` segment, or if the `UNH` message-type
+    /// element is absent, the pack will **silently skip all rules** rather than returning an
+    /// error.  This is intentional: without a readable message type the pack cannot
+    /// determine whether its rules apply, so it errs on the side of no false positives.
+    ///
+    /// If you need a hard failure on a missing `UNH`, add a dedicated [`ProfileRule`] that
+    /// checks for the segment's presence before other rules run.
     pub fn for_message_type(mut self, message_type: impl Into<String>) -> Self {
         let message_type = message_type.into();
         if !self.message_types.contains(&message_type) {
@@ -424,7 +438,23 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
                 .with_offset(offset);
         }
         EdifactError::MissingRequiredElement { tag, element_index } => {
-            issue = issue.with_segment(tag).with_element_index(element_index as u8);
+            issue = issue.with_segment(tag);
+            if let Ok(idx) = u8::try_from(element_index) {
+                issue = issue.with_element_index(idx);
+            }
+        }
+        EdifactError::MissingRequiredComponent {
+            tag,
+            element_index,
+            component_index,
+        } => {
+            issue = issue.with_segment(tag);
+            if let Ok(ei) = u8::try_from(element_index) {
+                issue = issue.with_element_index(ei);
+            }
+            if let Ok(ci) = u8::try_from(component_index) {
+                issue = issue.with_component_index(ci);
+            }
         }
         EdifactError::InvalidReleaseSequence { offset }
         | EdifactError::InvalidDelimiter { offset, .. }
@@ -600,6 +630,28 @@ mod tests {
             .expect("expected default hint to be set");
         assert!(hint.contains("Release character"));
         assert_eq!(issue.error_code, Some("E019"));
+    }
+
+    #[test]
+    fn missing_required_component_maps_metadata_to_issue() {
+        let mut report = ValidationReport::default();
+        report_error(
+            &mut report,
+            EdifactError::MissingRequiredComponent {
+                tag: "BGM".to_owned(),
+                element_index: 2,
+                component_index: 1,
+            },
+        );
+
+        let issue = report
+            .errors
+            .first()
+            .expect("expected one issue");
+        assert_eq!(issue.error_code, Some("E021"));
+        assert_eq!(issue.segment_tag.as_deref(), Some("BGM"));
+        assert_eq!(issue.element_index, Some(2));
+        assert_eq!(issue.component_index, Some(1));
     }
 
     #[test]
