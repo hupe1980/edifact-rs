@@ -440,6 +440,16 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
         EdifactError::MissingRequiredElement { tag, element_index } => {
             issue = issue.with_segment(tag).with_element_index(element_index as u8);
         }
+        EdifactError::MissingRequiredComponent {
+            tag,
+            element_index,
+            component_index,
+        } => {
+            issue = issue
+                .with_segment(tag)
+                .with_element_index(element_index as u8)
+                .with_component_index(component_index as u8);
+        }
         EdifactError::InvalidReleaseSequence { offset }
         | EdifactError::InvalidDelimiter { offset, .. }
         | EdifactError::InvalidText { offset }
@@ -614,6 +624,28 @@ mod tests {
             .expect("expected default hint to be set");
         assert!(hint.contains("Release character"));
         assert_eq!(issue.error_code, Some("E020"));
+    }
+
+    #[test]
+    fn missing_required_component_maps_metadata_to_issue() {
+        let mut report = ValidationReport::default();
+        report_error(
+            &mut report,
+            EdifactError::MissingRequiredComponent {
+                tag: "BGM".to_owned(),
+                element_index: 2,
+                component_index: 1,
+            },
+        );
+
+        let issue = report
+            .errors
+            .first()
+            .expect("expected one issue");
+        assert_eq!(issue.error_code, Some("E009"));
+        assert_eq!(issue.segment_tag.as_deref(), Some("BGM"));
+        assert_eq!(issue.element_index, Some(2));
+        assert_eq!(issue.component_index, Some(1));
     }
 
     #[test]

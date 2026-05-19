@@ -1,7 +1,7 @@
 # Error Reference 🔴
 
 All errors returned by `edifact-rs` are variants of `EdifactError`. Every variant
-carries a stable, semver-protected code (`E001`–`E020`) accessible via
+carries a stable, semver-protected code (`E001`–`E021`) accessible via
 `err.stable_code()`. The enum is marked `#[non_exhaustive]` so future variants can
 be added without breaking existing match arms.
 
@@ -19,18 +19,19 @@ be added without breaking existing match arms.
 | E006 | `InvalidSegmentTag` | Parser | — |
 | E007 | `InvalidUna` | Parser | — |
 | E008 | `MissingRequiredElement` | Deserializer | — |
-| E009 | `InvalidUtf8` | Writer | — |
-| E010 | `Io` | Reader / Writer | — |
-| E011 | `InvalidSegmentForMessage` | Directory validator | `offset` |
-| E012 | `InvalidElementCount` | Directory validator | `offset` |
-| E013 | `InvalidComponentCount` | Directory validator | `offset` |
-| E014 | `InvalidCodeValue` | Directory validator | `offset` |
-| E015 | `MissingSegment` | Directory validator | — |
-| E016 | `QualifierMismatch` | Typed deserializer | `offset` |
-| E017 | `ConditionalRequirementNotMet` | Profile validator | `offset` |
-| E018 | `ValidationFailed` | Strict validation | — |
-| E019 | `InvalidReleaseSequence` | Parser | `offset` |
-| E020 | `SegmentTooLong` | Reader parser | `offset` |
+| E009 | `MissingRequiredComponent` | Deserializer | — |
+| E010 | `InvalidUtf8` | Writer | — |
+| E011 | `Io` | Reader / Writer | — |
+| E012 | `InvalidSegmentForMessage` | Directory validator | `offset` |
+| E013 | `InvalidElementCount` | Directory validator | `offset` |
+| E014 | `InvalidComponentCount` | Directory validator | `offset` |
+| E015 | `InvalidCodeValue` | Directory validator | `offset` |
+| E016 | `MissingSegment` | Directory validator | — |
+| E017 | `QualifierMismatch` | Typed deserializer | `offset` |
+| E018 | `ConditionalRequirementNotMet` | Profile validator | `offset` |
+| E019 | `ValidationFailed` | Strict validation | — |
+| E020 | `InvalidReleaseSequence` | Parser | `offset` |
+| E021 | `SegmentTooLong` | Reader parser | `offset` |
 
 ---
 
@@ -157,7 +158,23 @@ is truly optional.
 
 ---
 
-### E009 — `InvalidUtf8`
+### E009 — `MissingRequiredComponent`
+
+```
+missing required component {component_index} of element {element_index} in segment {tag}
+```
+
+**When**: The typed deserializer expected a mandatory component within a composite
+element that was present but did not contain the required component.
+
+**Fields**: `tag: String`, `element_index: usize`, `component_index: usize`.
+
+**Fix**: Provide the missing component inside the composite element, or mark the
+field `Option<T>` if it is truly optional.
+
+---
+
+### E010 — `InvalidUtf8`
 
 ```
 serialized output contains invalid UTF-8
@@ -168,7 +185,7 @@ This should never occur in correct usage — file a bug if you see it.
 
 ---
 
-### E010 — `Io`
+### E011 — `Io`
 
 ```
 (transparent — wraps std::io::Error)
@@ -183,7 +200,7 @@ the underlying I/O source.
 
 ---
 
-### E011 — `InvalidSegmentForMessage`
+### E012 — `InvalidSegmentForMessage`
 
 ```
 segment {tag} is not valid for message type {message_type}
@@ -198,7 +215,7 @@ message type.
 
 ---
 
-### E012 — `InvalidElementCount`
+### E013 — `InvalidElementCount`
 
 ```
 segment {tag} has {actual} elements, expected between {min} and {max}
@@ -213,7 +230,7 @@ range.
 
 ---
 
-### E013 — `InvalidComponentCount`
+### E014 — `InvalidComponentCount`
 
 ```
 segment {tag} element {element_index} has {actual} components, expected {expected}
@@ -227,7 +244,7 @@ segment {tag} element {element_index} has {actual} components, expected {expecte
 
 ---
 
-### E014 — `InvalidCodeValue`
+### E015 — `InvalidCodeValue`
 
 ```
 segment {tag} element {element_index}: '{value}' is not a valid code (code list {code_list})
@@ -242,7 +259,7 @@ it will contain a remediation hint.
 
 ---
 
-### E015 — `MissingSegment`
+### E016 — `MissingSegment`
 
 ```
 required segment {tag} is missing from message (position {expected_position})
@@ -256,7 +273,7 @@ required segment {tag} is missing from message (position {expected_position})
 
 ---
 
-### E016 — `QualifierMismatch`
+### E017 — `QualifierMismatch`
 
 ```
 segment {tag} has qualifier '{actual}', expected '{expected}'
@@ -271,7 +288,7 @@ not match the expected value.
 
 ---
 
-### E017 — `ConditionalRequirementNotMet`
+### E018 — `ConditionalRequirementNotMet`
 
 ```
 segment {tag} element {element_index}: conditional requirement not met ({condition})
@@ -287,7 +304,7 @@ triggered the condition.
 
 ---
 
-### E018 — `ValidationFailed`
+### E019 — `ValidationFailed`
 
 ```
 validation failed with {error_count} issue(s); first issue: {first_message}
@@ -303,7 +320,7 @@ fix all issues before calling `validate_strict`.
 
 ---
 
-### E019 — `InvalidReleaseSequence`
+### E020 — `InvalidReleaseSequence`
 
 ```
 invalid release sequence at byte offset {offset}: dangling release character
@@ -319,7 +336,7 @@ escaped.
 
 ---
 
-### E020 — `SegmentTooLong`
+### E021 — `SegmentTooLong`
 
 ```
 segment starting at byte offset {offset} exceeded maximum length of {limit} bytes
@@ -349,10 +366,10 @@ fn handle(err: EdifactError) {
             eprintln!("E001 truncated input at byte {offset}");
         }
         EdifactError::InvalidCodeValue { value, code_list, .. } => {
-            eprintln!("E014 bad code '{value}' in list {code_list}");
+            eprintln!("E015 bad code '{value}' in list {code_list}");
         }
         EdifactError::Io(e) => {
-            eprintln!("E010 I/O: {e}");
+            eprintln!("E011 I/O: {e}");
         }
         other => {
             eprintln!("{} {other}", other.stable_code());
