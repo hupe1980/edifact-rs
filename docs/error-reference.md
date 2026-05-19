@@ -340,7 +340,7 @@ large, or investigate why the terminator is missing.
 ### E021 — `MissingRequiredComponent`
 
 ```
-missing required component {component_index} of element {element_index} in segment {tag}
+missing required component {component_index} in element {element_index} of segment {tag}
 ```
 
 **When**: The typed deserializer expected a mandatory component within a composite
