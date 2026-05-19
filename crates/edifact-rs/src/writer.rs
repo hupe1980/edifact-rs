@@ -71,7 +71,19 @@ impl<W: Write> Writer<W> {
 
     /// Write a raw segment from tag + element string slices.
     ///
-    /// Each element string may contain `:` to separate components.
+    /// Each element string is split on the **active component-separator byte** from the
+    /// configured [`ServiceStringAdvice`][crate::ServiceStringAdvice] to identify component
+    /// boundaries.  The default component separator is `:` (0x3A), but this can differ when a
+    /// non-default `UNA` string was used to construct the writer.
+    ///
+    /// # Delimiter dependency
+    ///
+    /// Callers that embed the literal `:` character in element strings rely on `:` being
+    /// the component separator.  When the writer uses a non-default delimiter set, `:` will
+    /// **not** be treated as a component boundary and the segment will be written incorrectly.
+    ///
+    /// To produce correct output regardless of the active delimiter, prefer
+    /// [`Self::write_segment_parts`] which accepts pre-split component slices.
     pub fn write_raw(&mut self, tag: &str, elements: &[&str]) -> Result<(), EdifactError> {
         self.inner.write_all(tag.as_bytes())?;
         let comp_sep = self.ssa.component_sep;
@@ -245,5 +257,45 @@ mod tests {
         assert_eq!(rt[0].tag, "UNB");
         assert_eq!(rt[0].as_borrowed().element_str(0), Some("UNOA"));
         assert_eq!(rt[1].tag, "UNZ");
+    }
+
+    /// Verify that `Writer::with_una` uses the configured delimiters throughout,
+    /// and that `write_segment_parts` (the delimiter-agnostic API) produces correct
+    /// component separators even with a non-default UNA.
+    #[test]
+    fn with_una_non_default_delimiters() {
+        use crate::tokenizer::ServiceStringAdvice;
+
+        // Custom UNA: comp_sep=|  elem_sep=!  esc=?  dec_mark=,  seg_term=~
+        let ssa = ServiceStringAdvice {
+            component_sep: b'|',
+            element_sep: b'!',
+            release_char: b'?',
+            decimal_mark: b',',
+            segment_term: b'~',
+        };
+
+        let buf = Vec::new();
+        let mut writer = Writer::with_una(buf, ssa).expect("writer creation failed");
+
+        // write_segment_parts: pre-split; no hard-coded `:` in element strings
+        writer
+            .write_segment_parts("BGM", &[vec!["220".to_owned(), "SUB1".to_owned()], vec!["PO1".to_owned()]])
+            .expect("write failed");
+
+        let out = writer.finish().expect("finish failed");
+        let s = std::str::from_utf8(&out).unwrap();
+
+        // Output must use `!` as element separator, `|` as component separator, `~` as terminator.
+        // The writer also emits a UNA header when with_una is used.
+        assert!(s.contains("BGM"), "BGM segment missing: {s}");
+        assert!(s.contains('!'), "missing element sep: {s}");
+        assert!(s.contains('|'), "missing component sep: {s}");
+        assert!(s.ends_with('~'), "missing segment term: {s}");
+        assert!(!s.contains('+'), "default element sep leaked: {s}");
+        assert!(!s.contains(':'), "default component sep leaked: {s}");
+        // segment_term '~' is not the default; ensure no default ' leaks (UNA itself aside)
+        let after_una = s.find("BGM").map(|i| &s[i..]).unwrap_or(s);
+        assert!(!after_una.contains('\''), "default segment term leaked after UNA: {after_una}");
     }
 }

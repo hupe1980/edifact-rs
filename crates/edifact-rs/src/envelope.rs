@@ -56,6 +56,14 @@ pub struct MessageEnvelope {
 /// Returns `Ok((interchange_env, message_envs))` on success,
 /// or `Err(EdifactError::MessageCountMismatch)` / `Err(EdifactError::SegmentCountMismatch)` on
 /// count discrepancies.
+///
+/// # Limitations
+///
+/// Functional group segments (`UNG`/`UNE`) are **not supported**.  If the
+/// input contains `UNG` or `UNE` segments they will be treated as regular
+/// message segments and may cause a [`EdifactError::InvalidSegmentForMessage`]
+/// error or incorrect segment counting.  Strip functional-group wrappers
+/// before calling this function.
 pub fn validate_envelope(
     segments: &[Segment<'_>],
 ) -> Result<(InterchangeEnvelope, Vec<MessageEnvelope>), EdifactError> {
@@ -373,7 +381,11 @@ mod tests {
         let input = b"UNB+UNOA:3++R+200101:0900+1'UNH+1+ORDERS:D:11A:UN:EAN010'BGM+220+PO-1+9'UNT+3+1'UNZ+1+1'";
         let segs = parse(input);
         let result = validate_envelope(&segs);
-        assert!(matches!(result, Err(EdifactError::MissingRequiredElement { tag, .. }) if tag == "UNB"));
+        // Element 1 (sender) exists but is empty ("+") — component 0 is absent.
+        assert!(
+            matches!(result, Err(EdifactError::MissingRequiredComponent { ref tag, element_index: 1, component_index: 0 }) if tag == "UNB"),
+            "expected MissingRequiredComponent for empty sender, got: {result:?}"
+        );
     }
 
     #[test]
@@ -405,7 +417,11 @@ mod tests {
         let input = b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A'BGM+220+PO-1+9'UNT+3+1'UNZ+1+1'";
         let segs = parse(input);
         let result = validate_envelope(&segs);
-        assert!(matches!(result, Err(EdifactError::MissingRequiredElement { tag, .. }) if tag == "UNH"));
+        // UNH element 1 = "ORDERS:D:11A" — component 3 (controlling agency) is absent.
+        assert!(
+            matches!(result, Err(EdifactError::MissingRequiredComponent { ref tag, element_index: 1, .. }) if tag == "UNH"),
+            "expected MissingRequiredComponent for truncated UNH message type, got: {result:?}"
+        );
     }
 
     #[test]

@@ -71,6 +71,20 @@ impl ProfileRulePack {
     }
 
     /// Restrict this pack to one or more EDIFACT message types from the `UNH` segment.
+    ///
+    /// When a pack has one or more message-type restrictions, its rules are only evaluated
+    /// against messages whose `UNH` element 1, component 0 matches one of the registered
+    /// types (e.g. `"ORDERS"`, `"INVOIC"`).
+    ///
+    /// # Silent-skip behaviour
+    ///
+    /// If the input segments do not contain a `UNH` segment, or if the `UNH` message-type
+    /// element is absent, the pack will **silently skip all rules** rather than returning an
+    /// error.  This is intentional: without a readable message type the pack cannot
+    /// determine whether its rules apply, so it errs on the side of no false positives.
+    ///
+    /// If you need a hard failure on a missing `UNH`, add a dedicated [`ProfileRule`] that
+    /// checks for the segment's presence before other rules run.
     pub fn for_message_type(mut self, message_type: impl Into<String>) -> Self {
         let message_type = message_type.into();
         if !self.message_types.contains(&message_type) {

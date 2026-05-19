@@ -286,6 +286,9 @@ where
 }
 
 /// Collect contiguous groups of segments that match `T`.
+///
+/// Each group is a borrowed slice of the original `segments` array.
+/// Use [`contiguous_groups_iter`] to avoid the outer `Vec` allocation.
 pub fn contiguous_groups_by_qualifier<'s, 'd, T>(
     segments: &'s [Segment<'d>],
 ) -> Vec<&'s [Segment<'d>]>
@@ -294,7 +297,6 @@ where
 {
     let mut groups = Vec::new();
     let mut idx = 0;
-
     while idx < segments.len() {
         if T::matches_segment(&segments[idx]) {
             let start = idx;
@@ -307,8 +309,48 @@ where
             idx += 1;
         }
     }
-
     groups
+}
+
+/// Iterate lazily over contiguous groups of segments that match `T`.
+///
+/// Each yielded item is a borrowed slice `&[Segment<'_>]` that forms one
+/// contiguous run of `T`-matching segments.  No outer `Vec` is allocated —
+/// the caller can break early or collect only as many groups as needed.
+///
+/// This function uses a single lifetime `'a` for both the slice reference and
+/// the segment data lifetime.  When the slice and data have different lifetimes,
+/// use [`contiguous_groups_by_qualifier`] which separates them.
+///
+/// # Example
+/// ```rust,ignore
+/// for group in contiguous_groups_iter::<UnaSegment>(&segments) {
+///     process_group(group);
+/// }
+/// ```
+pub fn contiguous_groups_iter<'a, T>(
+    segments: &'a [Segment<'a>],
+) -> impl Iterator<Item = &'a [Segment<'a>]>
+where
+    T: EdifactSegmentTag,
+{
+    let mut idx = 0;
+    let len = segments.len();
+    std::iter::from_fn(move || {
+        // Skip non-matching segments
+        while idx < len && !T::matches_segment(&segments[idx]) {
+            idx += 1;
+        }
+        if idx >= len {
+            return None;
+        }
+        let start = idx;
+        idx += 1;
+        while idx < len && T::matches_segment(&segments[idx]) {
+            idx += 1;
+        }
+        Some(&segments[start..idx])
+    })
 }
 
 /// Return `true` if all segments matching `T` are in one contiguous block.
@@ -428,18 +470,29 @@ pub fn optional_element<'a>(seg: &'a Segment<'_>, idx: usize) -> Option<&'a str>
 /// Extract a required component from a segment element.
 ///
 /// Returns the component value, or an error if the element or component is absent.
+///
+/// Distinguishes between two failure modes:
+/// - [`EdifactError::MissingRequiredElement`] — element `elem_idx` is absent.
+/// - [`EdifactError::MissingRequiredComponent`] — element is present but component `comp_idx` is absent.
 pub fn required_component<'a>(
     seg: &'a Segment<'_>,
     elem_idx: usize,
     comp_idx: usize,
 ) -> Result<&'a str, EdifactError> {
-    seg.elements
+    let elem = seg
+        .elements
         .get(elem_idx)
-        .and_then(|elem| elem.get_component(comp_idx))
-        .filter(|s| !s.is_empty())
         .ok_or_else(|| EdifactError::MissingRequiredElement {
             tag: seg.tag.to_owned(),
             element_index: elem_idx,
+        })?;
+
+    elem.get_component(comp_idx)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| EdifactError::MissingRequiredComponent {
+            tag: seg.tag.to_owned(),
+            element_index: elem_idx,
+            component_index: comp_idx,
         })
 }
 
@@ -561,12 +614,20 @@ pub trait SegmentAccessor<'a> {
     /// Get required non-empty composite component.
     fn required_composite(&'a self, elem: usize, comp: usize) -> Result<&'a str, EdifactError>;
     /// Get `count` required components starting at `start_idx` from element `elem`.
+    ///
+    /// Allocates a `Vec`.  For a zero-alloc alternative, use
+    /// [`repeating_components_iter`][Self::repeating_components_iter] and
+    /// consume the iterator directly without collecting.
     fn repeating_components(
         &'a self,
         elem: usize,
         start_idx: usize,
         count: usize,
-    ) -> Result<Vec<&'a str>, EdifactError>;
+    ) -> Result<Vec<&'a str>, EdifactError> {
+        // Default implementation delegates to the zero-alloc iterator and
+        // collects.  Implementors that can do better should override this.
+        self.repeating_components_iter(elem, start_idx, count).collect()
+    }
 
     /// Iterate over `count` required components starting at `start_idx` from element `elem`.
     ///
@@ -626,31 +687,6 @@ where
                 element_index: elem,
             }
         })
-    }
-
-    fn repeating_components(
-        &'s self,
-        elem: usize,
-        start_idx: usize,
-        count: usize,
-    ) -> Result<Vec<&'s str>, EdifactError> {
-        let comp =
-            self.get_composite(elem)
-                .ok_or_else(|| EdifactError::MissingRequiredElement {
-                    tag: self.tag.to_owned(),
-                    element_index: elem,
-                })?;
-
-        (start_idx..start_idx + count)
-            .map(|idx| {
-                comp.get(idx).filter(|s| !s.is_empty()).ok_or_else(|| {
-                    EdifactError::MissingRequiredElement {
-                        tag: self.tag.to_owned(),
-                        element_index: elem,
-                    }
-                })
-            })
-            .collect()
     }
 
     fn repeating_components_iter(

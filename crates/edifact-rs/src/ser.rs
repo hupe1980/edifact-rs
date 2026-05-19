@@ -96,20 +96,22 @@ impl<T: EdifactSerialize> EdifactSerialize for [T] {
     }
 }
 
-macro_rules! impl_serialize_via_display {
+macro_rules! impl_serialize_int {
     ($($t:ty),+ $(,)?) => {
         $(
             impl EdifactSerialize for $t {
                 fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
-                    // Use a stack buffer to avoid heap allocation for short numeric values.
-                    // 40 bytes covers i128::MIN ("-170141183460469231731687303715884105728") + NUL.
+                    // Stack buffer: 40 bytes covers i128::MIN
+                    // ("-170141183460469231731687303715884105728") exactly.
+                    // Integer Display lengths are bounded; floats must NOT use this path.
                     let mut buf = [0u8; 40];
                     let s = {
                         use std::io::Write as _;
                         let mut cursor = std::io::Cursor::new(&mut buf[..]);
-                        write!(cursor, "{}", self).expect("numeric format into fixed buffer");
+                        // SAFETY: integer Display is bounded; buf is large enough.
+                        write!(cursor, "{}", self).expect("integer format into fixed buffer");
                         let len = cursor.position() as usize;
-                        std::str::from_utf8(&buf[..len]).expect("numeric output is valid UTF-8")
+                        std::str::from_utf8(&buf[..len]).expect("integer output is valid UTF-8")
                     };
                     emitter.emit(EdifactEvent::Element { value: s })
                 }
@@ -118,9 +120,27 @@ macro_rules! impl_serialize_via_display {
     };
 }
 
-impl_serialize_via_display!(
-    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, f32, f64, bool
+// Boolean is also bounded (max "false" = 5 bytes).
+impl_serialize_int!(
+    u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, bool
 );
+
+// f32/f64 Display length is unbounded (e.g. f64::MAX formats to 309 chars).
+// Use heap allocation to avoid a panic on extreme values.
+macro_rules! impl_serialize_float {
+    ($($t:ty),+ $(,)?) => {
+        $(
+            impl EdifactSerialize for $t {
+                fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
+                    let s = self.to_string();
+                    emitter.emit(EdifactEvent::Element { value: &s })
+                }
+            }
+        )+
+    };
+}
+
+impl_serialize_float!(f32, f64);
 
 // ── public API ────────────────────────────────────────────────────────────────
 
@@ -146,10 +166,10 @@ pub fn to_bytes<T: EdifactSerialize>(value: &T) -> Result<Vec<u8>, EdifactError>
 ///
 /// # Allocations
 ///
-/// This function allocates twice: once for the `Vec<u8>` produced by
-/// [`to_bytes`], and once to convert that buffer into a `String`.  When you
-/// only need the raw bytes (e.g. for a network write), prefer [`to_bytes`]
-/// directly to avoid the second allocation.
+/// Allocates one `Vec<u8>` via [`to_bytes`].  The subsequent conversion to
+/// `String` reuses that allocation in-place via [`String::from_utf8`] — no
+/// second allocation occurs.  When you only need raw bytes (e.g. for a network
+/// write), prefer [`to_bytes`] directly.
 pub fn to_edifact_string<T: EdifactSerialize>(value: &T) -> Result<String, EdifactError> {
     let bytes = to_bytes(value)?;
     String::from_utf8(bytes).map_err(|_| EdifactError::InvalidUtf8)
@@ -238,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn numeric_types_serialize_via_display() {
+    fn integer_types_serialize_without_alloc() {
         let mut emitter = VecEmitter::default();
         42u32.edifact_serialize(&mut emitter).unwrap();
         assert_eq!(
@@ -247,6 +267,31 @@ mod tests {
                 value: "42".to_owned()
             }
         );
+        // i128::MIN should fit exactly in the 40-byte buffer
+        let mut emitter2 = VecEmitter::default();
+        i128::MIN.edifact_serialize(&mut emitter2).unwrap();
+        assert_eq!(
+            emitter2.events[0],
+            OwnedEdifactEvent::Element {
+                value: "-170141183460469231731687303715884105728".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn float_extremes_do_not_panic() {
+        // f64::MAX Display is 309 chars; must not overflow fixed buffer.
+        let mut emitter = VecEmitter::default();
+        f64::MAX.edifact_serialize(&mut emitter).unwrap();
+        let s = match &emitter.events[0] {
+            OwnedEdifactEvent::Element { value } => value.clone(),
+            _ => panic!("expected Element event"),
+        };
+        assert!(!s.is_empty());
+        // f32::MAX too
+        let mut emitter2 = VecEmitter::default();
+        f32::MAX.edifact_serialize(&mut emitter2).unwrap();
+        assert!(matches!(&emitter2.events[0], OwnedEdifactEvent::Element { .. }));
     }
 
     #[test]

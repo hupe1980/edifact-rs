@@ -37,6 +37,30 @@
 //!     pub lines: Vec<LinSegment>,
 //! }
 //! ```
+//!
+//! # `#[edifact(group)]` and `Vec<T>` fields
+//!
+//! The `#[edifact(group)]` attribute marks a `Vec<T>` field as a contiguous group of
+//! repeated segments.  Without the attribute, `Vec<T>` on a segment struct collects
+//! all matching segments from the window into the `Vec`.
+//!
+//! **Note**: `#[edifact(group)]` is a documentation and diagnostic attribute only — the
+//! generated deserialization code for `Vec<T>` is identical whether the attribute is
+//! present or absent.  Its value is in self-documenting intent and in enabling future
+//! compile-time group-boundary enforcement.
+//!
+//! # Non-`String` fields and `Display` / `FromStr`
+//!
+//! Non-`String` field types (e.g. `u32`, `bool`, your own newtype) are serialized via
+//! `Display` and deserialized via `FromStr`.  The derive macro does **not** add a
+//! compile-time bound; if the type does not implement both traits the generated code
+//! will fail to compile with a standard "trait not satisfied" error.
+//!
+//! To avoid surprises, ensure any non-`String` field type implements both:
+//! ```ignore
+//! impl std::fmt::Display for MyCode { ... }
+//! impl std::str::FromStr for MyCode { ... }
+//! ```
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;

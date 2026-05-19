@@ -16,8 +16,8 @@ jobs:
         with:
           toolchain: 1.85.0
       - uses: Swatinem/rust-cache@v2
-      - name: Verify workspace builds on MSRV
-        run: cargo check --workspace
+      - name: Verify workspace builds and tests pass on MSRV
+        run: cargo test --workspace --locked
 
   docsrs-check:
     runs-on: ubuntu-latest
@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-01-01
+          toolchain: nightly
       - uses: Swatinem/rust-cache@v2
       - name: Build docs.rs-style docs with warnings denied
         env:

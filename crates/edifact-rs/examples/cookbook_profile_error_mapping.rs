@@ -93,7 +93,7 @@ fn extract_violations(report: &ValidationReport) -> Vec<OrdersViolation> {
             .to_owned();
         violations.push(OrdersViolation::UnsupportedFunctionCode { code });
     }
-    if !report.issues_for_rule_id("ORDERS-P002-REF").is_empty() {
+    if report.issues_for_rule_id("ORDERS-P002-REF").next().is_some() {
         violations.push(OrdersViolation::MissingPoReference);
     }
 
@@ -181,7 +181,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
         tiny_limit_report.has_warnings(),
         "expected a segment-count warning"
     );
-    let seg_count_issues = tiny_limit_report.issues_for_rule_id("ORDERS-P099-SEGCOUNT");
+    let seg_count_issues: Vec<_> = tiny_limit_report.issues_for_rule_id("ORDERS-P099-SEGCOUNT").collect();
     println!("segment-count issue: {}", seg_count_issues[0].message);
 
     println!("All profile error-mapping examples passed.");

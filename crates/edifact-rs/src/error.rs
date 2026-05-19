@@ -131,6 +131,21 @@ pub enum EdifactError {
         element_index: usize,
     },
 
+    /// Missing required component in a composite element.
+    ///
+    /// The element is present, but the required component at the given index is absent or empty.
+    #[error(
+        "missing required component {component_index} in element {element_index} of segment {tag}"
+    )]
+    MissingRequiredComponent {
+        /// Segment tag containing the composite element.
+        tag: String,
+        /// Zero-based element index of the composite.
+        element_index: usize,
+        /// Zero-based component index that was absent.
+        component_index: usize,
+    },
+
     /// Output serialization produced invalid UTF-8.
     ///
     /// This is an internal consistency error; the writer should never produce non-UTF-8 output.
@@ -301,6 +316,7 @@ impl EdifactError {
             Self::InvalidSegmentTag(_) => "E006",
             Self::InvalidUna => "E007",
             Self::MissingRequiredElement { .. } => "E008",
+            Self::MissingRequiredComponent { .. } => "E008",
             Self::InvalidUtf8 => "E009",
             Self::Io(_) => "E010",
             Self::InvalidSegmentForMessage { .. } => "E011",
@@ -338,6 +354,9 @@ impl EdifactError {
             }
             Self::MissingRequiredElement { .. } => {
                 Some("Provide all mandatory elements for the segment per directory rules")
+            }
+            Self::MissingRequiredComponent { .. } => {
+                Some("Provide all mandatory components for the composite element per directory rules")
             }
             Self::InvalidSegmentForMessage { .. } => {
                 Some("Remove unsupported segment or switch to the correct message type")
@@ -429,6 +448,11 @@ impl miette::Diagnostic for EdifactError {
             Self::MissingRequiredElement { tag, element_index } => Some(Box::new(format!(
                 "Segment {tag} requires element at index {element_index}",
             ))),
+            Self::MissingRequiredComponent { tag, element_index, component_index } => {
+                Some(Box::new(format!(
+                    "Segment {tag} element {element_index} requires component at index {component_index}",
+                )))
+            }
             Self::Io(e) => Some(Box::new(format!("I/O error: {e}"))),
             Self::InvalidSegmentForMessage { tag, message_type, .. } => Some(Box::new(format!(
                 "Segment {tag} should not appear in a {message_type} message. \
@@ -479,6 +503,10 @@ impl miette::Diagnostic for EdifactError {
 // ── validation report ─────────────────────────────────────────────────────────
 
 /// Priority level for a validation error or warning.
+///
+/// Marked `#[non_exhaustive]` so that adding new severity levels in future
+/// releases is not a breaking change for downstream match arms.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ValidationSeverity {
     /// Structural parse failure; processing cannot continue.
@@ -507,8 +535,14 @@ pub struct ValidationIssue {
     /// Profile/MIG rule identifier, if applicable.
     pub rule_id: Option<String>,
     /// Element index (0-based), if known.
+    ///
+    /// `u8` is sufficient: EDIFACT segments have at most 99 data elements per
+    /// the UN/EDIFACT standard, so an index fits comfortably in one byte.
     pub element_index: Option<u8>,
     /// Component index (0-based), if known.
+    ///
+    /// `u8` is sufficient: composite data elements have at most 99 components
+    /// per the UN/EDIFACT standard.
     pub component_index: Option<u8>,
     /// Suggested remediation (if available).
     pub suggestion: Option<String>,
@@ -571,7 +605,26 @@ impl ValidationIssue {
         self.suggestion = Some(suggestion.into());
         self
     }
+
+    /// Short label for the severity level, suitable for display.
+    #[must_use]
+    pub fn severity_label(&self) -> &'static str {
+        match self.severity {
+            ValidationSeverity::Critical => "CRITICAL",
+            ValidationSeverity::Error => "ERROR",
+            ValidationSeverity::Warning => "WARNING",
+            ValidationSeverity::Info => "INFO",
+        }
+    }
 }
+
+impl std::fmt::Display for ValidationIssue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "[{}] {}", self.severity_label(), self.message)
+    }
+}
+
+impl std::error::Error for ValidationIssue {}
 
 /// A collection of validation results: errors, warnings, and info.
 ///
@@ -622,12 +675,16 @@ impl ValidationReport {
         self.errors.is_empty()
     }
 
-    /// Convert to a Result: Ok if no errors, Err if errors exist.
-    pub fn result(self) -> Result<Self, Vec<ValidationIssue>> {
+    /// Convert to a `Result`.
+    ///
+    /// Returns `Ok(self)` when there are no errors.  Returns `Err(self)` when
+    /// there is at least one error-level issue, **preserving warnings and infos**
+    /// in the `Err` variant so callers can inspect the full report.
+    pub fn result(self) -> Result<Self, Self> {
         if self.is_valid() {
             Ok(self)
         } else {
-            Err(self.errors)
+            Err(self)
         }
     }
 
@@ -649,11 +706,16 @@ impl ValidationReport {
         !self.errors.is_empty() || !self.warnings.is_empty() || !self.infos.is_empty()
     }
 
-    /// Return all issues matching an exact profile/MIG rule identifier.
-    pub fn issues_for_rule_id<'a>(&'a self, rule_id: &str) -> Vec<&'a ValidationIssue> {
+    /// Iterate over all issues matching an exact profile/MIG rule identifier.
+    ///
+    /// Searches errors, warnings, and infos in that order.  Returns a lazy
+    /// iterator; collect into `Vec` if you need random access.
+    pub fn issues_for_rule_id<'a>(
+        &'a self,
+        rule_id: &'a str,
+    ) -> impl Iterator<Item = &'a ValidationIssue> {
         self.iter_issues()
-            .filter(|issue| issue.rule_id.as_deref() == Some(rule_id))
-            .collect()
+            .filter(move |issue| issue.rule_id.as_deref() == Some(rule_id))
     }
 
     /// Return a cloned report filtered by `pred`.
@@ -976,7 +1038,7 @@ mod tests {
         assert!(orders_family.has_errors());
         assert!(!orders_family.has_warnings());
 
-        let exact = report.issues_for_rule_id("INVOIC-P001");
+        let exact: Vec<_> = report.issues_for_rule_id("INVOIC-P001").collect();
         assert_eq!(exact.len(), 1);
         assert_eq!(exact[0].message, "invoic policy warning");
     }
