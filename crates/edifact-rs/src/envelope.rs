@@ -61,7 +61,7 @@ pub struct MessageEnvelope {
 ///
 /// Functional group segments (`UNG`/`UNE`) are **not supported**.  If the
 /// input contains `UNG` or `UNE` segments they will be treated as regular
-/// message segments and may cause a [`EdifactError::InvalidSegmentForMessage`]
+/// message segments and may cause an [`EdifactError::InvalidSegmentForMessage`]
 /// error or incorrect segment counting.  Strip functional-group wrappers
 /// before calling this function.
 pub fn validate_envelope(

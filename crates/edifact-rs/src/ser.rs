@@ -127,8 +127,8 @@ impl_serialize_int!(
 
 // Rust's float Display picks the shortest round-trip decimal representation,
 // which may be fixed-point or scientific notation depending on the magnitude.
-// Worst-case lengths are f64::MAX at 309 chars (fixed-point) and f32::MAX at
-// 39 chars. A 320-byte stack buffer covers all cases without heap allocation.
+// A 320-byte stack buffer is a conservative upper bound for all finite f32
+// and f64 values, avoiding heap allocation.
 //
 // NOTE: Rust's Display always uses `.` as the decimal separator. The decimal
 // mark configured in `ServiceStringAdvice.decimal_mark` (UNA byte 5) is NOT
@@ -296,7 +296,7 @@ mod tests {
 
     #[test]
     fn float_extremes_do_not_panic() {
-        // Rust Display for f64 picks the shortest round-trip form; f64::MAX is 309 chars (fixed-point).
+        // Rust Display for f64 picks the shortest round-trip form; a 320-byte buffer covers all values.
         let mut emitter = VecEmitter::default();
         f64::MAX.edifact_serialize(&mut emitter).unwrap();
         let s = match &emitter.events[0] {

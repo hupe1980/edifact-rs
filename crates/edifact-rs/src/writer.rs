@@ -82,6 +82,11 @@ impl<W: Write> Writer<W> {
     /// the component separator.  When the writer uses a non-default delimiter set, `:` will
     /// **not** be treated as a component boundary and the segment will be written incorrectly.
     ///
+    /// **UTF-8 safety**: EDIFACT syntax requires all delimiter bytes to be single-byte ASCII
+    /// characters (values 0x00–0x7F).  Non-ASCII delimiter bytes would bisect multi-byte UTF-8
+    /// sequences in data values and produce malformed output.  All fields of
+    /// [`ServiceStringAdvice`][crate::ServiceStringAdvice] must therefore hold ASCII byte values.
+    ///
     /// To produce correct output regardless of the active delimiter, prefer
     /// [`Self::write_segment_parts`] which accepts pre-split component slices.
     pub fn write_raw(&mut self, tag: &str, elements: &[&str]) -> Result<(), EdifactError> {
