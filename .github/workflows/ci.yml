@@ -88,11 +88,19 @@ jobs:
         if: steps.download-baseline.outcome == 'success'
         shell: bash
         run: |
-          set -euo pipefail
-          # critcmp exits non-zero when any benchmark exceeds --threshold percent.
-          # Uses structured Criterion JSON output — not text-grep on human-readable
-          # output, so the gate is stable across Criterion version upgrades.
-          critcmp main pr --threshold 5 | tee bench-compare.log
+          set -uo pipefail
+          # critcmp exits non-zero both on regressions and when there are no
+          # matching benchmarks (e.g. baseline pre-dates a benchmark rename).
+          # Use an `if` so bash does not apply set -e to the condition itself,
+          # then distinguish the two failure modes from the captured output.
+          if output=$(critcmp main pr --threshold 5 2>&1); then
+            echo "$output" | tee bench-compare.log
+          elif echo "$output" | grep -qi "no benchmark comparisons"; then
+            echo "No comparable benchmarks found; the main baseline may be from a different benchmark set. Skipping regression gate."
+          else
+            echo "$output" | tee bench-compare.log
+            exit 1
+          fi
       - name: Baseline unavailable notice
         if: steps.download-baseline.outcome != 'success'
         run: echo "No main baseline artifact available yet; skipped PR baseline comparison."
