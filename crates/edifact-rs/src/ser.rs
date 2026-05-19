@@ -125,9 +125,10 @@ impl_serialize_int!(
     u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, bool
 );
 
-// Rust's `Display` for floats uses full decimal notation (not scientific):
-// f64::MAX formats to 309 chars and f32::MAX to 39 chars. `to_string()` (heap)
-// avoids needing an oversized fixed-size stack buffer for extreme values.
+// Rust's float Display picks the shortest round-trip decimal representation,
+// which may be fixed-point or scientific notation depending on the magnitude.
+// Worst-case lengths are f64::MAX at 309 chars (fixed-point) and f32::MAX at
+// 39 chars. A 320-byte stack buffer covers all cases without heap allocation.
 //
 // NOTE: Rust's Display always uses `.` as the decimal separator. The decimal
 // mark configured in `ServiceStringAdvice.decimal_mark` (UNA byte 5) is NOT
@@ -139,8 +140,16 @@ macro_rules! impl_serialize_float {
         $(
             impl EdifactSerialize for $t {
                 fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
-                    let s = self.to_string();
-                    emitter.emit(EdifactEvent::Element { value: &s })
+                    use std::io::Write as _;
+                    let mut buf = [0u8; 320];
+                    let written = {
+                        let mut w: &mut [u8] = &mut buf;
+                        write!(w, "{self}").expect("float Display exceeded 320-byte stack buffer");
+                        320 - w.len()
+                    };
+                    let s = std::str::from_utf8(&buf[..written])
+                        .expect("float Display is always ASCII");
+                    emitter.emit(EdifactEvent::Element { value: s })
                 }
             }
         )+
@@ -287,7 +296,7 @@ mod tests {
 
     #[test]
     fn float_extremes_do_not_panic() {
-        // Rust Display for f64 uses full decimal notation: f64::MAX is 309 chars.
+        // Rust Display for f64 picks the shortest round-trip form; f64::MAX is 309 chars (fixed-point).
         let mut emitter = VecEmitter::default();
         f64::MAX.edifact_serialize(&mut emitter).unwrap();
         let s = match &emitter.events[0] {

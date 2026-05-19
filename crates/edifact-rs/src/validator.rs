@@ -438,17 +438,23 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
                 .with_offset(offset);
         }
         EdifactError::MissingRequiredElement { tag, element_index } => {
-            issue = issue.with_segment(tag).with_element_index(element_index as u8);
+            issue = issue.with_segment(tag);
+            if let Ok(idx) = u8::try_from(element_index) {
+                issue = issue.with_element_index(idx);
+            }
         }
         EdifactError::MissingRequiredComponent {
             tag,
             element_index,
             component_index,
         } => {
-            issue = issue
-                .with_segment(tag)
-                .with_element_index(element_index as u8)
-                .with_component_index(component_index as u8);
+            issue = issue.with_segment(tag);
+            if let Ok(ei) = u8::try_from(element_index) {
+                issue = issue.with_element_index(ei);
+            }
+            if let Ok(ci) = u8::try_from(component_index) {
+                issue = issue.with_component_index(ci);
+            }
         }
         EdifactError::InvalidReleaseSequence { offset }
         | EdifactError::InvalidDelimiter { offset, .. }
