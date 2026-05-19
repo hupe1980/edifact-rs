@@ -127,6 +127,12 @@ impl_serialize_int!(
 
 // f32/f64 Display length is unbounded (e.g. f64::MAX formats to 309 chars).
 // Use heap allocation to avoid a panic on extreme values.
+//
+// NOTE: Rust's Display always uses `.` as the decimal separator. The decimal
+// mark configured in `ServiceStringAdvice.decimal_mark` (UNA byte 5) is NOT
+// respected by these impls. If your interchange declares a different decimal
+// mark (e.g. `,`), wrap the value in a newtype whose `EdifactSerialize` impl
+// formats with the correct separator.
 macro_rules! impl_serialize_float {
     ($($t:ty),+ $(,)?) => {
         $(
