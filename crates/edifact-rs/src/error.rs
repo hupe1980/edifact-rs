@@ -639,6 +639,16 @@ impl ValidationReport {
             .chain(self.infos.iter())
     }
 
+    /// Iterate over all issues in severity order.  Alias for [`iter_issues`][Self::iter_issues].
+    pub fn issues(&self) -> impl Iterator<Item = &ValidationIssue> {
+        self.iter_issues()
+    }
+
+    /// Return `true` if the report contains any issues (errors, warnings, or infos).
+    pub fn has_any_issues(&self) -> bool {
+        !self.errors.is_empty() || !self.warnings.is_empty() || !self.infos.is_empty()
+    }
+
     /// Return all issues matching an exact profile/MIG rule identifier.
     pub fn issues_for_rule_id<'a>(&'a self, rule_id: &str) -> Vec<&'a ValidationIssue> {
         self.iter_issues()

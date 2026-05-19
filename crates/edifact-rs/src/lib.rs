@@ -63,7 +63,7 @@
 //!
 //! - Segment and element text must decode as UTF-8 (`E003` on failure).
 //! - Release characters must escape exactly one following byte.
-//!   A trailing `?` at end-of-input is rejected (`E018`).
+//!   A trailing `?` at end-of-input is rejected (`E019`).
 //! - Malformed delimiters and truncated segments are reported with stable
 //!   error codes rather than panicking.
 //!
@@ -155,19 +155,19 @@
 //! A native zero-copy streaming async API is tracked as a future roadmap item.
 // ── core modules ──────────────────────────────────────────────────────────────
 pub mod directory_validator;
-pub mod envelope;
+pub(crate) mod envelope;
 /// Error types and validation reporting primitives.
-pub mod error;
+pub(crate) mod error;
 /// Core zero-copy and owned EDIFACT data model types.
-pub mod model;
-pub mod parser;
-pub mod tokenizer;
-pub mod validator;
-pub mod writer;
+pub(crate) mod model;
+pub(crate) mod parser;
+pub(crate) mod tokenizer;
+pub(crate) mod validator;
+pub(crate) mod writer;
 
 // ── typed serialization layer ─────────────────────────────────────────────────
 pub mod de;
-pub mod event;
+pub(crate) mod event;
 pub mod ser;
 
 // ── flat re-exports: core ─────────────────────────────────────────────────────
@@ -186,23 +186,45 @@ pub use validator::{
 pub use writer::Writer;
 
 // ── flat re-exports: serde ────────────────────────────────────────────────────
+
+/// User-facing deserialization API.
 pub use de::{
     CompositeElement, EdifactCompositeDeserialize, EdifactDeserialize, EdifactSegmentTag,
-    MessageWindowsIter, MessageWindowsSliceIter, SegmentAccessor, composite_element,
-    contiguous_groups_by_qualifier, deserialize, deserialize_all_from_reader,
+    MessageWindowsIter, MessageWindowsSliceIter, SegmentAccessor,
+    deserialize, deserialize_all_from_reader,
     deserialize_all_streaming, deserialize_first_from_reader, deserialize_first_streaming,
-    deserialize_messages_bytes, deserialize_messages_from_reader, deserialize_str, element_str,
+    deserialize_messages_bytes, deserialize_messages_from_reader, deserialize_str,
+    groups_are_contiguous_by_qualifier,
+    message_windows_bytes, message_windows_from_reader,
+};
+
+/// Low-level helper functions for working with raw segments.
+///
+/// These are also used internally by `#[derive(EdifactDeserialize)]` generated code.
+pub mod helpers {
+    pub use crate::de::{
+        composite_element, contiguous_groups_by_qualifier, element_str,
+        find_qualified_segment, find_qualified_segment_owned, find_segment, find_segment_owned,
+        find_segment_typed, find_segments_iter, find_segments_typed, get_components_iter,
+        optional_component, optional_element, qualifier_matches_pattern,
+        required_component, required_element,
+    };
+}
+
+// Re-export helpers at root with doc(hidden) for macro-generated code compatibility.
+#[doc(hidden)]
+pub use de::{
+    composite_element, contiguous_groups_by_qualifier, element_str,
     find_qualified_segment, find_qualified_segment_owned, find_segment, find_segment_owned,
     find_segment_typed, find_segments_iter, find_segments_typed, get_components_iter,
-    groups_are_contiguous_by_qualifier,
-    message_windows_bytes, message_windows_from_reader, optional_component, optional_element,
-    qualifier_matches_pattern, required_component, required_element,
+    optional_component, optional_element, qualifier_matches_pattern,
+    required_component, required_element,
 };
 #[cfg(feature = "derive")]
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use edifact_rs_derive::{EdifactDeserialize, EdifactSerialize};
 pub use event::{EdifactEvent, EventEmitter, OwnedEdifactEvent, VecEmitter, WriterEmitter};
-pub use ser::{EdifactCompositeSerialize, EdifactSerialize, to_string};
+pub use ser::{EdifactCompositeSerialize, EdifactSerialize, to_bytes, to_edifact_string};
 pub use directory_validator::{DirectoryValidator, ElementRef, SegmentDefinition, Status};
 
 // ── core free functions ───────────────────────────────────────────────────────
@@ -301,7 +323,7 @@ where
 /// # Errors
 ///
 /// Returns an error if serialization fails.
-pub fn to_bytes<'a, 'b, I>(segments: I) -> Result<Vec<u8>, EdifactError>
+pub fn segments_to_bytes<'a, 'b, I>(segments: I) -> Result<Vec<u8>, EdifactError>
 where
     'b: 'a,
     I: IntoIterator<Item = &'a Segment<'b>>,

@@ -23,7 +23,7 @@ memchr    = { workspace = true }
 smallvec  = { workspace = true }
 thiserror = { workspace = true }
 miette    = { workspace = true, optional = true }
-edifact-rs-derive = { version = "0.1.1", path = "../edifact-rs-derive", optional = true }
+edifact-rs-derive = { version = "0.2.0", path = "../edifact-rs-derive", optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

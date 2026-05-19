@@ -6,7 +6,7 @@
 //! - Map elements to fields with `#[edifact(element = N)]`
 //! - Route qualified segments (e.g. `NAD+BY`, `NAD+SU`) with `qualifier_from`
 //!   on the struct and `#[edifact(qualifier = "Q")]` on message fields
-//! - Serialise a typed struct back to wire format with `ser::to_string`
+//! - Serialise a typed struct back to wire format with `ser::to_edifact_string`
 //!
 //! Run:
 //! ```text
@@ -80,9 +80,9 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
     }
 
     // Serialise a single typed segment back to wire format.
-    // `ser::to_string` returns a `String` including the segment terminator.
+    // `ser::to_edifact_string` returns a `String` including the segment terminator.
     let bgm = message.bgm.as_ref().expect("BGM expected in sample");
-    let encoded = ser::to_string(bgm)?;
+    let encoded = ser::to_edifact_string(bgm)?;
     println!("bgm={encoded}"); // e.g. "BGM+220+PO-4711+9'"
 
     Ok(())

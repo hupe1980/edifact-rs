@@ -7,7 +7,7 @@
 //!   cargo bench -p edifact-rs --bench bench_core
 
 use divan::Bencher;
-use edifact_rs::{from_bytes, from_reader, to_bytes};
+use edifact_rs::{from_bytes, from_reader, segments_to_bytes};
 mod bench_data;
 use bench_data::{one_mb, sample_msg, sample_segments};
 
@@ -69,7 +69,7 @@ fn bench_serialize_sample_message(b: Bencher) {
     let segments = sample_segments();
 
     b.bench(|| {
-        let _ = to_bytes(&segments).expect("serialization of known-good segments must not fail");
+        let _ = segments_to_bytes(&segments).expect("serialization of known-good segments must not fail");
     });
 }
 
@@ -81,6 +81,6 @@ fn bench_roundtrip_small(b: Bencher) {
         let segs: Vec<_> = from_bytes(sample_msg())
             .collect::<Result<Vec<_>, _>>()
             .expect("bench fixture must be valid EDIFACT");
-        let _bytes = to_bytes(&segs).expect("serialization of known-good segments must not fail");
+        let _bytes = segments_to_bytes(&segs).expect("serialization of known-good segments must not fail");
     });
 }

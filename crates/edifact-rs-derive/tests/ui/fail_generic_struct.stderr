@@ -1,0 +1,5 @@
+error: EdifactSerialize/EdifactDeserialize do not support generic structs
+  --> $DIR/fail_generic_struct.rs:15:23
+   |
+15 | struct GenericSegment<T> {
+   |                       ^

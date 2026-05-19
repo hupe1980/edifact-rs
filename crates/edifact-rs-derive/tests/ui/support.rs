@@ -170,12 +170,12 @@ pub mod edifact_rs {
         })
     }
 
-    pub fn find_segments_typed<'s, 'd, T>(
+    pub fn find_segments_typed<'s, 'd: 's, T>(
         segments: &'s [Segment<'d>],
-    ) -> Vec<&'s Segment<'d>>
+    ) -> impl Iterator<Item = &'s Segment<'d>>
     where
         T: EdifactSegmentTag,
     {
-        segments.iter().filter(|s| T::matches_segment(s)).collect()
+        segments.iter().filter(|s| T::matches_segment(s))
     }
 }

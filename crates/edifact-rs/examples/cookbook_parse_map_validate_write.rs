@@ -5,7 +5,7 @@
 //! 1. **Parse** raw bytes into a zero-copy `Vec<Segment<'_>>`
 //! 2. **Map** named parties using `find_qualified_segment`
 //! 3. **Validate** using a custom `Validator` registered in a `ValidationContext`
-//! 4. **Serialize** the segment list back to EDIFACT wire format with `to_bytes`
+//! 4. **Serialize** the segment list back to EDIFACT wire format with `segments_to_bytes`
 //!
 //! Run:
 //! ```text
@@ -14,7 +14,7 @@
 
 use edifact_rs::{
     ValidationContext, ValidationLayer, Validator, ValidationReport, Segment,
-    find_qualified_segment, from_bytes, to_bytes, validate_each,
+    find_qualified_segment, from_bytes, segments_to_bytes, validate_each,
 };
 
 /// A simple custom validator that checks for known segment tags
@@ -78,10 +78,10 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
     }
 
     // ── 4. Round-trip write ───────────────────────────────────────────────────
-    // `to_bytes` serialises the borrowed segment list back to wire-format bytes.
+    // `segments_to_bytes` serialises the borrowed segment list back to wire-format bytes.
     // Because segments borrow from `input`, this effectively round-trips the
     // original payload through the parser and writer.
-    let output = to_bytes(&segments)?;
+    let output = segments_to_bytes(&segments)?;
     let output_text =
         String::from_utf8(output).map_err(|_| edifact_rs::EdifactError::InvalidUtf8)?;
     println!("roundtrip={output_text}");

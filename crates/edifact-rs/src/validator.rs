@@ -149,6 +149,7 @@ impl std::fmt::Debug for ProfileRulePack {
 
 /// Validation layers used by [`ValidationContext`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ValidationLayer {
     /// Directory structure checks (segment presence/order/arity).
     Structure,
@@ -241,7 +242,8 @@ impl ValidationContextBuilder {
     }
 
     /// Add a profile rule pack to the profile layer.
-    pub fn with_profile_pack(mut self, pack: ProfileRulePack) -> Self {
+    pub fn with_profile_pack(mut self, mut pack: ProfileRulePack) -> Self {
+        pack.set_message_type(self.inner.message_type.as_deref());
         self.inner.validators.push(LayeredValidator {
             layer: ValidationLayer::Profile,
             validator: Box::new(pack),

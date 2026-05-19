@@ -103,14 +103,14 @@ fn extract_interchange(segments: &[Segment<'_>]) -> Result<InterchangeEnvelope, 
     let unb = &segments[0];
     let unz = &segments[segments.len() - 1];
 
-    let syntax_identifier = required_component(unb, "UNB", 0, 0)?.to_owned();
+    let syntax_identifier = required_component(unb, 0, 0)?.to_owned();
 
-    let sender_id = required_component(unb, "UNB", 1, 0)?.to_owned();
+    let sender_id = required_component(unb, 1, 0)?.to_owned();
 
-    let recipient_id = required_component(unb, "UNB", 2, 0)?.to_owned();
+    let recipient_id = required_component(unb, 2, 0)?.to_owned();
 
     // Element 3: date/time composite
-    let date = required_component(unb, "UNB", 3, 0)?;
+    let date = required_component(unb, 3, 0)?;
     let time = unb
         .get_element(3)
         .and_then(|e| e.get_component(1))
@@ -121,8 +121,8 @@ fn extract_interchange(segments: &[Segment<'_>]) -> Result<InterchangeEnvelope, 
         format!("{date}:{time}")
     };
 
-    let control_ref = required_component(unb, "UNB", 4, 0)?.to_owned();
-    let unz_control_ref = required_component(unz, "UNZ", 1, 0)?;
+    let control_ref = required_component(unb, 4, 0)?.to_owned();
+    let unz_control_ref = required_component(unz, 1, 0)?;
     if unz_control_ref != control_ref {
         return Err(EdifactError::QualifierMismatch {
             tag: "UNZ".to_owned(),
@@ -132,7 +132,7 @@ fn extract_interchange(segments: &[Segment<'_>]) -> Result<InterchangeEnvelope, 
         });
     }
 
-    let declared_message_count: u32 = required_component(unz, "UNZ", 0, 0)?
+    let declared_message_count: u32 = required_component(unz, 0, 0)?
         .parse()
         .map_err(|_| EdifactError::InvalidText {
             offset: unz.span.start,
@@ -150,14 +150,9 @@ fn extract_interchange(segments: &[Segment<'_>]) -> Result<InterchangeEnvelope, 
 }
 
 /// Thin shim that forwards to [`crate::de::required_component`].
-///
-/// The `_tag` parameter was previously used in the locally-duplicated error
-/// path; the underlying function now derives the tag from `segment.tag`
-/// directly, so the argument is retained only for call-site readability.
 #[inline]
 fn required_component<'a>(
     segment: &'a Segment<'_>,
-    _tag: &'static str,
     element_index: usize,
     component_index: usize,
 ) -> Result<&'a str, EdifactError> {
@@ -189,24 +184,24 @@ fn extract_messages(segments: &[Segment<'_>]) -> Result<Vec<MessageEnvelope>, Ed
                         offset: seg.span.start,
                     })?;
 
-                let message_ref = required_component(unh, "UNH", 0, 0)?.to_owned();
+                let message_ref = required_component(unh, 0, 0)?.to_owned();
 
-                let message_type = required_component(unh, "UNH", 1, 0)?.to_owned();
-                let version = required_component(unh, "UNH", 1, 1)?.to_owned();
-                let release = required_component(unh, "UNH", 1, 2)?.to_owned();
-                let controlling_agency = required_component(unh, "UNH", 1, 3)?.to_owned();
+                let message_type = required_component(unh, 1, 0)?.to_owned();
+                let version = required_component(unh, 1, 1)?.to_owned();
+                let release = required_component(unh, 1, 2)?.to_owned();
+                let controlling_agency = required_component(unh, 1, 3)?.to_owned();
                 let association_code = unh
                     .get_element(1)
                     .and_then(|e| e.get_component(4))
                     .unwrap_or("")
                     .to_owned();
 
-                let declared_segment_count: u32 = required_component(seg, "UNT", 0, 0)?
+                let declared_segment_count: u32 = required_component(seg, 0, 0)?
                     .parse()
                     .map_err(|_| EdifactError::InvalidText {
                         offset: seg.span.start,
                     })?;
-                let unt_ref = required_component(seg, "UNT", 1, 0)?;
+                let unt_ref = required_component(seg, 1, 0)?;
                 if unt_ref != message_ref {
                     return Err(EdifactError::QualifierMismatch {
                         tag: "UNT".to_owned(),

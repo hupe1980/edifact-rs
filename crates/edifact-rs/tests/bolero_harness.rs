@@ -6,7 +6,7 @@
 //!   cargo test -- bolero
 
 use bolero::check;
-use edifact_rs::{from_bytes, to_bytes};
+use edifact_rs::{from_bytes, segments_to_bytes};
 
 #[test]
 fn fuzz_parser_no_panic() {
@@ -59,7 +59,7 @@ fn fuzz_parse_write_parse_invariant_small_message() {
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
 
-            let encoded = to_bytes(&segs).unwrap();
+            let encoded = segments_to_bytes(&segs).unwrap();
             let reparsed = from_bytes(&encoded)
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();

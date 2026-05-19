@@ -208,7 +208,7 @@ mod tests {
             "BGM",
             vec![Element::of(&["220"]), Element::of(&["ORDER123"])],
         )];
-        let bytes = crate::to_bytes(&segs).unwrap();
+        let bytes = crate::segments_to_bytes(&segs).unwrap();
         let s = std::str::from_utf8(&bytes).unwrap();
         assert!(s.starts_with("BGM+220+ORDER123'"));
     }
@@ -219,7 +219,7 @@ mod tests {
             "FTX",
             vec![Element::of(&["value+with+delimiters"])],
         )];
-        let bytes = crate::to_bytes(&segs).unwrap();
+        let bytes = crate::segments_to_bytes(&segs).unwrap();
         let s = std::str::from_utf8(&bytes).unwrap();
         // The `+` in the value must be escaped as `?+`
         assert!(s.contains("?+"), "escape missing: {s}");
@@ -238,7 +238,7 @@ mod tests {
             ),
             Segment::new("UNZ", vec![Element::of(&["0"]), Element::of(&["1"])]),
         ];
-        let bytes = crate::to_bytes(&segs).unwrap();
+        let bytes = crate::segments_to_bytes(&segs).unwrap();
         let rt: Vec<crate::OwnedSegment> =
             crate::parser::from_reader(std::io::Cursor::new(&bytes))
                 .expect("round-trip parse failed");

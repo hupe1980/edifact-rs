@@ -245,6 +245,12 @@ fn vec_inner_type(ty: &Type) -> Option<&Type> {
 // ── named field extraction ─────────────────────────────────────────────────────
 
 fn get_named_fields(input: &DeriveInput) -> syn::Result<&syn::FieldsNamed> {
+    if !input.generics.params.is_empty() {
+        return Err(syn::Error::new(
+            input.generics.params.span(),
+            "EdifactSerialize/EdifactDeserialize do not support generic structs",
+        ));
+    }
     match &input.data {
         Data::Struct(s) => match &s.fields {
             Fields::Named(f) => Ok(f),
@@ -920,7 +926,6 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         .ok_or_else(|| syn::Error::new(ident.span(), "expected Vec<T>"))?;
                     quote! {
                         let #ident = ::edifact_rs::find_segments_typed::<#inner_ty>(segments)
-                            .into_iter()
                             .map(|__seg| {
                                 <#inner_ty as ::edifact_rs::EdifactDeserialize>::edifact_deserialize(
                                     ::core::slice::from_ref(__seg),

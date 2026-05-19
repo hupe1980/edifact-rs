@@ -2,7 +2,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 use edifact_rs::{
     ProfileRulePack, ServiceStringAdvice, Tokenizer, ValidationContext, ValidationIssue,
     ValidationLayer, ValidationReport, ValidationSeverity, Validator, from_bytes, from_reader,
-    to_bytes,
+    segments_to_bytes,
 };
 use std::io::{Cursor, Read};
 
@@ -91,11 +91,11 @@ fn bench_writer(c: &mut Criterion) {
     let mut group = c.benchmark_group("writer");
 
     let segments = sample_segments();
-    let bytes = to_bytes(&segments).expect("serialization of known-good segments must not fail");
+    let bytes = segments_to_bytes(&segments).expect("serialization of known-good segments must not fail");
     group.throughput(Throughput::Bytes(bytes.len() as u64));
     group.bench_function("sample_message", |b| {
         b.iter(|| {
-            let out = to_bytes(black_box(&segments)).expect("serialization of known-good segments must not fail");
+            let out = segments_to_bytes(black_box(&segments)).expect("serialization of known-good segments must not fail");
             black_box(out);
         });
     });

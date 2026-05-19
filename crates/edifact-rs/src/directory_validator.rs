@@ -194,11 +194,7 @@ impl DirectoryValidator {
         while count > 0 && elem.components[count - 1].as_ref().is_empty() {
             count -= 1;
         }
-        debug_assert!(
-            count <= u8::MAX as usize,
-            "effective_component_count: element has >255 components, which is invalid EDIFACT"
-        );
-        Some(count as u8)
+        u8::try_from(count).ok()
     }
 
     fn validate_component_counts(&self, seg: &Segment<'_>) -> Result<(), EdifactError> {

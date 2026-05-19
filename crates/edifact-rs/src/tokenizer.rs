@@ -130,7 +130,7 @@ pub(crate) struct RawSegment {
 
 /// Zero-copy tokenizer over a byte slice.
 ///
-/// Yields [`Token`] values, each borrowing from the original input.
+/// Yields `Token` values, each borrowing from the original input.
 pub struct Tokenizer<'a> {
     input: &'a [u8],
     pos: usize,

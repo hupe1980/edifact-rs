@@ -150,7 +150,7 @@ pub fn to_bytes<T: EdifactSerialize>(value: &T) -> Result<Vec<u8>, EdifactError>
 /// [`to_bytes`], and once to convert that buffer into a `String`.  When you
 /// only need the raw bytes (e.g. for a network write), prefer [`to_bytes`]
 /// directly to avoid the second allocation.
-pub fn to_string<T: EdifactSerialize>(value: &T) -> Result<String, EdifactError> {
+pub fn to_edifact_string<T: EdifactSerialize>(value: &T) -> Result<String, EdifactError> {
     let bytes = to_bytes(value)?;
     String::from_utf8(bytes).map_err(|_| EdifactError::InvalidUtf8)
 }

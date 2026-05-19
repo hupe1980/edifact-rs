@@ -11,6 +11,7 @@ use std::io::Write;
 
 /// A borrowed EDIFACT event emitted during serialization.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EdifactEvent<'a> {
     /// Beginning of a new segment (e.g. `"BGM"`, `"NAD"`).
     StartSegment {
@@ -33,6 +34,7 @@ pub enum EdifactEvent<'a> {
 
 /// An owned EDIFACT event — for collection and testing (no borrowed lifetimes).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OwnedEdifactEvent {
     /// Owned segment-start event.
     StartSegment {
@@ -110,10 +112,12 @@ impl EventEmitter for VecEmitter {
 ///
 /// Events must arrive in the order produced by [`crate::EdifactSerialize`]:
 /// `StartSegment` → zero or more `Element` / `ComponentElement` → `EndSegment`.
-/// Violating this order (e.g. `Element` before `StartSegment`) produces
-/// malformed output; no runtime check is performed for performance reasons.
+/// In debug builds, any violation of this order (e.g. `Element` before
+/// `StartSegment`, or `StartSegment` inside an open segment) panics immediately.
 pub struct WriterEmitter<W: Write> {
     writer: crate::Writer<W>,
+    #[cfg(debug_assertions)]
+    in_segment: bool,
 }
 
 impl<W: Write> WriterEmitter<W> {
@@ -121,6 +125,8 @@ impl<W: Write> WriterEmitter<W> {
     pub fn new(inner: W) -> Self {
         Self {
             writer: crate::Writer::new(inner),
+            #[cfg(debug_assertions)]
+            in_segment: false,
         }
     }
 
@@ -139,17 +145,43 @@ impl<W: Write> EventEmitter for WriterEmitter<W> {
     fn emit(&mut self, event: EdifactEvent<'_>) -> Result<(), EdifactError> {
         match event {
             EdifactEvent::StartSegment { tag } => {
+                #[cfg(debug_assertions)]
+                {
+                    assert!(
+                        !self.in_segment,
+                        "WriterEmitter: StartSegment emitted while a segment is already open (missing EndSegment)"
+                    );
+                    self.in_segment = true;
+                }
                 self.writer.write_tag_only(tag)?;
             }
             EdifactEvent::Element { value } => {
+                #[cfg(debug_assertions)]
+                assert!(
+                    self.in_segment,
+                    "WriterEmitter: Element emitted outside of a segment (missing StartSegment)"
+                );
                 self.writer.write_element_sep()?;
                 self.writer.write_escaped(value)?;
             }
             EdifactEvent::ComponentElement { value } => {
+                #[cfg(debug_assertions)]
+                assert!(
+                    self.in_segment,
+                    "WriterEmitter: ComponentElement emitted outside of a segment (missing StartSegment)"
+                );
                 self.writer.write_component_sep()?;
                 self.writer.write_escaped(value)?;
             }
             EdifactEvent::EndSegment => {
+                #[cfg(debug_assertions)]
+                {
+                    assert!(
+                        self.in_segment,
+                        "WriterEmitter: EndSegment emitted while no segment is open (missing StartSegment)"
+                    );
+                    self.in_segment = false;
+                }
                 self.writer.write_segment_term_and_count()?;
             }
         }
