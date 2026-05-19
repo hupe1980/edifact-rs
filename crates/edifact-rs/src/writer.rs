@@ -25,6 +25,14 @@ impl<W: Write> Writer<W> {
 
     /// Create a writer with custom delimiters and write a UNA segment first.
     pub fn with_una(mut inner: W, ssa: ServiceStringAdvice) -> Result<Self, EdifactError> {
+        // EDIFACT syntax requires all delimiter bytes to be ASCII (0x00–0x7F).
+        // Non-ASCII bytes would bisect multi-byte UTF-8 sequences in data values.
+        if [ssa.component_sep, ssa.element_sep, ssa.decimal_mark, ssa.release_char, ssa.segment_term]
+            .iter()
+            .any(|&b| b > 0x7F)
+        {
+            return Err(EdifactError::InvalidUna);
+        }
         // UNA: component_sep, element_sep, decimal_mark, release_char, space, segment_term
         let una = [
             b'U',

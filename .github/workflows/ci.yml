@@ -26,12 +26,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-05-01
+          toolchain: nightly
       - uses: Swatinem/rust-cache@v2
       - name: Build docs.rs-style docs with warnings denied
         env:
           RUSTDOCFLAGS: --cfg docsrs -D warnings
-        run: cargo +nightly-2026-05-01 doc -p edifact-rs --all-features --no-deps
+        run: cargo +nightly doc -p edifact-rs --all-features --no-deps
 
   feature-matrix:
     runs-on: ubuntu-latest
