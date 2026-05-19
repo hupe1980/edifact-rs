@@ -289,14 +289,16 @@ mod tests {
         // Output must use `!` as element separator, `|` as component separator, `~` as terminator.
         // The writer also emits a UNA header when with_una is used.
         assert!(s.contains("BGM"), "BGM segment missing: {s}");
-        assert!(s.contains('!'), "missing element sep: {s}");
-        assert!(s.contains('|'), "missing component sep: {s}");
-        assert!(s.ends_with('~'), "missing segment term: {s}");
-        assert!(s.contains(','), "missing decimal mark: {s}");
+        // Slice after UNA so assertions target segment output, not UNA header bytes.
+        let after_una = s.find("BGM").map(|i| &s[i..]).unwrap_or(s);
+        assert!(after_una.contains('!'), "missing element sep in segment: {after_una}");
+        assert!(after_una.contains('|'), "missing component sep in segment: {after_una}");
+        assert!(after_una.ends_with('~'), "missing segment term in segment: {after_una}");
+        // Decimal mark appears in the UNA header (no decimal-bearing values in this segment).
+        assert!(s.contains(','), "missing decimal mark in UNA: {s}");
         assert!(!s.contains('+'), "default element sep leaked: {s}");
         assert!(!s.contains(':'), "default component sep leaked: {s}");
         // segment_term '~' is not the default; ensure no default ' leaks (UNA itself aside)
-        let after_una = s.find("BGM").map(|i| &s[i..]).unwrap_or(s);
         assert!(!after_una.contains('\''), "default segment term leaked after UNA: {after_una}");
     }
 }

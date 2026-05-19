@@ -125,8 +125,9 @@ impl_serialize_int!(
     u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, bool
 );
 
-// f32/f64 Display length is unbounded (e.g. f64::MAX formats to 309 chars).
-// Use heap allocation to avoid a panic on extreme values.
+// Rust's `Display` for floats uses full decimal notation (not scientific):
+// f64::MAX formats to 309 chars and f32::MAX to 39 chars. `to_string()` (heap)
+// avoids needing an oversized fixed-size stack buffer for extreme values.
 //
 // NOTE: Rust's Display always uses `.` as the decimal separator. The decimal
 // mark configured in `ServiceStringAdvice.decimal_mark` (UNA byte 5) is NOT
@@ -286,7 +287,7 @@ mod tests {
 
     #[test]
     fn float_extremes_do_not_panic() {
-        // f64::MAX Display is 309 chars; must not overflow fixed buffer.
+        // Rust Display for f64 uses full decimal notation: f64::MAX is 309 chars.
         let mut emitter = VecEmitter::default();
         f64::MAX.edifact_serialize(&mut emitter).unwrap();
         let s = match &emitter.events[0] {

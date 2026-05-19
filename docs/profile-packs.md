@@ -193,9 +193,9 @@ println!("document issues: {}", doc_issues.total_issues());
 let ref_issues = report.filter_by_rule_prefix("ORDERS-REF-");
 println!("reference issues: {}", ref_issues.total_issues());
 
-// Exact rule ID lookup:
-let p001 = report.issues_for_rule_id("ORDERS-DOC-P001");
-println!("ORDERS-DOC-P001 findings: {}", p001.len());
+// Exact rule ID lookup (returns a lazy iterator; use count() or collect()):
+let p001_count = report.issues_for_rule_id("ORDERS-DOC-P001").count();
+println!("ORDERS-DOC-P001 findings: {p001_count}");
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
