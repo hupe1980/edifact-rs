@@ -102,15 +102,19 @@ macro_rules! impl_serialize_int {
             impl EdifactSerialize for $t {
                 fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
                     // 42-byte buffer: i128::MIN is 40 chars; 2 spare bytes as safety margin.
+                    use std::io::Write as _;
                     let mut buf = [0u8; 42];
-                    let s = {
-                        use std::io::Write as _;
-                        let mut cursor = std::io::Cursor::new(&mut buf[..]);
-                        write!(cursor, "{}", self).map_err(|_| EdifactError::InvalidUtf8)?;
-                        let len = cursor.position() as usize;
-                        std::str::from_utf8(&buf[..len]).map_err(|_| EdifactError::InvalidUtf8)?
-                    };
-                    emitter.emit(EdifactEvent::Element { value: s })
+                    let mut w: &mut [u8] = &mut buf;
+                    if write!(w, "{self}").is_ok() {
+                        let written = 42 - w.len();
+                        // SAFETY: integer Display only emits ASCII digits and '-'.
+                        let s = std::str::from_utf8(&buf[..written]).map_err(|_| EdifactError::InvalidUtf8)?;
+                        emitter.emit(EdifactEvent::Element { value: s })
+                    } else {
+                        // Extraordinary case: fall back to heap to avoid any panic.
+                        let s = format!("{self}");
+                        emitter.emit(EdifactEvent::Element { value: &s })
+                    }
                 }
             }
         )+

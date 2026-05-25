@@ -28,7 +28,7 @@
 
 ```toml
 [dependencies]
-edifact-rs = "0.1"
+edifact-rs = "0.4"
 
 # Optional: derive macros (included by default)
 # edifact-rs = { version = "0.4", features = ["derive"] }
