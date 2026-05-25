@@ -110,7 +110,11 @@ step "Crate versions match across workspace" bash -c '
   fi
 '
 
-# ── 11-12. Benchmarks (optional) ──────────────────────────────────────────────
+# ── 11-12. Benchmarks ────────────────────────────────────────────────────────
+# Always verify benches compile; only execute them when --bench is requested.
+step "cargo test --benches --no-run (smoke-compile)" \
+  cargo test -p edifact-rs --benches --no-run
+
 if [[ "$RUN_BENCH" == true ]]; then
   step "cargo bench bench_core (divan)" \
     cargo bench -p edifact-rs --bench bench_core

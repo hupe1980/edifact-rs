@@ -519,6 +519,17 @@ pub enum ValidationSeverity {
     Info,
 }
 
+impl std::fmt::Display for ValidationSeverity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Critical => f.write_str("critical"),
+            Self::Error => f.write_str("error"),
+            Self::Warning => f.write_str("warning"),
+            Self::Info => f.write_str("info"),
+        }
+    }
+}
+
 /// A structured validation issue.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValidationIssue {
@@ -694,11 +705,6 @@ impl ValidationReport {
             .iter()
             .chain(self.warnings.iter())
             .chain(self.infos.iter())
-    }
-
-    /// Iterate over all issues in severity order.  Alias for [`iter_issues`][Self::iter_issues].
-    pub fn issues(&self) -> impl Iterator<Item = &ValidationIssue> {
-        self.iter_issues()
     }
 
     /// Return `true` if the report contains any issues (errors, warnings, or infos).

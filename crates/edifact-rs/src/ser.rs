@@ -2,7 +2,7 @@
 //!
 //! [`EdifactSerialize`] emits typed EDIFACT events rather than the generic
 //! key/value tokens of standard `serde`.  This matches EDIFACT's positional,
-//! qualifier-based data model — see `SPIKE_NOTES.md` for the design rationale.
+//! qualifier-based data model — see `docs/writing.md` for the design rationale.
 
 use crate::EdifactError;
 use crate::event::{EdifactEvent, EventEmitter, WriterEmitter};
@@ -101,17 +101,14 @@ macro_rules! impl_serialize_int {
         $(
             impl EdifactSerialize for $t {
                 fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
-                    // Stack buffer: 40 bytes covers i128::MIN
-                    // ("-170141183460469231731687303715884105728") exactly.
-                    // Integer Display lengths are bounded; floats must NOT use this path.
-                    let mut buf = [0u8; 40];
+                    // 42-byte buffer: i128::MIN is 40 chars; 2 spare bytes as safety margin.
+                    let mut buf = [0u8; 42];
                     let s = {
                         use std::io::Write as _;
                         let mut cursor = std::io::Cursor::new(&mut buf[..]);
-                        // SAFETY: integer Display is bounded; buf is large enough.
-                        write!(cursor, "{}", self).expect("integer format into fixed buffer");
+                        write!(cursor, "{}", self).map_err(|_| EdifactError::InvalidUtf8)?;
                         let len = cursor.position() as usize;
-                        std::str::from_utf8(&buf[..len]).expect("integer output is valid UTF-8")
+                        std::str::from_utf8(&buf[..len]).map_err(|_| EdifactError::InvalidUtf8)?
                     };
                     emitter.emit(EdifactEvent::Element { value: s })
                 }
@@ -127,8 +124,9 @@ impl_serialize_int!(
 
 // Rust's float Display picks the shortest round-trip decimal representation,
 // which may be fixed-point or scientific notation depending on the magnitude.
-// A 320-byte stack buffer is a conservative upper bound for all finite f32
-// and f64 values, avoiding heap allocation.
+// A 320-byte stack buffer covers all known finite f32/f64 Display forms;
+// if the buffer is somehow exceeded we fall back to a heap-allocated String
+// so no panic ever escapes to the caller.
 //
 // NOTE: Rust's Display always uses `.` as the decimal separator. The decimal
 // mark configured in `ServiceStringAdvice.decimal_mark` (UNA byte 5) is NOT
@@ -142,14 +140,17 @@ macro_rules! impl_serialize_float {
                 fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
                     use std::io::Write as _;
                     let mut buf = [0u8; 320];
-                    let written = {
-                        let mut w: &mut [u8] = &mut buf;
-                        write!(w, "{self}").expect("float Display exceeded 320-byte stack buffer");
-                        320 - w.len()
-                    };
-                    let s = std::str::from_utf8(&buf[..written])
-                        .expect("float Display is always ASCII");
-                    emitter.emit(EdifactEvent::Element { value: s })
+                    let mut w: &mut [u8] = &mut buf;
+                    if write!(w, "{self}").is_ok() {
+                        let written = 320 - w.len();
+                        // SAFETY: float Display only emits ASCII digits and punctuation.
+                        let s = std::str::from_utf8(&buf[..written]).map_err(|_| EdifactError::InvalidUtf8)?;
+                        emitter.emit(EdifactEvent::Element { value: s })
+                    } else {
+                        // Extraordinary case: format via heap to avoid any panic.
+                        let s = format!("{self}");
+                        emitter.emit(EdifactEvent::Element { value: &s })
+                    }
                 }
             }
         )+

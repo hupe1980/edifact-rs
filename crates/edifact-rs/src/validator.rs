@@ -290,6 +290,11 @@ impl ValidationContext {
     }
 
     /// Execute validators in strict mode for enabled layers.
+    ///
+    /// Returns `Ok(report)` when validation produces no errors.  The returned
+    /// report may still contain warnings and infos — warnings do **not** cause
+    /// this method to return `Err`.  Call [`validate_lenient`][Self::validate_lenient]
+    /// if you want to inspect warnings without failing on errors.
     pub fn validate_strict(
         &self,
         segments: &[Segment<'_>],
@@ -399,7 +404,7 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
         } => {
             issue = issue
                 .with_segment(tag)
-                .with_element_index(element_index as u8)
+                .with_element_index(u8::try_from(element_index).unwrap_or(u8::MAX))
                 .with_offset(offset);
         }
         EdifactError::InvalidCodeValue {
@@ -411,7 +416,7 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
         } => {
             issue = issue
                 .with_segment(tag)
-                .with_element_index(element_index as u8)
+                .with_element_index(u8::try_from(element_index).unwrap_or(u8::MAX))
                 .with_offset(offset);
             if let Some(s) = suggestion {
                 issue = issue.with_suggestion(s);
@@ -434,7 +439,7 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
         } => {
             issue = issue
                 .with_segment(tag)
-                .with_element_index(element_index as u8)
+                .with_element_index(u8::try_from(element_index).unwrap_or(u8::MAX))
                 .with_offset(offset);
         }
         EdifactError::MissingRequiredElement { tag, element_index } => {

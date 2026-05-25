@@ -442,13 +442,8 @@ mod tests {
 
     // ── effective_component_count (ISO 9735-1 §3.3 trailing-empty-component trim) ──
 
-    fn parse_single(input: &[u8]) -> crate::model::Segment<'static> {
-        // SAFETY: intentional leak — test inputs are small and bounded per call.
-        // `Segment<'static>` is needed so the returned value is not tied to a local
-        // buffer; the allocation is bounded by test count, not message size.
-        let leaked: &'static [u8] = Box::leak(input.to_vec().into_boxed_slice());
-        crate::from_bytes(leaked)
-            .collect::<Result<Vec<_>, _>>()
+    fn parse_single(input: &[u8]) -> crate::OwnedSegment {
+        crate::from_reader(std::io::Cursor::new(input))
             .expect("parse should succeed")
             .into_iter()
             .next()
@@ -460,7 +455,8 @@ mod tests {
         // DTM+137:20200101: has three components in element 0; the third is empty.
         // ISO 9735-1 §3.3 says trailing empty components may be omitted,
         // so effective count should be 2.
-        let seg = parse_single(b"DTM+137:20200101:'");
+        let owned = parse_single(b"DTM+137:20200101:'");
+        let seg = owned.as_borrowed();
         let count = DirectoryValidator::effective_component_count(&seg, 0);
         assert_eq!(count, Some(2), "trailing empty component should be stripped");
     }
@@ -468,7 +464,8 @@ mod tests {
     #[test]
     fn all_empty_components_result_in_zero() {
         // NAD+MS++: → element 2 is ":" with two empty components → effective=0
-        let seg = parse_single(b"NAD+MS++:'");
+        let owned = parse_single(b"NAD+MS++:'");
+        let seg = owned.as_borrowed();
         let count = DirectoryValidator::effective_component_count(&seg, 2);
         assert_eq!(count, Some(0), "all-empty composite should have effective count 0");
     }
@@ -476,7 +473,8 @@ mod tests {
     #[test]
     fn non_empty_component_not_stripped() {
         // DTM+137:20200101:102 — all three components are non-empty
-        let seg = parse_single(b"DTM+137:20200101:102'");
+        let owned = parse_single(b"DTM+137:20200101:102'");
+        let seg = owned.as_borrowed();
         let count = DirectoryValidator::effective_component_count(&seg, 0);
         assert_eq!(count, Some(3), "no components should be stripped when all non-empty");
     }

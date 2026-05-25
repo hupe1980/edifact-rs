@@ -210,3 +210,34 @@ fn fuzz_writer_no_panic() {
             let _ = writer.write_segment_parts(&tag, &elements);
         });
 }
+
+#[test]
+fn fuzz_validate_envelope_no_panic() {
+    // `validate_envelope` must not panic for any parseable byte sequence.
+    use edifact_rs::validate_envelope;
+
+    check!()
+        .with_type::<Vec<u8>>()
+        .cloned()
+        .for_each(|input: Vec<u8>| {
+            let Ok(segs) = from_bytes(&input).collect::<Result<Vec<_>, _>>() else {
+                return;
+            };
+            // May return Ok or Err — must never panic.
+            let _ = validate_envelope(&segs);
+        });
+}
+
+#[test]
+fn fuzz_message_windows_bytes_no_panic() {
+    // `message_windows_bytes` must not panic for any byte sequence.
+    use edifact_rs::message_windows_bytes;
+
+    check!()
+        .with_type::<Vec<u8>>()
+        .cloned()
+        .for_each(|input: Vec<u8>| {
+            // Consume the full iterator — any item may be Ok or Err.
+            for _ in message_windows_bytes(&input) { /* consume */ }
+        });
+}
