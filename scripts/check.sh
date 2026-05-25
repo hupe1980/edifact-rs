@@ -111,7 +111,7 @@ step "Crate versions match across workspace" bash -c '
 '
 
 # ── 11-12. Benchmarks ────────────────────────────────────────────────────────
-# Always verify benches compile; only execute them when --bench is requested.
+# Always verify benches compile; only execute them unless --no-bench is passed.
 step "cargo test --benches --no-run (smoke-compile)" \
   cargo test -p edifact-rs --benches --no-run
 
