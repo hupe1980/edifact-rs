@@ -107,7 +107,7 @@ macro_rules! impl_serialize_int {
                     let mut w: &mut [u8] = &mut buf;
                     if write!(w, "{self}").is_ok() {
                         let written = 42 - w.len();
-                        // SAFETY: integer Display only emits ASCII digits and '-'.
+                        // Display output for all integer/bool types is ASCII-only.
                         let s = std::str::from_utf8(&buf[..written]).map_err(|_| EdifactError::InvalidUtf8)?;
                         emitter.emit(EdifactEvent::Element { value: s })
                     } else {
