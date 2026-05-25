@@ -69,7 +69,8 @@ pub fn validate_envelope(
 ) -> Result<(InterchangeEnvelope, Vec<MessageEnvelope>), EdifactError> {
     let mut interchange_env = extract_interchange(segments)?;
     let message_envs = extract_messages(segments)?;
-    interchange_env.actual_message_count = message_envs.len() as u32;
+    interchange_env.actual_message_count = u32::try_from(message_envs.len())
+        .unwrap_or(u32::MAX);
 
     // Cross-check UNZ declared count vs. actual UNH/UNT pair count
     if interchange_env.declared_message_count != interchange_env.actual_message_count {
@@ -177,7 +178,9 @@ fn extract_messages(segments: &[Segment<'_>]) -> Result<Vec<MessageEnvelope>, Ed
         match seg.tag {
             "UNH" => {
                 if in_message {
-                    return Err(EdifactError::UnexpectedEof {
+                    return Err(EdifactError::InvalidSegmentForMessage {
+                        tag: "UNH".to_owned(),
+                        message_type: "ENVELOPE".to_owned(),
                         offset: seg.span.start,
                     });
                 }
@@ -188,7 +191,9 @@ fn extract_messages(segments: &[Segment<'_>]) -> Result<Vec<MessageEnvelope>, Ed
             "UNT" if in_message => {
                 let unh = current_unh
                     .take()
-                    .ok_or(EdifactError::UnexpectedEof {
+                    .ok_or(EdifactError::InvalidSegmentForMessage {
+                        tag: "UNT".to_owned(),
+                        message_type: "ENVELOPE".to_owned(),
                         offset: seg.span.start,
                     })?;
 
@@ -220,7 +225,8 @@ fn extract_messages(segments: &[Segment<'_>]) -> Result<Vec<MessageEnvelope>, Ed
                 }
 
                 // actual count = segments from UNH (inclusive) to UNT (inclusive)
-                let actual_segment_count = (i - msg_start_idx + 1) as u32;
+                let actual_segment_count = u32::try_from(i - msg_start_idx + 1)
+                    .unwrap_or(u32::MAX);
 
                 in_message = false;
                 messages.push(MessageEnvelope {
@@ -272,21 +278,19 @@ fn extract_messages(segments: &[Segment<'_>]) -> Result<Vec<MessageEnvelope>, Ed
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::from_bytes;
 
-    /// Parse test fixtures into a segment vec.
-    ///
-    /// Uses `Box::leak` so each test-only allocation lives for the test
-    /// process lifetime (bounded, small inputs).  `validate_envelope` requires
-    /// `&[Segment<'_>]` whose lifetime is tied to the underlying bytes; leaking
-    /// the backing buffer is the simplest way to satisfy this in a unit test
-    /// without heap-allocating an `OwnedSegment`-to-borrowed conversion at
-    /// every call site.
-    fn parse(input: &[u8]) -> Vec<Segment<'static>> {
-        let leaked: &'static [u8] = Box::leak(input.to_vec().into_boxed_slice());
-        from_bytes(leaked)
-            .collect::<Result<Vec<_>, _>>()
-            .expect("parse failed")
+    /// Parse test fixtures into an owned-segment vec (no memory leaks).
+    fn parse(input: &[u8]) -> Vec<crate::OwnedSegment> {
+        crate::from_reader(std::io::Cursor::new(input)).expect("parse failed")
+    }
+
+    /// Parse then validate: convenience wrapper for tests that only need the result.
+    fn parse_and_validate(
+        input: &[u8],
+    ) -> Result<(InterchangeEnvelope, Vec<MessageEnvelope>), EdifactError> {
+        let owned = parse(input);
+        let segs: Vec<Segment<'_>> = owned.iter().map(crate::OwnedSegment::as_borrowed).collect();
+        validate_envelope(&segs)
     }
 
     const VALID_INTERCHANGE: &[u8] =
@@ -294,8 +298,8 @@ mod tests {
 
     #[test]
     fn valid_envelope_parses_ok() {
-        let segs = parse(VALID_INTERCHANGE);
-        let (interchange, messages) = validate_envelope(&segs).expect("envelope should be valid");
+        let (interchange, messages) =
+            parse_and_validate(VALID_INTERCHANGE).expect("envelope should be valid");
         assert_eq!(interchange.sender_id, "SENDER");
         assert_eq!(interchange.recipient_id, "RECEIVER");
         assert_eq!(interchange.control_ref, "00001");
@@ -312,8 +316,7 @@ mod tests {
     fn unt_count_mismatch_returns_err() {
         // UNT declares 99 segments but only 4 are present
         let input = b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A:UN:EAN010'BGM+220+PO-1+9'DTM+137:20200101:102'UNT+99+1'UNZ+1+1'";
-        let segs = parse(input);
-        let result = validate_envelope(&segs);
+        let result = parse_and_validate(input);
         assert!(
             matches!(
                 result,
@@ -327,8 +330,7 @@ mod tests {
     fn unz_count_mismatch_returns_err() {
         // UNZ declares 2 messages but only 1 UNH/UNT pair is present
         let input = b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A:UN:EAN010'BGM+220+PO-1+9'UNT+3+1'UNZ+2+1'";
-        let segs = parse(input);
-        let result = validate_envelope(&segs);
+        let result = parse_and_validate(input);
         assert!(
             matches!(
                 result,
@@ -344,16 +346,14 @@ mod tests {
     #[test]
     fn missing_unb_returns_err() {
         let input = b"UNH+1+ORDERS:D:11A:UN:EAN010'BGM+220+PO-1+9'UNT+3+1'UNZ+1+1'";
-        let segs = parse(input);
-        let result = validate_envelope(&segs);
+        let result = parse_and_validate(input);
         assert!(result.is_err());
     }
 
     #[test]
     fn extracts_una_interchange_correctly() {
         // Test that UNA does not interfere with envelope field extraction
-        let segs = parse(VALID_INTERCHANGE);
-        let (env, _) = validate_envelope(&segs).unwrap();
+        let (env, _) = parse_and_validate(VALID_INTERCHANGE).unwrap();
         // UNA is parsed by tokenizer; UNB field extraction must be correct
         assert_eq!(env.syntax_identifier, "UNOA");
         assert_eq!(env.datetime, "230401:0900");
@@ -363,24 +363,21 @@ mod tests {
     fn dangling_unh_without_unt_returns_err() {
         let input =
             b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A:UN:EAN010'BGM+220+PO-1+9'UNZ+1+1'";
-        let segs = parse(input);
-        let result = validate_envelope(&segs);
+        let result = parse_and_validate(input);
         assert!(matches!(result, Err(EdifactError::MissingSegment { ref tag, .. }) if tag == "UNT"));
     }
 
     #[test]
     fn stray_segment_outside_message_returns_err() {
         let input = b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A:UN:EAN010'BGM+220+PO-1+9'UNT+3+1'BGM+999+PO-2+9'UNZ+1+1'";
-        let segs = parse(input);
-        let result = validate_envelope(&segs);
+        let result = parse_and_validate(input);
         assert!(matches!(result, Err(EdifactError::InvalidSegmentForMessage { .. })));
     }
 
     #[test]
     fn missing_unb_sender_component_returns_err() {
         let input = b"UNB+UNOA:3++R+200101:0900+1'UNH+1+ORDERS:D:11A:UN:EAN010'BGM+220+PO-1+9'UNT+3+1'UNZ+1+1'";
-        let segs = parse(input);
-        let result = validate_envelope(&segs);
+        let result = parse_and_validate(input);
         // Element 1 (sender) exists but is empty ("+") — component 0 is absent.
         assert!(
             matches!(result, Err(EdifactError::MissingRequiredComponent { ref tag, element_index: 1, component_index: 0 }) if tag == "UNB"),
@@ -391,32 +388,31 @@ mod tests {
     #[test]
     fn nested_unh_without_closing_previous_message_returns_err() {
         let input = b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A:UN:EAN010'BGM+220+PO-1+9'UNH+2+ORDERS:D:11A:UN:EAN010'UNT+3+2'UNZ+1+1'";
-        let segs = parse(input);
-        let result = validate_envelope(&segs);
-        assert!(matches!(result, Err(EdifactError::UnexpectedEof { .. })));
+        let result = parse_and_validate(input);
+        assert!(
+            matches!(result, Err(EdifactError::InvalidSegmentForMessage { ref tag, .. }) if tag == "UNH"),
+            "expected InvalidSegmentForMessage(UNH), got {result:?}"
+        );
     }
 
     #[test]
     fn unt_message_reference_must_match_unh() {
         let input = b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A:UN:EAN010'BGM+220+PO-1+9'UNT+3+999'UNZ+1+1'";
-        let segs = parse(input);
-        let result = validate_envelope(&segs);
+        let result = parse_and_validate(input);
         assert!(matches!(result, Err(EdifactError::QualifierMismatch { tag, .. }) if tag == "UNT"));
     }
 
     #[test]
     fn unz_control_reference_must_match_unb() {
         let input = b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A:UN:EAN010'BGM+220+PO-1+9'UNT+3+1'UNZ+1+999'";
-        let segs = parse(input);
-        let result = validate_envelope(&segs);
+        let result = parse_and_validate(input);
         assert!(matches!(result, Err(EdifactError::QualifierMismatch { tag, .. }) if tag == "UNZ"));
     }
 
     #[test]
     fn missing_unh_message_type_components_return_err() {
         let input = b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A'BGM+220+PO-1+9'UNT+3+1'UNZ+1+1'";
-        let segs = parse(input);
-        let result = validate_envelope(&segs);
+        let result = parse_and_validate(input);
         // UNH element 1 = "ORDERS:D:11A" — component 3 (controlling agency) is absent.
         assert!(
             matches!(result, Err(EdifactError::MissingRequiredComponent { ref tag, element_index: 1, component_index: 3 }) if tag == "UNH"),
@@ -427,8 +423,39 @@ mod tests {
     #[test]
     fn nested_unz_inside_message_returns_err() {
         let input = b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A:UN:EAN010'UNZ+1+1'UNT+2+1'UNZ+1+1'";
-        let segs = parse(input);
-        let result = validate_envelope(&segs);
+        let result = parse_and_validate(input);
         assert!(matches!(result, Err(EdifactError::InvalidSegmentForMessage { tag, .. }) if tag == "UNZ"));
+    }
+
+    // ── UNG/UNE functional-group regression guard ────────────────────────────
+    //
+    // ISO 9735-1 defines optional functional groups (UNG/UNE) that may wrap
+    // one or more UNH/UNT pairs.  `validate_envelope` currently documents that
+    // UNG/UNE are NOT supported (see module doc at line ~62).  These tests
+    // assert the *documented* behaviour: UNG/UNE-wrapped interchanges must
+    // not silently produce incorrect counts — they must return an explicit error.
+
+    #[test]
+    fn envelope_with_ung_returns_explicit_error() {
+        // A UNG segment appearing between UNB and UNH is not a recognized
+        // envelope segment — validate_envelope must reject it explicitly.
+        let input = b"UNB+UNOA:3+S+R+200101:0900+1'\
+                      UNG+ORDERS+S+R+200101:0900+1+UN+D:96A'\
+                      UNH+1+ORDERS:D:96A:UN'\
+                      BGM+220+PO-001+9'\
+                      UNT+3+1'\
+                      UNE+1+1'\
+                      UNZ+1+1'";
+        let result = parse_and_validate(input);
+        assert!(
+            result.is_err(),
+            "UNG/UNE is documented as unsupported; must return an error, not silently produce wrong counts"
+        );
+        // The error must identify the offending segment (UNG or UNE), not some
+        // unrelated internal failure.
+        assert!(
+            matches!(result, Err(EdifactError::InvalidSegmentForMessage { ref tag, .. }) if tag == "UNG" || tag == "UNE"),
+            "expected InvalidSegmentForMessage for UNG or UNE, got {result:?}"
+        );
     }
 }

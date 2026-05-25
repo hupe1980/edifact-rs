@@ -1,0 +1,5 @@
+error: segment tag must be exactly 3 ASCII uppercase letters; got "bgm"
+  --> tests/ui/fail_invalid_segment_tag.rs:16:21
+   |
+16 | #[edifact(segment = "bgm")]
+   |                     ^^^^^

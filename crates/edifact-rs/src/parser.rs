@@ -603,7 +603,7 @@ fn read_remainder_of_segment<R: BufRead>(
 ) -> Result<Option<crate::tokenizer::RawSegment>, EdifactError> {
     let mut escaped = false;
     loop {
-        if out.bytes.len() > max_segment_bytes {
+        if out.bytes.len() >= max_segment_bytes {
             return Err(EdifactError::SegmentTooLong {
                 offset: out.start_offset,
                 limit: max_segment_bytes,

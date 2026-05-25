@@ -792,11 +792,11 @@ impl<'a> Iterator for MessageWindowsSliceIter<'a> {
                         self.buf.clear();
                         self.in_message = false;
                         self.done = true;
-                        return Some(Err(EdifactError::ValidationFailed {
-                            error_count: 1,
-                            first_message:
-                                "UNH seen while a message window is already open (missing UNT)"
-                                    .to_owned(),
+                        let offset = segment.span.start;
+                        return Some(Err(EdifactError::InvalidSegmentForMessage {
+                            tag: "UNH".to_owned(),
+                            message_type: "ENVELOPE".to_owned(),
+                            offset,
                         }));
                     }
                     self.buf.clear();
@@ -892,15 +892,15 @@ impl<I: Iterator<Item = Result<crate::OwnedSegment, EdifactError>>> Iterator
             match segment.tag.as_str() {
                 "UNH" => {
                     if self.in_message {
-                        // Malformed: new UNH without a prior UNT.
+                        // Malformed: new UNH without closing the prior UNT.
                         self.buf.clear();
                         self.in_message = false;
                         self.done = true;
-                        return Some(Err(EdifactError::ValidationFailed {
-                            error_count: 1,
-                            first_message:
-                                "UNH seen while a message window is already open (missing UNT)"
-                                    .to_owned(),
+                        let offset = segment.span.start;
+                        return Some(Err(EdifactError::InvalidSegmentForMessage {
+                            tag: "UNH".to_owned(),
+                            message_type: "ENVELOPE".to_owned(),
+                            offset,
                         }));
                     }
                     self.buf.clear();
@@ -1387,11 +1387,94 @@ mod tests {
         let input = b"UNH+1+ORDERS:D:96A:UN'BGM+220+PO-001+9'\
                       UNH+2+ORDERS:D:96A:UN'BGM+220+PO-002+9'UNT+3+2'";
         let results: Vec<_> = message_windows_bytes(input).collect();
-        // First item must be an error (UNH before UNT)
+        // First item must be an error (UNH before UNT — missing closer)
         assert!(
-            matches!(results[0], Err(EdifactError::ValidationFailed { .. })),
-            "expected ValidationFailed, got: {:?}",
+            matches!(
+                results[0],
+                Err(EdifactError::InvalidSegmentForMessage { ref tag, .. }) if tag == "UNH"
+            ),
+            "expected InvalidSegmentForMessage(UNH), got: {:?}",
             results[0]
         );
+    }
+
+    // ── SegmentAccessor unit tests ─────────────────────────────────────────────
+
+    fn parse_one(input: &str) -> crate::OwnedSegment {
+        crate::from_reader(std::io::Cursor::new(input.as_bytes()))
+            .expect("parse failed")
+            .into_iter()
+            .next()
+            .expect("at least one segment")
+    }
+
+    #[test]
+    fn segment_accessor_get_element_returns_value() {
+        let owned = parse_one("BGM+220+PO-001+9'");
+        let seg = owned.as_borrowed();
+        assert_eq!(SegmentAccessor::get_element(&seg, 0), Some("220"));
+        assert_eq!(SegmentAccessor::get_element(&seg, 1), Some("PO-001"));
+        assert_eq!(SegmentAccessor::get_element(&seg, 2), Some("9"));
+        assert_eq!(SegmentAccessor::get_element(&seg, 9), None, "out-of-bounds must return None");
+    }
+
+    #[test]
+    fn segment_accessor_get_element_filters_empty() {
+        let owned = parse_one("TST+++VALUE'");
+        let seg = owned.as_borrowed();
+        // elements 0 and 1 are empty; element 2 is "VALUE"
+        assert_eq!(SegmentAccessor::get_element(&seg, 0), None, "empty element must return None");
+        assert_eq!(SegmentAccessor::get_element(&seg, 1), None, "empty element must return None");
+        assert_eq!(SegmentAccessor::get_element(&seg, 2), Some("VALUE"));
+    }
+
+    #[test]
+    fn segment_accessor_get_component_returns_value() {
+        let owned = parse_one("UNH+1+ORDERS:D:96A:UN'");
+        let seg = owned.as_borrowed();
+        assert_eq!(seg.get_component(1, 0), Some("ORDERS"));
+        assert_eq!(seg.get_component(1, 1), Some("D"));
+        assert_eq!(seg.get_component(1, 2), Some("96A"));
+        assert_eq!(seg.get_component(1, 3), Some("UN"));
+        assert_eq!(seg.get_component(1, 9), None, "out-of-bounds must return None");
+    }
+
+    #[test]
+    fn segment_accessor_text_element_errors_on_missing() {
+        let owned = parse_one("BGM+'");
+        let seg = owned.as_borrowed();
+        // element 0 is empty — text_element must return an error
+        let err = seg.text_element(0);
+        assert!(
+            matches!(err, Err(EdifactError::MissingRequiredElement { ref tag, element_index: 0 }) if tag == "BGM"),
+            "expected MissingRequiredElement, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn segment_accessor_required_composite_errors_on_missing() {
+        let owned = parse_one("DTM+137'");
+        let seg = owned.as_borrowed();
+        // component 1 of element 0 is absent
+        let err = seg.required_composite(0, 1);
+        assert!(
+            matches!(err, Err(EdifactError::MissingRequiredComponent { ref tag, element_index: 0, component_index: 1 }) if tag == "DTM"),
+            "expected MissingRequiredComponent, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn segment_accessor_code_element_parses_integer() {
+        let owned = parse_one("QTY+21:100'");
+        let seg = owned.as_borrowed();
+        let qty: u32 = seg.code_element(0).expect("should parse qualifier as u32");
+        assert_eq!(qty, 21);
+    }
+
+    #[test]
+    fn segment_accessor_optional_element_absent_returns_none() {
+        let owned = parse_one("BGM+220'");
+        let seg = owned.as_borrowed();
+        assert_eq!(seg.optional_element(5), None);
     }
 }

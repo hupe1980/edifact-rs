@@ -144,7 +144,17 @@ fn parse_struct_attrs(input: &DeriveInput) -> syn::Result<StructAttrs> {
         }
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("segment") {
-                out.segment = Some(meta.value()?.parse::<syn::LitStr>()?.value());
+                let lit = meta.value()?.parse::<syn::LitStr>()?;
+                let tag = lit.value();
+                if tag.len() != 3 || !tag.bytes().all(|b| b.is_ascii_uppercase()) {
+                    return Err(syn::Error::new(
+                        lit.span(),
+                        format!(
+                            "segment tag must be exactly 3 ASCII uppercase letters; got {tag:?}"
+                        ),
+                    ));
+                }
+                out.segment = Some(tag);
             } else if meta.path.is_ident("qualifier") {
                 out.qualifier = Some(meta.value()?.parse::<syn::LitStr>()?.value());
                 out.qualifier_span = Some(meta.path.span());
