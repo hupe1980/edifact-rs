@@ -17,7 +17,7 @@
 
 use edifact_rs::{
     ProfileRulePack, ValidationContext, ValidationIssue, ValidationLayer, ValidationReport,
-    ValidationSeverity, Validator, from_bytes,
+    ValidationRuleContext, ValidationSeverity, Validator, from_bytes,
 };
 
 // ── Application-level error type ──────────────────────────────────────────────
@@ -38,9 +38,9 @@ enum OrdersViolation {
 // ── Pattern A: ProfileRulePack + rule-ID mapping ───────────────────────────────
 
 fn build_orders_pack() -> ProfileRulePack {
-    let function_code_pack = ProfileRulePack::builder("ORDERS-FUNCTION-CODE")
+    let function_code_pack = ProfileRulePack::new("ORDERS-FUNCTION-CODE")
         .for_message_type("ORDERS")
-        .with_rule_fn(|segments| {
+        .with_stateless_rule_fn(|segments| {
             let bgm = segments.iter().find(|s| s.tag == "BGM")?;
             let func = bgm.get_element(2)?.get_component(0)?;
             // Only codes 9 (original) and 1 (cancellation) are accepted.
@@ -56,9 +56,9 @@ fn build_orders_pack() -> ProfileRulePack {
             })
         });
 
-    let reference_pack = ProfileRulePack::builder("ORDERS-PO-REF")
+    let reference_pack = ProfileRulePack::new("ORDERS-PO-REF")
         .for_message_type("ORDERS")
-        .with_rule_fn(|segments| {
+        .with_stateless_rule_fn(|segments| {
             let bgm = segments.iter().find(|s| s.tag == "BGM")?;
             let reference = bgm.get_element(1)?.get_component(0)?;
             reference.is_empty().then(|| {
@@ -70,7 +70,7 @@ fn build_orders_pack() -> ProfileRulePack {
             })
         });
 
-    ProfileRulePack::builder("ORDERS-COMBINED")
+    ProfileRulePack::new("ORDERS-COMBINED")
         .merge(function_code_pack)
         .merge(reference_pack)
 }
@@ -109,7 +109,7 @@ fn extract_violations(report: &ValidationReport) -> Vec<OrdersViolation> {
 /// access to injected configuration, or must be tested in isolation.
 struct MaxSegmentValidator {
     /// Maximum accepted segment count in a single message.
-    limit: u32,
+    limit: usize,
 }
 
 impl Validator for MaxSegmentValidator {
@@ -117,8 +117,9 @@ impl Validator for MaxSegmentValidator {
         &self,
         segments: &[edifact_rs::Segment<'_>],
         report: &mut ValidationReport,
+        _context: &ValidationRuleContext<'_>,
     ) {
-        let count = segments.len() as u32;
+        let count = segments.len();
         if count > self.limit {
             report.add_warning(
                 ValidationIssue::new(

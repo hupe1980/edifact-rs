@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use edifact_rs::{
     ProfileRulePack, ServiceStringAdvice, Tokenizer, ValidationContext, ValidationIssue,
-    ValidationLayer, ValidationReport, ValidationSeverity, Validator, from_bytes, from_reader,
+    ValidationLayer, ValidationReport, ValidationRuleContext, ValidationSeverity, Validator, from_bytes, from_reader,
     segments_to_bytes,
 };
 use std::io::{Cursor, Read};
@@ -113,6 +113,7 @@ fn bench_validation(c: &mut Criterion) {
             &self,
             _segments: &[edifact_rs::Segment<'_>],
             _report: &mut ValidationReport,
+            _context: &ValidationRuleContext<'_>,
         ) {
         }
     }
@@ -124,9 +125,9 @@ fn bench_validation(c: &mut Criterion) {
         .with_message_type("ORDERS")
         .with_validator(ValidationLayer::Structure, NoopValidator)
         .build();
-    let custom_pack = ProfileRulePack::builder("bench-custom-pack")
+    let custom_pack = ProfileRulePack::new("bench-custom-pack")
         .for_message_type("ORDERS")
-        .with_rule_fn(|segments| {
+        .with_stateless_rule_fn(|segments| {
             let has_bgm = segments.iter().any(|seg| seg.tag == "BGM");
             if has_bgm {
                 None
@@ -146,9 +147,9 @@ fn bench_validation(c: &mut Criterion) {
         .with_profile_pack(custom_pack)
         .build();
 
-    let pack_a = ProfileRulePack::builder("bench-pack-a")
+    let pack_a = ProfileRulePack::new("bench-pack-a")
         .for_message_type("ORDERS")
-        .with_rule_fn(|segments| {
+        .with_stateless_rule_fn(|segments| {
             let has_dtm = segments.iter().any(|seg| seg.tag == "DTM");
             if has_dtm {
                 None
@@ -162,9 +163,9 @@ fn bench_validation(c: &mut Criterion) {
                 )
             }
         });
-    let pack_b = ProfileRulePack::builder("bench-pack-b")
+    let pack_b = ProfileRulePack::new("bench-pack-b")
         .for_message_type("ORDERS")
-        .with_rule_fn(|segments| {
+        .with_stateless_rule_fn(|segments| {
             let has_nad = segments.iter().any(|seg| seg.tag == "NAD");
             if has_nad {
                 None

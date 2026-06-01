@@ -13,7 +13,7 @@
 //! ```
 
 use edifact_rs::{
-    ValidationContext, ValidationLayer, Validator, ValidationReport, Segment,
+    ValidationContext, ValidationLayer, ValidationRuleContext, Validator, ValidationReport, Segment,
     find_qualified_segment, from_bytes, segments_to_bytes, validate_each,
 };
 
@@ -21,7 +21,7 @@ use edifact_rs::{
 struct SimpleValidator;
 
 impl Validator for SimpleValidator {
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport) {
+    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
         validate_each(segments, report, |_segment| {
             // Basic structural validation
             // In a real application, you would:
@@ -68,9 +68,9 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
         // Promote the first validation error into an `EdifactError` so callers
         // receive a typed error rather than having to inspect the report.
         return Err(edifact_rs::EdifactError::ValidationFailed {
-            error_count: report.errors.len(),
+            error_count: report.errors().len(),
             first_message: report
-                .errors
+                .errors()
                 .first()
                 .map(|issue| issue.message.clone())
                 .unwrap_or_else(|| "unknown validation issue".to_owned()),

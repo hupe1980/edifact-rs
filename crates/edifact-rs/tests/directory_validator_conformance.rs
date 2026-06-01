@@ -1,6 +1,6 @@
 use edifact_rs::{
     DirectoryValidator, EdifactError, ElementRef, SegmentDefinition, Status, ValidationReport,
-    Validator, from_bytes,
+    ValidationRuleContext, Validator, from_bytes,
 };
 
 static DTM_ELEMENTS: &[ElementRef] = &[
@@ -88,7 +88,7 @@ fn conformance_accepts_real_world_composite_with_internal_empty_component() {
 
     let validator = new_validator();
     let mut report = ValidationReport::default();
-    validator.validate_batch(&segments, &mut report);
+    validator.validate_batch(&segments, &mut report, &ValidationRuleContext::empty());
 
     assert!(report.is_valid(), "expected valid report, got {report:?}");
 }
@@ -100,7 +100,7 @@ fn conformance_accepts_composite_when_first_component_empty_but_later_present() 
 
     let validator = new_validator();
     let mut report = ValidationReport::default();
-    validator.validate_batch(&segments, &mut report);
+    validator.validate_batch(&segments, &mut report, &ValidationRuleContext::empty());
 
     assert!(report.is_valid(), "expected valid report, got {report:?}");
 }
@@ -112,7 +112,7 @@ fn conformance_accepts_trailing_empty_components_when_effective_count_matches() 
 
     let validator = new_validator();
     let mut report = ValidationReport::default();
-    validator.validate_batch(&segments, &mut report);
+    validator.validate_batch(&segments, &mut report, &ValidationRuleContext::empty());
 
     assert!(report.is_valid(), "expected valid report, got {report:?}");
 }
@@ -124,11 +124,11 @@ fn conformance_rejects_mandatory_composite_when_all_components_empty() {
 
     let validator = new_validator();
     let mut report = ValidationReport::default();
-    validator.validate_batch(&segments, &mut report);
+    validator.validate_batch(&segments, &mut report, &ValidationRuleContext::empty());
 
     assert!(report.has_errors(), "expected errors, got {report:?}");
     assert!(
-        report.errors.iter().any(|issue| issue.message.contains("required element")),
+        report.errors().iter().any(|issue| issue.message.contains("required element")),
         "expected missing-required-element issue, got {report:?}"
     );
 }
@@ -140,7 +140,7 @@ fn conformance_flags_underfilled_composite_component_count() {
 
     let validator = new_validator();
     let mut report = ValidationReport::default();
-    validator.validate_batch(&segments, &mut report);
+    validator.validate_batch(&segments, &mut report, &ValidationRuleContext::empty());
 
     assert!(
         report.has_errors(),
@@ -148,7 +148,7 @@ fn conformance_flags_underfilled_composite_component_count() {
     );
     assert!(
         report
-            .errors
+            .errors()
             .iter()
             .any(|issue| issue.message.contains("expected 3")),
         "expected component-count error, got {report:?}"
@@ -162,12 +162,12 @@ fn conformance_rejects_unknown_tags_when_enforced() {
 
     let validator = new_validator();
     let mut report = ValidationReport::default();
-    validator.validate_batch(&segments, &mut report);
+    validator.validate_batch(&segments, &mut report, &ValidationRuleContext::empty());
 
     assert!(report.has_errors(), "expected errors, got {report:?}");
     assert!(
         report
-            .errors
+            .errors()
             .iter()
             .any(|issue| issue.message.contains("not valid for message type")),
         "expected unknown-segment issue, got {report:?}"
@@ -181,7 +181,7 @@ fn conformance_can_run_structure_checks_without_code_lists() {
 
     let validator = new_validator();
     let mut report = ValidationReport::default();
-    validator.validate_batch(&segments, &mut report);
+    validator.validate_batch(&segments, &mut report, &ValidationRuleContext::empty());
 
     assert!(report.is_valid(), "expected valid report, got {report:?}");
 }

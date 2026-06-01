@@ -1,7 +1,8 @@
 //! Shared UN/EDIFACT directory validation engine used by D.11A, D.01B and D.96A.
 
-use crate::validator::{Validator, report_error};
+use crate::validator::{ValidationRuleContext, Validator, report_error};
 use crate::{EdifactError, Segment, ValidationIssue, ValidationReport, ValidationSeverity};
+use std::sync::Arc;
 
 /// Mandatory/Conditional status of a data element within a segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,14 +37,30 @@ pub struct SegmentDefinition {
     pub elements: &'static [ElementRef],
 }
 
-type SegmentLookupFn = fn(&str) -> Option<&'static SegmentDefinition>;
-type IsCodeValidFn = fn(&str, &str) -> bool;
-type SuggestCodeFn = fn(&str, &str) -> Option<&'static str>;
-type ExpectedComponentsFn = fn(&str, usize) -> Option<u8>;
-type AdditionalStructureRuleFn = fn(&Segment<'_>) -> Result<(), EdifactError>;
+type SegmentLookupFn = Arc<dyn Fn(&str) -> Option<&'static SegmentDefinition> + Send + Sync>;
+type IsCodeValidFn = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
+type SuggestCodeFn = Arc<dyn Fn(&str, &str) -> Option<&'static str> + Send + Sync>;
+type ExpectedComponentsFn = Arc<dyn Fn(&str, usize) -> Option<u8> + Send + Sync>;
+type AdditionalStructureRuleRefFn = fn(&Segment<'_>) -> Result<(), EdifactError>;
+type AdditionalStructureRuleFn = Arc<dyn Fn(&Segment<'_>) -> Result<(), EdifactError> + Send + Sync>;
 /// Returns the `(element_index, component_index, data_element_id)` tuples to
 /// validate against a code list for the given segment tag.
-type CodeListRulesFn = fn(tag: &str) -> &'static [(usize, usize, &'static str)];
+type CodeListRulesFn = Arc<dyn Fn(&str) -> &'static [(usize, usize, &'static str)] + Send + Sync>;
+/// Returns the mandatory segment tags for a given EDIFACT message type.
+///
+/// The slice should contain every tag that must appear at least once in a
+/// conformant message of the given type.  The tags are also used to check
+/// canonical ordering — their relative order in the returned slice is taken
+/// as the expected order in the message.
+type RequiredSegmentsFn = Arc<dyn Fn(&str) -> &'static [&'static str] + Send + Sync>;
+
+/// Default required-segments mapping used when no custom function is provided.
+fn default_required_segments(message_type: &str) -> &'static [&'static str] {
+    match message_type {
+        "UTILMD" | "ORDERS" | "INVOIC" => &["UNH", "BGM", "UNT"],
+        _ => &["UNH", "UNT"],
+    }
+}
 
 /// Code-list validation rules common to all UN/EDIFACT directory releases.
 ///
@@ -87,6 +104,8 @@ pub struct DirectoryValidator {
     expected_components: ExpectedComponentsFn,
     code_list_rules: CodeListRulesFn,
     additional_structure_rule: Option<AdditionalStructureRuleFn>,
+    /// Configurable mapping from message type to required segment tags.
+    required_segments: RequiredSegmentsFn,
     message_type: Option<String>,
     enforce_known_tags: bool,
     structure_checks: bool,
@@ -109,20 +128,22 @@ impl DirectoryValidator {
     /// Create a validator for a specific directory release with injected lookup/check hooks.
     pub fn new(
         directory_id: &'static str,
-        segment_lookup: SegmentLookupFn,
-        is_code_valid: IsCodeValidFn,
-        suggest_code: SuggestCodeFn,
-        expected_components: ExpectedComponentsFn,
-        additional_structure_rule: Option<AdditionalStructureRuleFn>,
+        segment_lookup: fn(&str) -> Option<&'static SegmentDefinition>,
+        is_code_valid: fn(&str, &str) -> bool,
+        suggest_code: fn(&str, &str) -> Option<&'static str>,
+        expected_components: fn(&str, usize) -> Option<u8>,
+        additional_structure_rule: Option<AdditionalStructureRuleRefFn>,
     ) -> Self {
         Self {
             directory_id,
-            segment_lookup,
-            is_code_valid,
-            suggest_code,
-            expected_components,
-            code_list_rules: base_code_list_rules,
-            additional_structure_rule,
+            segment_lookup: Arc::new(segment_lookup),
+            is_code_valid: Arc::new(is_code_valid),
+            suggest_code: Arc::new(suggest_code),
+            expected_components: Arc::new(expected_components),
+            code_list_rules: Arc::new(base_code_list_rules),
+            additional_structure_rule: additional_structure_rule
+                .map(|f| Arc::new(f) as AdditionalStructureRuleFn),
+            required_segments: Arc::new(default_required_segments),
             message_type: None,
             enforce_known_tags: true,
             structure_checks: true,
@@ -130,12 +151,54 @@ impl DirectoryValidator {
         }
     }
 
+    /// Create a validator from a static slice of [`SegmentDefinition`]s.
+    ///
+    /// This is the preferred constructor when code-generating directory data as
+    /// a `static` array: no manual fn-pointer boilerplate is required.
+    ///
+    /// Code-list checks are **disabled** by default (the built-in `is_code_valid`
+    /// always returns `true`).  Call [`with_code_list_rules`][Self::with_code_list_rules]
+    /// to register directory-specific rules that actually validate code values.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// static MY_SEGMENTS: &[SegmentDefinition] = &[ /* … */ ];
+    ///
+    /// let validator = DirectoryValidator::from_definitions(MY_SEGMENTS)
+    ///     .with_code_list_rules(my_code_list_rules);
+    /// ```
+    pub fn from_definitions(definitions: &'static [SegmentDefinition]) -> Self {
+        Self {
+            directory_id: "custom",
+            segment_lookup: Arc::new(move |tag: &str| {
+                definitions.iter().find(|d| d.tag == tag)
+            }),
+            is_code_valid: Arc::new(|_de: &str, _code: &str| true),
+            suggest_code: Arc::new(|_de: &str, _code: &str| None),
+            expected_components: Arc::new(|_tag: &str, _idx: usize| None),
+            code_list_rules: Arc::new(base_code_list_rules),
+            additional_structure_rule: None,
+            required_segments: Arc::new(default_required_segments),
+            message_type: None,
+            enforce_known_tags: true,
+            structure_checks: true,
+            code_list_checks: false,
+        }
+    }
+
+    /// Set the directory identifier string (used in error messages).
+    pub fn with_directory_id(mut self, id: &'static str) -> Self {
+        self.directory_id = id;
+        self
+    }
+
     /// Override the code-list rules function.
     ///
     /// Directories can supply a directory-specific implementation that extends or
     /// replaces the base rules from `base_code_list_rules`.
-    pub fn with_code_list_rules(mut self, f: CodeListRulesFn) -> Self {
-        self.code_list_rules = f;
+    pub fn with_code_list_rules(mut self, f: impl Fn(&str) -> &'static [(usize, usize, &'static str)] + Send + Sync + 'static) -> Self {
+        self.code_list_rules = Arc::new(f);
         self
     }
 
@@ -159,6 +222,35 @@ impl DirectoryValidator {
         self
     }
 
+    /// Override the required-segments mapping used for structural validation.
+    ///
+    /// The supplied function receives an EDIFACT message type string (e.g. `"ORDERS"`)
+    /// and must return a `'static` slice of segment tags that are mandatory for that
+    /// type.  The tags are checked both for *presence* and for *canonical ordering*
+    /// within the message.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// fn my_required_segments(msg_type: &str) -> &'static [&'static str] {
+    ///     match msg_type {
+    ///         "DESADV" => &["UNH", "BGM", "SHP", "UNT"],
+    ///         "INVOIC" => &["UNH", "BGM", "MOA", "UNT"],
+    ///         _ => &["UNH", "UNT"],
+    ///     }
+    /// }
+    ///
+    /// let validator = DirectoryValidator::from_definitions(DEFS)
+    ///     .with_required_segments(my_required_segments);
+    /// ```
+    pub fn with_required_segments(
+        mut self,
+        f: impl Fn(&str) -> &'static [&'static str] + Send + Sync + 'static,
+    ) -> Self {
+        self.required_segments = Arc::new(f);
+        self
+    }
+
     fn detect_message_type(&self, segments: &[Segment<'_>]) -> Option<String> {
         if let Some(explicit) = self.message_type.as_deref() {
             return Some(explicit.to_owned());
@@ -170,23 +262,6 @@ impl DirectoryValidator {
             .and_then(|s| s.get_element(1))
             .and_then(|e| e.get_component(0))
             .map(str::to_owned)
-    }
-
-    /// Return the list of segment tags that are mandatory for `message_type`.
-    ///
-    /// **Coverage**: only `UTILMD`, `ORDERS`, and `INVOIC` have message-type-specific
-    /// mandatory segments hard-coded.  All other message types fall back to the
-    /// generic set `["UNH", "UNT"]`.
-    ///
-    /// The returned tags are checked via a presence test only — ordering and
-    /// repetition constraints are *not* validated.  Unknown message types always
-    /// return the generic set, never an empty slice, so envelope segments are
-    /// always required regardless of message type.
-    fn required_segments_for(message_type: &str) -> &'static [&'static str] {
-        match message_type {
-            "UTILMD" | "ORDERS" | "INVOIC" => &["UNH", "BGM", "UNT"],
-            _ => &["UNH", "UNT"],
-        }
     }
 
     /// Count the non-trailing-empty components in element `element_idx` of `seg`.
@@ -311,7 +386,7 @@ impl DirectoryValidator {
             }
             self.validate_component_counts(seg)?;
 
-            if let Some(rule) = self.additional_structure_rule {
+            if let Some(rule) = &self.additional_structure_rule {
                 rule(seg)?;
             }
         }
@@ -329,7 +404,7 @@ impl Validator for DirectoryValidator {
         self.message_type = message_type.map(str::to_owned);
     }
 
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport) {
+    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
         for seg in segments {
             if let Err(err) = self.validate_segment(seg) {
                 report_error(report, err);
@@ -338,7 +413,7 @@ impl Validator for DirectoryValidator {
 
         if self.structure_checks {
             if let Some(message_type) = self.detect_message_type(segments) {
-                for required_tag in Self::required_segments_for(&message_type) {
+                for required_tag in (self.required_segments)(&message_type) {
                     if segments.iter().all(|s| s.tag != *required_tag) {
                         report.add_error(
                             ValidationIssue::new(
@@ -354,7 +429,7 @@ impl Validator for DirectoryValidator {
                     }
                 }
 
-                let seq = Self::required_segments_for(&message_type);
+                let seq = (self.required_segments)(&message_type);
                 let mut last_idx = None;
                 for tag in seq {
                     if let Some(idx) = segments.iter().position(|s| s.tag == *tag) {
@@ -436,7 +511,7 @@ mod tests {
         );
 
         let mut report = ValidationReport::default();
-        validator.validate_batch(&segments, &mut report);
+        validator.validate_batch(&segments, &mut report, &crate::validator::ValidationRuleContext::empty());
         assert!(!report.has_errors());
     }
 
@@ -511,7 +586,7 @@ mod tests {
         .with_code_list_rules(custom_rules);
 
         let mut report = ValidationReport::default();
-        validator.validate_batch(&segments, &mut report);
+        validator.validate_batch(&segments, &mut report, &crate::validator::ValidationRuleContext::empty());
         assert!(
             report.has_warnings(),
             "INVALID is not in the custom code list so validation must warn"

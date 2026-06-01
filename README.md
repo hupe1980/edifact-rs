@@ -459,11 +459,7 @@ edifact-rs/
 │   └── edifact-rs-derive/   proc-macro crate
 │       ├── src/
 │       └── tests/ui/        trybuild compile-fail test suite
-├── scripts/                 UNECE source download helpers
-├── CHANGELOG.md
-├── CONCEPT.md
-├── FINDINGS.md              independent code-review findings (24/24 fixed ✅)
-└── RELEASE_POLICY.md
+└── scripts/                 UNECE source download helpers
 ```
 
 ---

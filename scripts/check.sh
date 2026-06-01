@@ -19,8 +19,8 @@
 #   8.  cargo publish --dry-run -p edifact-rs-derive     (release-check)
 #   9.  cargo publish --dry-run -p edifact-rs            (release-check)
 #   10. Crate versions match across workspace            (release-check)
-#   12. cargo bench bench_core                           (smoke, skipped with --no-bench)
-#   13. cargo bench bench_criterion smoke                (skipped with --no-bench)
+#   11. cargo bench bench_core                           (smoke, skipped with --no-bench)
+#   12. cargo bench bench_criterion smoke                (skipped with --no-bench)
 
 set -euo pipefail
 

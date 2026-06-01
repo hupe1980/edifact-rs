@@ -13,9 +13,9 @@ BGM+220+PO-4712+9'\
 NAD+BY+4000001000002::9'\
 UNT+4+2'";
 
-    let pack = ProfileRulePack::builder("ORDERS-PROGRESSIVE")
+    let pack = ProfileRulePack::new("ORDERS-PROGRESSIVE")
         .for_message_type("ORDERS")
-        .with_rule_fn(|segments| {
+        .with_stateless_rule_fn(|segments| {
             let has_bgm = segments.iter().any(|segment| segment.tag == "BGM");
             (!has_bgm).then(|| {
                 ValidationIssue::new(ValidationSeverity::Error, "BGM is required per streamed message window")
@@ -23,7 +23,7 @@ UNT+4+2'";
                     .with_segment("BGM")
             })
         })
-        .with_rule_fn(|segments| {
+        .with_stateless_rule_fn(|segments| {
             let has_buyer = segments
                 .iter()
                 .filter(|segment| segment.tag == "NAD")

@@ -17,7 +17,7 @@
 
 fn run_validation() -> Result<(), edifact_rs::EdifactError> {
     use edifact_rs::{
-        ValidationContext, ValidationLayer, Validator, ValidationReport, Segment, validate_each,
+        ValidationContext, ValidationLayer, ValidationRuleContext, Validator, ValidationReport, Segment, validate_each,
         from_bytes,
     };
 
@@ -25,7 +25,7 @@ fn run_validation() -> Result<(), edifact_rs::EdifactError> {
     struct DemoValidator;
 
     impl Validator for DemoValidator {
-        fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport) {
+        fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
             validate_each(segments, report, |segment| {
                 // Example validation: check for invalid code value
                 if segment.tag == "BGM" {
@@ -67,7 +67,7 @@ fn run_validation() -> Result<(), edifact_rs::EdifactError> {
     // `render_deterministic` always produces the same output for the same
     // report — useful for snapshot tests.
     println!("report:\n{}", report.render_deterministic());
-    for warning in &report.warnings {
+    for warning in report.warnings() {
         println!(
             "warning: code={} rule={:?} segment={:?} element={:?} offset={:?} message={}",
             warning.error_code.unwrap_or("UNKNOWN"),

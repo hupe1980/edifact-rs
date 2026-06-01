@@ -750,10 +750,35 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     quote! { __seg.element_str(#idx) }
                 };
                 Ok(if is_option_type(ty) {
+                    let inner_ty = option_inner_type(ty);
+                    let inner_is_str = inner_ty.is_some_and(is_str_like);
+                    if inner_is_str {
+                        quote! {
+                            let #ident = #value_expr
+                                .filter(|__s| !__s.is_empty())
+                                .map(::std::string::String::from);
+                        }
+                    } else {
+                        let inner_ty = inner_ty
+                            .ok_or_else(|| syn::Error::new(ident.span(), "expected Option<T>"))?;
+                        quote! {
+                            let #ident = #value_expr
+                                .filter(|__s| !__s.is_empty())
+                                .map(|__s| __s.parse::<#inner_ty>()
+                                    .map_err(|_| ::edifact_rs::EdifactError::InvalidText { offset: __seg.span.start })
+                                )
+                                .transpose()?;
+                        }
+                    }
+                } else if is_str_like(ty) {
                     quote! {
                         let #ident = #value_expr
                             .filter(|__s| !__s.is_empty())
-                            .map(::std::string::String::from);
+                            .ok_or_else(|| ::edifact_rs::EdifactError::MissingRequiredElement {
+                                tag: #seg_tag.to_owned(),
+                                element_index: #idx as usize,
+                            })?
+                            .to_owned();
                     }
                 } else {
                     quote! {
@@ -763,7 +788,8 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                                 tag: #seg_tag.to_owned(),
                                 element_index: #idx as usize,
                             })?
-                            .to_owned();
+                            .parse::<#ty>()
+                            .map_err(|_| ::edifact_rs::EdifactError::InvalidText { offset: __seg.span.start })?;
                     }
                 })
             })

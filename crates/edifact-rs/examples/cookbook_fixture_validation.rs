@@ -1,5 +1,5 @@
 use edifact_rs::{
-    ValidationContext, ValidationLayer, Validator, ValidationReport, Segment, validate_each,
+    ValidationContext, ValidationLayer, ValidationRuleContext, Validator, ValidationReport, Segment, validate_each,
 };
 
 const D11A_CONFORMING: &str = include_str!("../tests/fixtures/d11a_conforming.edi");
@@ -11,7 +11,7 @@ const D11A_MALFORMED: &str = include_str!("../tests/fixtures/d11a_malformed.edi"
 struct DemoStructuralValidator;
 
 impl Validator for DemoStructuralValidator {
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport) {
+    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
         validate_each(segments, report, |_segment| {
             // Implement custom structural validation logic here
             // For example, check required segments, segment sequences, etc.
@@ -25,7 +25,7 @@ impl Validator for DemoStructuralValidator {
 struct DemoCodeListValidator;
 
 impl Validator for DemoCodeListValidator {
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport) {
+    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
         validate_each(segments, report, |_segment| {
             // Implement custom code-list validation logic here
             // For example, check codes against allowed value sets
@@ -50,11 +50,11 @@ fn run_case(
     println!(
         "case={name} valid={} errors={} warnings={}",
         report.is_valid(),
-        report.errors.len(),
-        report.warnings.len()
+        report.errors().len(),
+        report.warnings().len()
     );
 
-    for warning in &report.warnings {
+    for warning in report.warnings() {
         println!(
             "warning: code={} rule={:?} segment={:?} element={:?} offset={:?} message={}",
             warning.error_code.unwrap_or("UNKNOWN"),
@@ -68,7 +68,7 @@ fn run_case(
             println!("suggestion: {suggestion}");
         }
     }
-    for error in &report.errors {
+    for error in report.errors() {
         println!(
             "error: code={} rule={:?} segment={:?} element={:?} offset={:?} message={}",
             error.error_code.unwrap_or("UNKNOWN"),

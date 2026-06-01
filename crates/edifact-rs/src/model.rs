@@ -25,6 +25,18 @@ impl Span {
             end: self.end + delta,
         }
     }
+
+    /// Length of the span in bytes.
+    #[inline]
+    pub const fn len(self) -> usize {
+        self.end - self.start
+    }
+
+    /// Returns `true` if the span covers zero bytes.
+    #[inline]
+    pub const fn is_empty(self) -> bool {
+        self.start == self.end
+    }
 }
 
 impl std::fmt::Display for Span {
@@ -138,24 +150,6 @@ pub struct OwnedElement {
 
 impl OwnedElement {
     #[inline]
-    /// View this owned element as a borrowed [`Element`].
-    ///
-    /// **Performance note**: allocates a `SmallVec<[Cow<str>; N]>` on every
-    /// call.  If you only need to inspect individual components, use
-    /// [`OwnedSegment::borrow`] → [`BorrowedElement`] instead, which is O(1).
-    pub fn as_borrowed(&self) -> Element<'_> {
-        Element {
-            span: self.span,
-            components: self
-                .components
-                .iter()
-                .map(|component| Cow::Borrowed(component.as_str()))
-                .collect(),
-            component_spans: self.component_spans.clone(),
-        }
-    }
-
-    #[inline]
     /// Shift all stored spans by `delta` bytes.
     pub fn offset(mut self, delta: usize) -> Self {
         self.span = self.span.offset(delta);
@@ -199,8 +193,18 @@ pub struct OwnedSegment {
 /// any intermediate `SmallVec` or `Cow` values.  Use this when you hold an
 /// `&OwnedSegment` reference and want to inspect element data without the
 /// `Vec<Element>` allocation that [`OwnedSegment::as_borrowed`] incurs.
+///
+/// Construct via `BorrowedElement::from(&owned_element)` or through
+/// [`BorrowedSegment::get_element`].
 #[derive(Debug, Clone, Copy)]
 pub struct BorrowedElement<'a>(pub(crate) &'a OwnedElement);
+
+impl<'a> From<&'a OwnedElement> for BorrowedElement<'a> {
+    #[inline]
+    fn from(elem: &'a OwnedElement) -> Self {
+        BorrowedElement(elem)
+    }
+}
 
 impl<'a> BorrowedElement<'a> {
     /// Return the component at position `n` (0-indexed), if it exists.
@@ -252,8 +256,36 @@ impl<'a> BorrowedElement<'a> {
 /// a `Vec<Element>`.  Use this when you hold an `&OwnedSegment` reference and
 /// want to read data without the allocations incurred by
 /// [`OwnedSegment::as_borrowed`].
+///
+/// # Construction
+///
+/// The idiomatic way to obtain a `BorrowedSegment` is via [`OwnedSegment::borrow`]
+/// or the [`From`] impl:
+///
+/// ```rust
+/// use edifact_rs::{BorrowedSegment, OwnedSegment, Span};
+///
+/// let seg = OwnedSegment {
+///     tag: "BGM".into(),
+///     span: Span::new(0, 3),
+///     tag_span: Span::new(0, 3),
+///     elements: vec![],
+/// };
+/// let borrowed = BorrowedSegment::from(&seg);
+/// assert_eq!(borrowed.tag(), "BGM");
+/// ```
+///
+/// The `'a` lifetime is tied to the referent — you cannot outlive the
+/// `OwnedSegment` you borrowed from.
 #[derive(Debug, Clone, Copy)]
 pub struct BorrowedSegment<'a>(pub(crate) &'a OwnedSegment);
+
+impl<'a> From<&'a OwnedSegment> for BorrowedSegment<'a> {
+    #[inline]
+    fn from(seg: &'a OwnedSegment) -> Self {
+        BorrowedSegment(seg)
+    }
+}
 
 impl<'a> BorrowedSegment<'a> {
     /// The segment tag (e.g. `"BGM"`).
@@ -347,7 +379,15 @@ impl OwnedSegment {
             elements: self
                 .elements
                 .iter()
-                .map(OwnedElement::as_borrowed)
+                .map(|elem| Element {
+                    span: elem.span,
+                    components: elem
+                        .components
+                        .iter()
+                        .map(|c| Cow::Borrowed(c.as_str()))
+                        .collect(),
+                    component_spans: elem.component_spans.clone(),
+                })
                 .collect(),
         }
     }

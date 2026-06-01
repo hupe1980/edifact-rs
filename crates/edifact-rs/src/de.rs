@@ -450,60 +450,61 @@ pub fn element_str<'s>(seg: &'s Segment<'_>, idx: usize) -> &'s str {
 /// Extract a required text element from a segment.
 ///
 /// Returns the element's first component, or an error if absent or empty.
+///
+/// # Empty-string semantics
+///
+/// EDIFACT allows elements to be syntactically present but carry an empty
+/// string value (e.g., `SEG++'`). This function treats an empty string as
+/// *absent* — it returns [`EdifactError::MissingRequiredElement`] in that
+/// case, matching the EDIFACT rule that mandatory data elements must carry
+/// a non-empty value.
+///
+/// Delegates to [`SegmentAccessor::text_element`].
 pub fn required_element<'a>(seg: &'a Segment<'_>, idx: usize) -> Result<&'a str, EdifactError> {
-    seg.element_str(idx)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| EdifactError::MissingRequiredElement {
-            tag: seg.tag.to_owned(),
-            element_index: idx,
-        })
+    seg.text_element(idx)
 }
 
 /// Extract an optional text element from a segment.
 ///
 /// Returns the element's first component, or None if absent or empty.
+///
+/// Delegates to [`SegmentAccessor::optional_element`].
 pub fn optional_element<'a>(seg: &'a Segment<'_>, idx: usize) -> Option<&'a str> {
-    seg.element_str(idx)
-        .filter(|s| !s.is_empty())
+    SegmentAccessor::optional_element(seg, idx)
 }
 
 /// Extract a required component from a segment element.
 ///
 /// Returns the component value, or an error if the element or component is absent.
 ///
-/// Distinguishes between two failure modes:
+/// # Empty-string semantics
+///
+/// Like [`required_element`], an empty string component value is treated as
+/// *absent*.  A component that is syntactically present as `''` (two
+/// consecutive component separators) will cause this function to return
+/// [`EdifactError::MissingRequiredComponent`].
+///
+/// # Failure modes
+///
 /// - [`EdifactError::MissingRequiredElement`] — element `elem_idx` is absent.
-/// - [`EdifactError::MissingRequiredComponent`] — element is present but component `comp_idx` is absent.
+/// - [`EdifactError::MissingRequiredComponent`] — element is present but component `comp_idx` is absent or empty.
+///
+/// Delegates to [`SegmentAccessor::required_composite`].
 pub fn required_component<'a>(
     seg: &'a Segment<'_>,
     elem_idx: usize,
     comp_idx: usize,
 ) -> Result<&'a str, EdifactError> {
-    let elem = seg
-        .elements
-        .get(elem_idx)
-        .ok_or_else(|| EdifactError::MissingRequiredElement {
-            tag: seg.tag.to_owned(),
-            element_index: elem_idx,
-        })?;
-
-    elem.get_component(comp_idx)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| EdifactError::MissingRequiredComponent {
-            tag: seg.tag.to_owned(),
-            element_index: elem_idx,
-            component_index: comp_idx,
-        })
+    seg.required_composite(elem_idx, comp_idx)
 }
 
 /// Extract an optional component from a segment element.
 ///
 /// Returns the component value, or None if absent or empty.
+///
+/// Delegates to [`SegmentAccessor::get_component`].
 pub fn optional_component<'a>(seg: &'a Segment<'_>, elem_idx: usize, comp_idx: usize) -> Option<&'a str> {
-    seg.elements
-        .get(elem_idx)
-        .and_then(|elem| elem.get_component(comp_idx))
-        .filter(|s| !s.is_empty())
+    SegmentAccessor::get_component(seg, elem_idx, comp_idx)
 }
 
 /// Iterate over all components of an element without allocating a `Vec`.
@@ -1002,6 +1003,209 @@ where
         let window = window?;
         T::edifact_deserialize(&window)
     })
+}
+
+// ── message_type_from_window ──────────────────────────────────────────────────
+
+/// Extract the EDIFACT message type from a message window.
+///
+/// Scans the segment slice for a `UNH` segment and returns a borrow of the
+/// message-type component (element 1, component 0).  Returns `None` if no
+/// `UNH` segment is present or if the message-type component is absent.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// for window in message_windows_bytes(input) {
+///     let window = window?;
+///     match message_type_from_window(&window) {
+///         Some("ORDERS") => { /* … */ }
+///         Some("INVOIC") => { /* … */ }
+///         other => eprintln!("unhandled message type: {other:?}"),
+///     }
+/// }
+/// ```
+pub fn message_type_from_window<'a>(window: &'a [Segment<'a>]) -> Option<&'a str> {
+    window
+        .iter()
+        .find(|s| s.tag == "UNH")
+        .and_then(|unh| unh.get_element(1))
+        .and_then(|e| e.get_component(0))
+}
+
+// ── MessageDispatch ───────────────────────────────────────────────────────────
+
+/// A type-erased deserialized message produced by [`MessageDispatch`].
+pub struct DispatchedMessage {
+    /// The EDIFACT message type string extracted from the `UNH` segment.
+    pub message_type: String,
+    value: Box<dyn std::any::Any + Send + Sync>,
+}
+
+impl DispatchedMessage {
+    /// Attempt to downcast the inner value to `T`.
+    ///
+    /// Returns `None` if the stored type does not match `T`.
+    pub fn downcast<T: std::any::Any + Send + Sync + 'static>(&self) -> Option<&T> {
+        self.value.downcast_ref::<T>()
+    }
+}
+
+impl std::fmt::Debug for DispatchedMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DispatchedMessage")
+            .field("message_type", &self.message_type)
+            .finish_non_exhaustive()
+    }
+}
+
+type DispatchHandlerFn =
+    Box<dyn for<'a> Fn(&[Segment<'a>]) -> Result<Box<dyn std::any::Any + Send + Sync>, EdifactError> + Send + Sync>;
+
+type FallbackHandlerFn =
+    Box<dyn for<'a> Fn(&[Segment<'a>], &str) -> Result<Box<dyn std::any::Any + Send + Sync>, EdifactError> + Send + Sync>;
+
+/// Type-based dispatcher for mixed-message EDIFACT streams.
+///
+/// Register one handler per message type with [`on`][Self::on], then call
+/// [`dispatch`][Self::dispatch] on each message window.  If no handler matches
+/// and a [`fallback`][Self::fallback] was registered it is invoked instead;
+/// otherwise an [`EdifactError::UnexpectedMessageType`] is returned.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let dispatch = MessageDispatch::new()
+///     .on("ORDERS",  |segs| Orders::edifact_deserialize(segs))
+///     .on("INVOIC",  |segs| Invoice::edifact_deserialize(segs));
+///
+/// for window in message_windows_bytes(input) {
+///     let window = window?;
+///     let msg = dispatch.dispatch(&window)?;
+///     match msg.message_type.as_str() {
+///         "ORDERS"  => { let o = msg.downcast::<Orders>().unwrap(); /* … */ }
+///         "INVOIC"  => { let i = msg.downcast::<Invoice>().unwrap(); /* … */ }
+///         _         => unreachable!(),
+///     }
+/// }
+/// ```
+pub struct MessageDispatch {
+    handlers: Vec<(String, DispatchHandlerFn)>,
+    fallback: Option<FallbackHandlerFn>,
+}
+
+impl Default for MessageDispatch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MessageDispatch {
+    /// Create an empty dispatcher.
+    pub fn new() -> Self {
+        Self {
+            handlers: Vec::new(),
+            fallback: None,
+        }
+    }
+
+    /// Register a handler for `message_type`.
+    ///
+    /// The closure receives the full message window and returns a typed value
+    /// that is boxed and stored inside [`DispatchedMessage`].
+    pub fn on<T, F>(mut self, message_type: &str, handler: F) -> Self
+    where
+        T: std::any::Any + Send + Sync + 'static,
+        F: for<'a> Fn(&[Segment<'a>]) -> Result<T, EdifactError> + Send + Sync + 'static,
+    {
+        let erased: DispatchHandlerFn = Box::new(move |segs| {
+            let val = handler(segs)?;
+            Ok(Box::new(val) as Box<dyn std::any::Any + Send + Sync>)
+        });
+        self.handlers.push((message_type.to_owned(), erased));
+        self
+    }
+
+    /// Register a fallback handler for unrecognised message types.
+    ///
+    /// The closure receives the segment window **and** the unknown message-type
+    /// string.
+    pub fn fallback<T, F>(mut self, handler: F) -> Self
+    where
+        T: std::any::Any + Send + Sync + 'static,
+        F: for<'a> Fn(&[Segment<'a>], &str) -> Result<T, EdifactError> + Send + Sync + 'static,
+    {
+        let erased: FallbackHandlerFn = Box::new(move |segs, mt| {
+            let val = handler(segs, mt)?;
+            Ok(Box::new(val) as Box<dyn std::any::Any + Send + Sync>)
+        });
+        self.fallback = Some(erased);
+        self
+    }
+
+    /// Dispatch a single message window to the appropriate handler.
+    ///
+    /// The message type is extracted from the `UNH` segment.  If no `UNH` is
+    /// present, [`EdifactError::MissingSegment`] is returned.
+    pub fn dispatch(&self, window: &[Segment<'_>]) -> Result<DispatchedMessage, EdifactError> {
+        let message_type = window
+            .iter()
+            .find(|s| s.tag == "UNH")
+            .and_then(|unh| unh.get_element(1))
+            .and_then(|e| e.get_component(0))
+            .map(|s| s.to_owned())
+            .ok_or_else(|| EdifactError::MissingSegment {
+                tag: "UNH".to_owned(),
+                expected_position: "first segment of message window".to_owned(),
+            })?;
+
+        for (mt, handler) in &self.handlers {
+            if *mt == message_type {
+                let value = handler(window)?;
+                return Ok(DispatchedMessage { message_type, value });
+            }
+        }
+
+        if let Some(fallback) = &self.fallback {
+            let value = fallback(window, &message_type)?;
+            return Ok(DispatchedMessage { message_type, value });
+        }
+
+        Err(EdifactError::UnexpectedMessageType {
+            message_type,
+        })
+    }
+
+    /// Dispatch all messages from a byte reader.
+    ///
+    /// Each message window is extracted and dispatched in order.  The returned
+    /// iterator is lazy — errors are yielded as `Err` items.
+    pub fn dispatch_all_from_bytes<'a>(
+        &'a self,
+        input: &'a [u8],
+    ) -> impl Iterator<Item = Result<DispatchedMessage, EdifactError>> + 'a {
+        message_windows_bytes(input).map(move |window| {
+            let window = window?;
+            self.dispatch(&window)
+        })
+    }
+
+    /// Dispatch all messages from a reader.
+    ///
+    /// Parses the stream into message windows and dispatches each.  The
+    /// returned iterator yields owned [`DispatchedMessage`] values lazily:
+    /// each window is fully buffered in memory (as `Vec<OwnedSegment>`) before
+    /// dispatch, but windows are processed one at a time rather than all at once.
+    pub fn dispatch_all_from_reader<R: Read + 'static>(
+        &self,
+        reader: R,
+    ) -> impl Iterator<Item = Result<DispatchedMessage, EdifactError>> + '_ {
+        message_windows_from_reader(reader).map(|window| {
+            let window = window?;
+            let borrowed: Vec<Segment<'_>> = window.iter().map(|s| s.as_borrowed()).collect();
+            self.dispatch(&borrowed)
+        })
+    }
 }
 
 #[cfg(test)]

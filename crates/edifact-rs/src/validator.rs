@@ -1,25 +1,102 @@
 //! Validation pipeline for structural and semantic EDIFACT checks.
 
 use crate::{EdifactError, Segment, ValidationIssue, ValidationReport, ValidationSeverity};
+use std::any::Any;
+use std::sync::Arc;
+
+/// Typed context injected into profile rule closures at validation time.
+///
+/// Rules access per-call metadata via [`ValidationRuleContext::metadata`].
+/// If no metadata was injected, every `metadata()` call returns `None`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let pack = ProfileRulePack::new("AHB-11001")
+///     .with_rule_fn(|segs, ctx| {
+///         let pruefid: &Pruefid = ctx.metadata()?;
+///         // use pruefid …
+///         None
+///     });
+///
+/// let report = ValidationContext::builder()
+///     .with_profile_pack(pack)
+///     .build()
+///     .validate_lenient_with(&segments, &my_pruefid);
+/// ```
+#[derive(Clone, Copy)]
+pub struct ValidationRuleContext<'a> {
+    metadata: Option<&'a (dyn Any + Send + Sync)>,
+}
+
+impl<'a> ValidationRuleContext<'a> {
+    /// Construct a context with no metadata.
+    pub fn empty() -> Self {
+        Self { metadata: None }
+    }
+
+    /// Construct a context holding a typed metadata reference.
+    pub fn new<T: Any + Send + Sync>(value: &'a T) -> Self {
+        Self {
+            metadata: Some(value as &(dyn Any + Send + Sync)),
+        }
+    }
+
+    /// Downcast the metadata to `T`.  Returns `None` if no metadata was
+    /// injected or if the concrete type does not match `T`.
+    pub fn metadata<T: Any + Send + Sync>(&self) -> Option<&T> {
+        self.metadata?.downcast_ref::<T>()
+    }
+
+    /// Return `true` if metadata was provided.
+    pub fn has_metadata(&self) -> bool {
+        self.metadata.is_some()
+    }
+}
+
+impl std::fmt::Debug for ValidationRuleContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValidationRuleContext")
+            .field("has_metadata", &self.metadata.is_some())
+            .finish()
+    }
+}
 
 /// A profile rule that can be added to a [`ProfileRulePack`].
 ///
 /// Implement this trait to create reusable, composable profile rules for
-/// EDIFACT message validation.
+/// EDIFACT message validation.  Rules receive a [`ValidationRuleContext`] that
+/// provides optional typed metadata injected at validation call time via
+/// [`ValidationContext::validate_lenient_with`].
 pub trait ProfileRule: Send + Sync {
     /// Evaluate the rule against the given segments.
     ///
     /// Return `Some(issue)` if the rule is violated, or `None` if the segments pass.
-    fn evaluate(&self, segments: &[Segment<'_>]) -> Option<ValidationIssue>;
+    fn evaluate(&self, segments: &[Segment<'_>], context: &ValidationRuleContext<'_>) -> Option<ValidationIssue>;
 }
 
+/// Wraps a context-aware closure as a [`ProfileRule`].
 struct ClosureProfileRule<F>(F);
 
 impl<F> ProfileRule for ClosureProfileRule<F>
 where
+    F: for<'a> Fn(&[Segment<'a>], &ValidationRuleContext<'_>) -> Option<ValidationIssue>
+        + Send
+        + Sync,
+{
+    fn evaluate(&self, segments: &[Segment<'_>], context: &ValidationRuleContext<'_>) -> Option<ValidationIssue> {
+        (self.0)(segments, context)
+    }
+}
+
+/// Wraps a context-free closure as a [`ProfileRule`] (ignores the context parameter).
+struct StatelessClosureProfileRule<F>(F);
+
+impl<F> ProfileRule for StatelessClosureProfileRule<F>
+where
     F: for<'a> Fn(&[Segment<'a>]) -> Option<ValidationIssue> + Send + Sync,
 {
-    fn evaluate(&self, segments: &[Segment<'_>]) -> Option<ValidationIssue> {
+    fn evaluate(&self, segments: &[Segment<'_>], _context: &ValidationRuleContext<'_>) -> Option<ValidationIssue> {
         (self.0)(segments)
     }
 }
@@ -28,7 +105,8 @@ where
 pub struct ProfileRulePack {
     name: String,
     message_types: Vec<String>,
-    rules: Vec<Box<dyn ProfileRule + Send + Sync>>,
+    rules: Vec<Arc<dyn ProfileRule + Send + Sync>>,
+    bail_on_first_error: bool,
 }
 
 impl ProfileRulePack {
@@ -38,21 +116,8 @@ impl ProfileRulePack {
             name: name.into(),
             message_types: Vec::new(),
             rules: Vec::new(),
+            bail_on_first_error: false,
         }
-    }
-
-    /// Alias for [`ProfileRulePack::new`] for ergonomic fluent-builder use.
-    ///
-    /// Because all builder methods (`for_message_type`, `with_rule_fn`, `merge`) are
-    /// consuming methods on `ProfileRulePack` itself, no separate builder type is needed:
-    ///
-    /// ```rust,ignore
-    /// let pack = ProfileRulePack::builder("MY-PACK")
-    ///     .for_message_type("ORDERS")
-    ///     .with_rule_fn(|_segs| None);
-    /// ```
-    pub fn builder(name: impl Into<String>) -> Self {
-        Self::new(name)
     }
 
     /// Return the pack name.
@@ -93,22 +158,84 @@ impl ProfileRulePack {
         self
     }
 
-    /// Add one externally authored rule using only public API.
+    /// Stop evaluating rules in this pack after the first `Error`- or `Critical`-severity
+    /// finding.
+    ///
+    /// Bail applies *per pack*, not globally — other packs in the
+    /// [`ValidationContext`] still run even when this pack bails early.  This
+    /// avoids flooding validation reports with cascading false positives when a
+    /// mandatory segment is missing and all subsequent rules reference its content.
+    pub fn bail_on_first_error(mut self, bail: bool) -> Self {
+        self.bail_on_first_error = bail;
+        self
+    }
+
+    /// Add a context-aware rule closure.
+    ///
+    /// The closure receives both the segment slice and a [`ValidationRuleContext`]
+    /// that may carry typed metadata injected at validation call time via
+    /// [`ValidationContext::validate_lenient_with`].
+    ///
+    /// For rules that do not need context, use [`with_stateless_rule_fn`][Self::with_stateless_rule_fn].
     pub fn with_rule_fn<F>(mut self, rule: F) -> Self
+    where
+        F: for<'a> Fn(&[Segment<'a>], &ValidationRuleContext<'_>) -> Option<ValidationIssue>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.rules.push(Arc::new(ClosureProfileRule(rule)));
+        self
+    }
+
+    /// Add a context-free rule closure.
+    ///
+    /// Convenience wrapper for rules that do not inspect the
+    /// [`ValidationRuleContext`].
+    pub fn with_stateless_rule_fn<F>(mut self, rule: F) -> Self
     where
         F: for<'a> Fn(&[Segment<'a>]) -> Option<ValidationIssue> + Send + Sync + 'static,
     {
-        self.rules.push(Box::new(ClosureProfileRule(rule)));
+        self.rules.push(Arc::new(StatelessClosureProfileRule(rule)));
         self
     }
 
     /// Add a rule that implements [`ProfileRule`].
     pub fn with_rule(mut self, rule: impl ProfileRule + 'static) -> Self {
-        self.rules.push(Box::new(rule));
+        self.rules.push(Arc::new(rule));
+        self
+    }
+
+    /// Prepend all rules from `base` to this pack.
+    ///
+    /// Rules from `base` are shared (via [`Arc`] cloning) and run first.
+    /// Message-type restrictions from `base` are also merged.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let base = ProfileRulePack::new("MIG-UTILMD-BASE")
+    ///     .with_stateless_rule_fn(/* mandatory segment rules */);
+    ///
+    /// let ahb_11001 = ProfileRulePack::new("AHB-11001")
+    ///     .extend_from(&base)
+    ///     .with_stateless_rule_fn(/* 11001-specific rules */);
+    /// ```
+    pub fn extend_from(mut self, base: &ProfileRulePack) -> Self {
+        let mut combined = base.rules.clone();
+        combined.append(&mut self.rules);
+        self.rules = combined;
+        for mt in &base.message_types {
+            if !self.message_types.contains(mt) {
+                self.message_types.push(mt.clone());
+            }
+        }
         self
     }
 
     /// Merge two packs into one combined pack.
+    ///
+    /// Rules from `self` run before rules from `other`.
     pub fn merge(mut self, mut other: Self) -> Self {
         for message_type in other.message_types.drain(..) {
             if !self.message_types.contains(&message_type) {
@@ -121,7 +248,7 @@ impl ProfileRulePack {
 }
 
 impl Validator for ProfileRulePack {
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport) {
+    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, context: &ValidationRuleContext<'_>) {
         let message_type = segments
             .iter()
             .find(|segment| segment.tag == "UNH")
@@ -134,17 +261,23 @@ impl Validator for ProfileRulePack {
         }
 
         for rule in &self.rules {
-            if let Some(issue) = rule.evaluate(segments) {
-                match issue.severity {
+            if let Some(issue) = rule.evaluate(segments, context) {
+                let was_error = match issue.severity {
                     ValidationSeverity::Critical | ValidationSeverity::Error => {
                         report.add_error(issue);
+                        true
                     }
                     ValidationSeverity::Warning => {
                         report.add_warning(issue);
+                        false
                     }
                     ValidationSeverity::Info => {
                         report.add_info(issue);
+                        false
                     }
+                };
+                if self.bail_on_first_error && was_error {
+                    return;
                 }
             }
         }
@@ -157,6 +290,7 @@ impl std::fmt::Debug for ProfileRulePack {
             .field("name", &self.name)
             .field("message_types", &self.message_types)
             .field("rule_count", &self.rules.len())
+            .field("bail_on_first_error", &self.bail_on_first_error)
             .finish()
     }
 }
@@ -185,6 +319,7 @@ pub struct ValidationContext {
     code_list_enabled: bool,
     profile_enabled: bool,
     message_type: Option<String>,
+    metadata: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 /// Builder for [`ValidationContext`].
@@ -210,8 +345,22 @@ impl ValidationContextBuilder {
                 code_list_enabled: true,
                 profile_enabled: true,
                 message_type: None,
+                metadata: None,
             },
         }
+    }
+
+    /// Attach typed metadata accessible to context-aware profile rules.
+    ///
+    /// Rules added with [`ProfileRulePack::with_rule_fn`] receive the metadata
+    /// via [`ValidationRuleContext::metadata`] on every call to
+    /// [`ValidationContext::validate_lenient`].
+    ///
+    /// For per-call metadata that varies between validation invocations, use
+    /// [`ValidationContext::validate_lenient_with`] instead.
+    pub fn with_metadata<T: Any + Send + Sync + 'static>(mut self, value: T) -> Self {
+        self.inner.metadata = Some(Arc::new(value));
+        self
     }
 
     /// Set message type metadata for downstream validators.
@@ -279,14 +428,34 @@ impl ValidationContext {
     }
 
     /// Execute validators in lenient mode for enabled layers.
+    ///
+    /// Uses any metadata set via [`ValidationContextBuilder::with_metadata`].
+    /// For per-call metadata, use [`validate_lenient_with`][Self::validate_lenient_with].
     pub fn validate_lenient(&self, segments: &[Segment<'_>]) -> ValidationReport {
-        let mut report = ValidationReport::default();
-        for lv in &self.validators {
-            if self.layer_enabled(lv.layer) {
-                lv.validator.validate_batch(segments, &mut report);
-            }
-        }
-        report
+        let ctx = self
+            .metadata
+            .as_ref()
+            .map(|arc| ValidationRuleContext {
+                metadata: Some(arc.as_ref() as &(dyn Any + Send + Sync)),
+            })
+            .unwrap_or_else(ValidationRuleContext::empty);
+        self.validate_with_context(segments, &ctx)
+    }
+
+    /// Execute validators with per-call typed metadata.
+    ///
+    /// The metadata is accessible inside context-aware rule closures via
+    /// [`ValidationRuleContext::metadata`].  This is the recommended path when
+    /// a single [`ProfileRulePack`] serves multiple process-variant contexts
+    /// (e.g., one pack per message type, injecting the Pruefidentifikator at
+    /// call time).
+    pub fn validate_lenient_with<T: Any + Send + Sync>(
+        &self,
+        segments: &[Segment<'_>],
+        value: &T,
+    ) -> ValidationReport {
+        let ctx = ValidationRuleContext::new(value);
+        self.validate_with_context(segments, &ctx)
     }
 
     /// Execute validators in strict mode for enabled layers.
@@ -300,14 +469,45 @@ impl ValidationContext {
         segments: &[Segment<'_>],
     ) -> Result<ValidationReport, EdifactError> {
         let report = self.validate_lenient(segments);
+        Self::strict_check(report)
+    }
+
+    /// Execute validators in strict mode with per-call typed metadata.
+    ///
+    /// See [`validate_lenient_with`][Self::validate_lenient_with] for context usage and
+    /// [`validate_strict`][Self::validate_strict] for strict-mode semantics.
+    pub fn validate_strict_with<T: Any + Send + Sync>(
+        &self,
+        segments: &[Segment<'_>],
+        value: &T,
+    ) -> Result<ValidationReport, EdifactError> {
+        let report = self.validate_lenient_with(segments, value);
+        Self::strict_check(report)
+    }
+
+    fn validate_with_context(
+        &self,
+        segments: &[Segment<'_>],
+        context: &ValidationRuleContext<'_>,
+    ) -> ValidationReport {
+        let mut report = ValidationReport::default();
+        for lv in &self.validators {
+            if self.layer_enabled(lv.layer) {
+                lv.validator.validate_batch(segments, &mut report, context);
+            }
+        }
+        report
+    }
+
+    fn strict_check(report: ValidationReport) -> Result<ValidationReport, EdifactError> {
         if report.has_errors() {
             let first_message = report
-                .errors
+                .errors()
                 .first()
                 .map(|e| e.message.clone())
                 .unwrap_or_else(|| "unknown validation failure".to_owned());
             return Err(EdifactError::ValidationFailed {
-                error_count: report.errors.len(),
+                error_count: report.errors().len(),
                 first_message,
             });
         }
@@ -333,12 +533,16 @@ impl ValidationContext {
 /// The primary contract is [`validate_batch`](Validator::validate_batch), which processes an
 /// entire segment sequence and appends issues to a [`ValidationReport`].
 ///
+/// Validators receive a [`ValidationRuleContext`] that may carry typed metadata
+/// injected at validation call time.  Implementations that do not need the
+/// context may ignore it.
+///
 /// For validators that work segment-by-segment, the convenience function
 /// [`validate_each`] iterates over the slice and calls a per-segment closure,
 /// so you only need to implement `validate_batch`:
 ///
 /// ```rust,ignore
-/// fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport) {
+/// fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _ctx: &ValidationRuleContext<'_>) {
 ///     validate_each(segments, report, |seg| {
 ///         // return Ok(()) or Err(EdifactError::...)
 ///         Ok(())
@@ -347,7 +551,9 @@ impl ValidationContext {
 /// ```
 pub trait Validator: Send + Sync {
     /// Validate a full segment set and append issues to `report`.
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport);
+    ///
+    /// Implementations that do not need the context may ignore the `context` parameter.
+    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, context: &ValidationRuleContext<'_>);
 
     /// Configure message-type metadata for validators that support explicit scoping.
     fn set_message_type(&mut self, _message_type: Option<&str>) {}
@@ -494,9 +700,9 @@ mod tests {
     use crate::model::Element;
 
     fn demo_orders_profile_pack() -> ProfileRulePack {
-        ProfileRulePack::builder("ORDERS-DEMO")
+        ProfileRulePack::new("ORDERS-DEMO")
             .for_message_type("ORDERS")
-            .with_rule_fn(|segments| {
+            .with_stateless_rule_fn(|segments| {
                 let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
                 let document_code = bgm.get_element(0)?.get_component(0)?;
                 (document_code == "220").then(|| {
@@ -510,7 +716,7 @@ mod tests {
                     .with_suggestion("Use a different BGM document code in this demo pack")
                 })
             })
-            .with_rule_fn(|segments| {
+            .with_stateless_rule_fn(|segments| {
                 let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
                 let reference = bgm.get_element(1)?.get_component(0)?;
                 (reference == "PO123").then(|| {
@@ -531,7 +737,7 @@ mod tests {
     struct WarnBgm;
 
     impl Validator for RejectBgm {
-        fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport) {
+        fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
             validate_each(segments, report, |segment| {
                 if segment.tag == "BGM" {
                     return Err(EdifactError::InvalidSegmentForMessage {
@@ -546,7 +752,7 @@ mod tests {
     }
 
     impl Validator for WarnBgm {
-        fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport) {
+        fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
             validate_each(segments, report, |segment| {
                 if segment.tag == "BGM" {
                     return Err(EdifactError::InvalidCodeValue {
@@ -576,18 +782,18 @@ mod tests {
     fn lenient_collects_issues() {
         let segments = vec![test_segment("UNH"), test_segment("BGM")];
         let mut report = ValidationReport::default();
-        RejectBgm.validate_batch(&segments, &mut report);
+        RejectBgm.validate_batch(&segments, &mut report, &ValidationRuleContext::empty());
         assert!(report.has_errors());
-        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.errors().len(), 1);
     }
 
     #[test]
     fn strict_fails_on_errors() {
         let segments = vec![test_segment("BGM")];
         let mut report = ValidationReport::default();
-        RejectBgm.validate_batch(&segments, &mut report);
+        RejectBgm.validate_batch(&segments, &mut report, &ValidationRuleContext::empty());
         assert!(report.has_errors());
-        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.errors().len(), 1);
     }
 
     #[test]
@@ -601,7 +807,7 @@ mod tests {
 
         let report = ctx.validate_lenient(&segments);
         assert!(!report.has_errors());
-        assert_eq!(report.warnings.len(), 1);
+        assert_eq!(report.warnings().len(), 1);
     }
 
     #[test]
@@ -626,7 +832,7 @@ mod tests {
         );
 
         let issue = report
-            .errors
+            .errors()
             .first()
             .expect("expected one issue in the report");
         let hint = issue
@@ -650,7 +856,7 @@ mod tests {
         );
 
         let issue = report
-            .errors
+            .errors()
             .first()
             .expect("expected one issue");
         assert_eq!(issue.error_code, Some("E021"));
@@ -674,13 +880,13 @@ mod tests {
         assert!(report.has_errors());
         assert!(
             report
-                .errors
+                .errors()
                 .iter()
                 .any(|issue| issue.rule_id.as_deref() == Some("DEMO-P001"))
         );
         assert!(
             report
-                .warnings
+                .warnings()
                 .iter()
                 .any(|issue| issue.rule_id.as_deref() == Some("DEMO-P002"))
         );

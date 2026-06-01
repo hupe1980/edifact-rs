@@ -101,6 +101,17 @@ impl EventEmitter for VecEmitter {
 
 // ── WriterEmitter ─────────────────────────────────────────────────────────────
 
+/// Internal protocol-state machine for [`WriterEmitter`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmitterState {
+    /// Between segments: no open segment.
+    Idle,
+    /// A [`EdifactEvent::StartSegment`] has been emitted; no element written yet.
+    InSegment,
+    /// An [`EdifactEvent::Element`] has been emitted; `ComponentElement` is valid.
+    InElement,
+}
+
 /// Writes EDIFACT events directly to any [`Write`] implementation.
 ///
 /// Each event is written to the underlying writer immediately — no intermediate
@@ -111,13 +122,14 @@ impl EventEmitter for VecEmitter {
 /// # Protocol
 ///
 /// Events must arrive in the order produced by [`crate::EdifactSerialize`]:
-/// `StartSegment` → zero or more `Element` / `ComponentElement` → `EndSegment`.
-/// In debug builds, any violation of this order (e.g. `Element` before
-/// `StartSegment`, or `StartSegment` inside an open segment) panics immediately.
+/// `StartSegment` → zero or more (`Element` → zero or more `ComponentElement`) → `EndSegment`.
+///
+/// Any violation of this protocol returns
+/// [`EdifactError::InvalidEventSequence`] immediately.  Violations are
+/// detected in both debug and release builds.
 pub struct WriterEmitter<W: Write> {
     writer: crate::Writer<W>,
-    #[cfg(debug_assertions)]
-    in_segment: bool,
+    state: EmitterState,
 }
 
 impl<W: Write> WriterEmitter<W> {
@@ -125,8 +137,7 @@ impl<W: Write> WriterEmitter<W> {
     pub fn new(inner: W) -> Self {
         Self {
             writer: crate::Writer::new(inner),
-            #[cfg(debug_assertions)]
-            in_segment: false,
+            state: EmitterState::Idle,
         }
     }
 
@@ -136,7 +147,7 @@ impl<W: Write> WriterEmitter<W> {
     }
 
     /// Number of complete segments written so far.
-    pub fn segment_count(&self) -> u32 {
+    pub fn segment_count(&self) -> u64 {
         self.writer.segment_count()
     }
 }
@@ -145,43 +156,40 @@ impl<W: Write> EventEmitter for WriterEmitter<W> {
     fn emit(&mut self, event: EdifactEvent<'_>) -> Result<(), EdifactError> {
         match event {
             EdifactEvent::StartSegment { tag } => {
-                #[cfg(debug_assertions)]
-                {
-                    assert!(
-                        !self.in_segment,
-                        "WriterEmitter: StartSegment emitted while a segment is already open (missing EndSegment)"
-                    );
-                    self.in_segment = true;
+                if self.state != EmitterState::Idle {
+                    return Err(EdifactError::InvalidEventSequence {
+                        message: "StartSegment emitted while a segment is already open; emit EndSegment first",
+                    });
                 }
+                self.state = EmitterState::InSegment;
                 self.writer.write_tag_only(tag)?;
             }
             EdifactEvent::Element { value } => {
-                #[cfg(debug_assertions)]
-                assert!(
-                    self.in_segment,
-                    "WriterEmitter: Element emitted outside of a segment (missing StartSegment)"
-                );
+                if self.state == EmitterState::Idle {
+                    return Err(EdifactError::InvalidEventSequence {
+                        message: "Element emitted outside of a segment; emit StartSegment first",
+                    });
+                }
+                self.state = EmitterState::InElement;
                 self.writer.write_element_sep()?;
                 self.writer.write_escaped(value)?;
             }
             EdifactEvent::ComponentElement { value } => {
-                #[cfg(debug_assertions)]
-                assert!(
-                    self.in_segment,
-                    "WriterEmitter: ComponentElement emitted outside of a segment (missing StartSegment)"
-                );
+                if self.state != EmitterState::InElement {
+                    return Err(EdifactError::InvalidEventSequence {
+                        message: "ComponentElement emitted without a preceding Element in the same segment",
+                    });
+                }
                 self.writer.write_component_sep()?;
                 self.writer.write_escaped(value)?;
             }
             EdifactEvent::EndSegment => {
-                #[cfg(debug_assertions)]
-                {
-                    assert!(
-                        self.in_segment,
-                        "WriterEmitter: EndSegment emitted while no segment is open (missing StartSegment)"
-                    );
-                    self.in_segment = false;
+                if self.state == EmitterState::Idle {
+                    return Err(EdifactError::InvalidEventSequence {
+                        message: "EndSegment emitted while no segment is open; emit StartSegment first",
+                    });
                 }
+                self.state = EmitterState::Idle;
                 self.writer.write_segment_term_and_count()?;
             }
         }
@@ -247,5 +255,55 @@ mod tests {
         }
         let s = std::str::from_utf8(&buf).unwrap();
         assert_eq!(s, "NAD+MS+9900112233445::293'");
+    }
+
+    // ── protocol-violation tests (BUG 2.1) ───────────────────────────────────
+
+    #[test]
+    fn writer_emitter_element_before_start_segment_is_err() {
+        let mut e = WriterEmitter::new(Vec::<u8>::new());
+        let err = e
+            .emit(EdifactEvent::Element { value: "X" })
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::EdifactError::InvalidEventSequence { .. }),
+            "expected InvalidEventSequence, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn writer_emitter_component_before_element_is_err() {
+        let mut e = WriterEmitter::new(Vec::<u8>::new());
+        e.emit(EdifactEvent::StartSegment { tag: "BGM" }).unwrap();
+        let err = e
+            .emit(EdifactEvent::ComponentElement { value: "X" })
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::EdifactError::InvalidEventSequence { .. }),
+            "expected InvalidEventSequence, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn writer_emitter_double_start_segment_is_err() {
+        let mut e = WriterEmitter::new(Vec::<u8>::new());
+        e.emit(EdifactEvent::StartSegment { tag: "BGM" }).unwrap();
+        let err = e
+            .emit(EdifactEvent::StartSegment { tag: "DTM" })
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::EdifactError::InvalidEventSequence { .. }),
+            "expected InvalidEventSequence, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn writer_emitter_end_segment_without_start_is_err() {
+        let mut e = WriterEmitter::new(Vec::<u8>::new());
+        let err = e.emit(EdifactEvent::EndSegment).unwrap_err();
+        assert!(
+            matches!(err, crate::EdifactError::InvalidEventSequence { .. }),
+            "expected InvalidEventSequence, got {err:?}"
+        );
     }
 }

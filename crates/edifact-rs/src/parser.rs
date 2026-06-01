@@ -5,7 +5,7 @@ use crate::{
     model::{Element, OwnedSegment, Segment, Span},
     tokenizer::{Token, Tokenizer},
 };
-use memchr::memchr;
+use memchr::memchr2;
 use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Read};
@@ -239,7 +239,7 @@ pub fn from_bufread<R: BufRead>(reader: R) -> Result<Vec<OwnedSegment>, EdifactE
 ///     .unwrap();
 /// assert_eq!(segments[0].tag, "BGM");
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ReaderConfig {
     /// Maximum allowed segment byte length (excluding the segment terminator).
     ///
@@ -340,24 +340,30 @@ enum FastSegment {
 
 /// Return the byte offset of the first **unescaped** occurrence of `term` in `buf`.
 ///
-/// `term` is *escaped* when immediately preceded by an odd number of
-/// consecutive `release` bytes (e.g. `?'` escapes `'`; `??'` does not).
+/// A byte is *escaped* when it is immediately preceded by `release` (e.g.
+/// `?'` escapes `'`).  Two consecutive release chars cancel each other, so
+/// `??'` contains an *unescaped* `'`.
+///
+/// # Complexity
+///
+/// O(n) in the length of `buf`.  `memchr2` is used to fast-scan past bytes
+/// that are neither `release` nor `term`, so SIMD acceleration applies on
+/// platforms where `memchr` provides it.
 fn find_unescaped_term(buf: &[u8], term: u8, release: u8) -> Option<usize> {
-    let mut start = 0;
-    loop {
-        let rel = memchr(term, &buf[start..])?;
-        let abs = start + rel;
-        // Count consecutive release chars immediately before `abs`.
-        let n = buf[..abs]
-            .iter()
-            .rev()
-            .take_while(|&&b| b == release)
-            .count();
-        if n % 2 == 0 {
-            return Some(abs);
+    let mut i = 0;
+    while i < buf.len() {
+        // Fast-skip to the next byte that might be a release char or terminator.
+        let rel = memchr2(release, term, &buf[i..])?;
+        let pos = i + rel;
+        if buf[pos] == release {
+            // Release char: the next byte is escaped — skip both.
+            i = pos + 2;
+        } else {
+            // Unescaped terminator found.
+            return Some(pos);
         }
-        start = abs + 1;
     }
+    None
 }
 
 /// Try to parse one segment directly from the `BufRead` buffer.
