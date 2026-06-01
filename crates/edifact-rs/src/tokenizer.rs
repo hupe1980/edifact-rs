@@ -135,8 +135,9 @@ pub(crate) struct RawSegment {
 /// # Segment size guard
 ///
 /// Pass a limit to [`Tokenizer::with_limit`] to reject segments that exceed a
-/// byte-length threshold.  This prevents adversarially large inputs from
-/// consuming unbounded CPU time even on the zero-copy slice path.
+/// byte-length threshold.  This bounds both the memory and CPU cost of parsing
+/// a single segment on the zero-copy slice path, and causes an
+/// [`EdifactError::SegmentTooLong`] error when the limit is exceeded.
 /// The default constructor [`Tokenizer::new`] sets no limit (`usize::MAX`).
 pub struct Tokenizer<'a> {
     input: &'a [u8],
@@ -316,7 +317,7 @@ impl<'a> Tokenizer<'a> {
             return Ok(None);
         }
         let start = self.pos;
-        // A segment tag is terminated by the element separator, segment terminator, or CR/LF.
+        // A segment tag is terminated by the element separator or segment terminator.
         // Bound the scan to max_segment_bytes + 1 so adversarial input with no delimiters
         // cannot force memchr to scan arbitrarily large buffers before we return an error.
         let input_remaining = &self.input[self.pos..];

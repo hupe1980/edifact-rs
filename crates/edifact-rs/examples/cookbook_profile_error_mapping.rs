@@ -109,7 +109,7 @@ fn extract_violations(report: &ValidationReport) -> Vec<OrdersViolation> {
 /// access to injected configuration, or must be tested in isolation.
 struct MaxSegmentValidator {
     /// Maximum accepted segment count in a single message.
-    limit: u32,
+    limit: usize,
 }
 
 impl Validator for MaxSegmentValidator {
@@ -119,7 +119,7 @@ impl Validator for MaxSegmentValidator {
         report: &mut ValidationReport,
         _context: &ValidationRuleContext<'_>,
     ) {
-        let count = segments.len() as u32;
+        let count = segments.len();
         if count > self.limit {
             report.add_warning(
                 ValidationIssue::new(
