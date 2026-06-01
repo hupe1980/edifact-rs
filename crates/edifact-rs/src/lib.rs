@@ -179,7 +179,8 @@ pub use parser::{
     Parser, ReaderConfig, from_bufread, from_bufread_stream, from_bufread_stream_with_config,
     from_reader_with_config,
 };
-pub use tokenizer::{ServiceStringAdvice, Tokenizer};pub use validator::{
+pub use tokenizer::{ServiceStringAdvice, Tokenizer};
+pub use validator::{
     ProfileRule, ProfileRulePack, ValidationContext, ValidationContextBuilder, ValidationLayer,
     ValidationRuleContext, Validator, validate_each,
 };

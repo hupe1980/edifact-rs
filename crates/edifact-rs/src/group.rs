@@ -227,7 +227,9 @@ fn group_recursive_inner<'a>(
 
         // If this tag is a trigger for an ancestor group, stop and return
         // so the ancestor can create a new group instance.
-        if stop_triggers.contains(&tag) {
+        // Use iterator comparison so a non-'static tag (&str from parsed input)
+        // can be compared against the 'static stop-trigger strings.
+        if stop_triggers.iter().any(|t| *t == tag) {
             break;
         }
 
@@ -255,14 +257,11 @@ fn group_recursive_inner<'a>(
             i += consumed;
 
             parent.children.push(child);
-        } else if schema.is_empty() {
-            // Leaf group: no children defined; all segments belong here until
-            // the parent scope ends.  We can't determine the scope end from
-            // here, so return and let the parent decide.
-            break;
         } else {
             // Segment doesn't match any group trigger in this schema — it
-            // belongs to the parent group's own segments.
+            // belongs to the parent group's own segments.  This also covers
+            // leaf groups (empty schema): all non-stop-trigger segments after
+            // the trigger are accumulated into the current group.
             parent.segments.push(segments[i].clone());
             i += 1;
         }

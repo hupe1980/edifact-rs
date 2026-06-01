@@ -765,7 +765,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                             let #ident = #value_expr
                                 .filter(|__s| !__s.is_empty())
                                 .map(|__s| __s.parse::<#inner_ty>()
-                                    .map_err(|_| ::edifact_rs::EdifactError::InvalidText { offset: 0 })
+                                    .map_err(|_| ::edifact_rs::EdifactError::InvalidText { offset: __seg.span.start })
                                 )
                                 .transpose()?;
                         }
@@ -789,7 +789,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                                 element_index: #idx as usize,
                             })?
                             .parse::<#ty>()
-                            .map_err(|_| ::edifact_rs::EdifactError::InvalidText { offset: 0 })?;
+                            .map_err(|_| ::edifact_rs::EdifactError::InvalidText { offset: __seg.span.start })?;
                     }
                 })
             })

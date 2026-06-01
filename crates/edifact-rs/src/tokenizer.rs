@@ -329,6 +329,17 @@ impl<'a> Tokenizer<'a> {
             return Err(EdifactError::InvalidDelimiter { byte, offset: start });
         }
 
+        // Enforce the per-segment byte-length guard in read_tag as well.
+        // Without this check, adversarial input with no delimiters could cause
+        // memchr to scan the entire remaining buffer (potentially hundreds of MB).
+        if end > self.max_segment_bytes {
+            // Advance past the offending bytes so the iterator can continue.
+            self.pos = start + end;
+            return Err(EdifactError::SegmentTooLong {
+                offset: start,
+                limit: self.max_segment_bytes,
+            });
+        }
         let tag_bytes = &self.input[start..start + end];
         // Always advance pos so errors cannot cause an infinite retry loop.
         self.pos = start + end;
