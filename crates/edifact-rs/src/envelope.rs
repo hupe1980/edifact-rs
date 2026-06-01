@@ -45,6 +45,53 @@ pub struct MessageEnvelope {
     pub actual_segment_count: u32,
 }
 
+/// Parsed identifier fields from a `UNH` segment.
+///
+/// Produced by [`parse_unh`].  All string slices borrow from the input bytes
+/// passed to the parser, so they live as long as the original byte buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MessageIdentifier<'a> {
+    /// EDIFACT message type, e.g. `"ORDERS"`.
+    pub message_type: &'a str,
+    /// Version number, e.g. `"D"`.
+    pub version: &'a str,
+    /// Release number, e.g. `"11A"`.
+    pub release: &'a str,
+    /// Controlling agency code, e.g. `"UN"`.
+    pub controlling_agency: &'a str,
+    /// Association assigned code (MIG version), e.g. `"FV2510"`.
+    pub association_assigned: &'a str,
+}
+
+/// Extract identifier fields from a `UNH` segment.
+///
+/// Returns a [`MessageIdentifier`] borrowing directly from the segment's
+/// component slices — zero allocation.
+///
+/// # Errors
+///
+/// Returns [`EdifactError::MissingRequiredElement`] if element 1 of the `UNH`
+/// segment is absent, or [`EdifactError::MissingRequiredComponent`] if
+/// component 0 of that element (the message type) is absent.
+pub fn parse_unh<'a>(unh: &'a Segment<'a>) -> Result<MessageIdentifier<'a>, EdifactError> {
+    let elem = unh.get_element(1).ok_or_else(|| EdifactError::MissingRequiredElement {
+        tag: "UNH".to_owned(),
+        element_index: 1,
+    })?;
+    let message_type = elem.get_component(0).ok_or_else(|| EdifactError::MissingRequiredComponent {
+        tag: "UNH".to_owned(),
+        element_index: 1,
+        component_index: 0,
+    })?;
+    Ok(MessageIdentifier {
+        message_type,
+        version: elem.get_component(1).unwrap_or(""),
+        release: elem.get_component(2).unwrap_or(""),
+        controlling_agency: elem.get_component(3).unwrap_or(""),
+        association_assigned: elem.get_component(4).unwrap_or(""),
+    })
+}
+
 /// Validates the EDIFACT interchange envelope for the given segments.
 ///
 /// Checks:
@@ -70,7 +117,9 @@ pub fn validate_envelope(
     let mut interchange_env = extract_interchange(segments)?;
     let message_envs = extract_messages(segments)?;
     interchange_env.actual_message_count = u32::try_from(message_envs.len())
-        .unwrap_or(u32::MAX);
+        .map_err(|_| EdifactError::InterchangeTooLarge {
+            count: message_envs.len() as u64,
+        })?;
 
     // Cross-check UNZ declared count vs. actual UNH/UNT pair count
     if interchange_env.declared_message_count != interchange_env.actual_message_count {
@@ -226,7 +275,10 @@ fn extract_messages(segments: &[Segment<'_>]) -> Result<Vec<MessageEnvelope>, Ed
 
                 // actual count = segments from UNH (inclusive) to UNT (inclusive)
                 let actual_segment_count = u32::try_from(i - msg_start_idx + 1)
-                    .unwrap_or(u32::MAX);
+                    .map_err(|_| EdifactError::InterchangeTooLarge {
+                        // SAFETY: usize ≤ u64::MAX on all supported targets
+                        count: u64::try_from(i - msg_start_idx + 1).unwrap_or(u64::MAX),
+                    })?;
 
                 in_message = false;
                 messages.push(MessageEnvelope {

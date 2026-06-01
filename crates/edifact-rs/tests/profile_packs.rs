@@ -10,9 +10,9 @@ fn parse_segments(input: &[u8]) -> Vec<edifact_rs::Segment<'_>> {
 fn externally_authored_pack_can_validate_a_message_type() {
     let segments = parse_segments(b"UNH+1+ORDERS:D:96A:UN'BGM+220+PO123+9'UNT+3+1'");
 
-    let pack = ProfileRulePack::builder("ORDERS-DEMO")
+    let pack = ProfileRulePack::new("ORDERS-DEMO")
         .for_message_type("ORDERS")
-        .with_rule_fn(|segments| {
+        .with_stateless_rule_fn(|segments| {
             let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
             let document_code = bgm.get_element(0)?.get_component(0)?;
             (document_code == "220").then(|| {
@@ -38,7 +38,7 @@ fn externally_authored_pack_can_validate_a_message_type() {
     assert!(report.has_errors());
     assert!(
         report
-            .errors
+            .errors()
             .iter()
             .any(|issue| issue.rule_id.as_deref() == Some("DEMO-P001"))
     );
@@ -50,7 +50,7 @@ fn merged_packs_accumulate_rules() {
 
     let document_rule = ProfileRulePack::new("ORDERS-DOC")
         .for_message_type("ORDERS")
-        .with_rule_fn(|segments| {
+        .with_stateless_rule_fn(|segments| {
             let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
             let document_code = bgm.get_element(0)?.get_component(0)?;
             (document_code == "220").then(|| {
@@ -60,7 +60,7 @@ fn merged_packs_accumulate_rules() {
         });
     let reference_rule = ProfileRulePack::new("ORDERS-REF")
         .for_message_type("ORDERS")
-        .with_rule_fn(|segments| {
+        .with_stateless_rule_fn(|segments| {
             let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
             let reference = bgm.get_element(1)?.get_component(0)?;
             (reference == "PO123").then(|| {
@@ -79,13 +79,13 @@ fn merged_packs_accumulate_rules() {
 
     assert!(
         report
-            .errors
+            .errors()
             .iter()
             .any(|issue| issue.rule_id.as_deref() == Some("DEMO-P001"))
     );
     assert!(
         report
-            .warnings
+            .warnings()
             .iter()
             .any(|issue| issue.rule_id.as_deref() == Some("DEMO-P002"))
     );
@@ -93,11 +93,11 @@ fn merged_packs_accumulate_rules() {
 
 #[test]
 fn builder_can_merge_existing_packs() {
-    let pack = ProfileRulePack::builder("COMBINED")
+    let pack = ProfileRulePack::new("COMBINED")
         .merge(
             ProfileRulePack::new("ONE")
                 .for_message_type("ORDERS")
-                .with_rule_fn(|_| {
+                .with_stateless_rule_fn(|_| {
                     Some(
                         ValidationIssue::new(ValidationSeverity::Info, "rule one")
                             .with_rule_id("DEMO-P010"),
@@ -107,7 +107,7 @@ fn builder_can_merge_existing_packs() {
         .merge(
             ProfileRulePack::new("TWO")
                 .for_message_type("INVOIC")
-                .with_rule_fn(|_| {
+                .with_stateless_rule_fn(|_| {
                     Some(
                         ValidationIssue::new(ValidationSeverity::Info, "rule two")
                             .with_rule_id("DEMO-P011"),
@@ -126,7 +126,7 @@ fn message_type_scoping_prevents_wrong_pack_application() {
 
     let pack = ProfileRulePack::new("ORDERS-ONLY")
         .for_message_type("ORDERS")
-        .with_rule_fn(|_| {
+        .with_stateless_rule_fn(|_| {
             Some(
                 ValidationIssue::new(ValidationSeverity::Error, "should not run")
                     .with_rule_id("DEMO-P999"),

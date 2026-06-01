@@ -27,9 +27,9 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
     // `Some(ValidationIssue)` if the rule fires, or `None` if it passes.
     // The rule ID should be stable and namespaced so downstream code can filter
     // or map it independently.
-    let document_pack = ProfileRulePack::builder("ORDERS-DOCUMENT")
+    let document_pack = ProfileRulePack::new("ORDERS-DOCUMENT")
         .for_message_type("ORDERS") // only run for ORDERS messages
-        .with_rule_fn(|segments| {
+        .with_stateless_rule_fn(|segments| {
             let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
             let document_code = bgm.get_element(0)?.get_component(0)?;
             (document_code == "220").then(|| {
@@ -45,9 +45,9 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
         });
 
     // ── Pack 2: reference rule ────────────────────────────────────────────────
-    let reference_pack = ProfileRulePack::builder("ORDERS-REFERENCE")
+    let reference_pack = ProfileRulePack::new("ORDERS-REFERENCE")
         .for_message_type("ORDERS")
-        .with_rule_fn(|segments| {
+        .with_stateless_rule_fn(|segments| {
             let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
             let reference = bgm.get_element(1)?.get_component(0)?;
             (reference == "PO123").then(|| {
@@ -63,7 +63,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 
     // ── Merge and validate ────────────────────────────────────────────────────
     // `.merge` combines both packs into one; rules run in declaration order.
-    let pack = ProfileRulePack::builder("ORDERS-COMBINED")
+    let pack = ProfileRulePack::new("ORDERS-COMBINED")
         .merge(document_pack)
         .merge(reference_pack);
 

@@ -131,11 +131,23 @@ pub(crate) struct RawSegment {
 /// Zero-copy tokenizer over a byte slice.
 ///
 /// Yields `Token` values, each borrowing from the original input.
+///
+/// # Segment size guard
+///
+/// Pass a limit to [`Tokenizer::with_limit`] to reject segments that exceed a
+/// byte-length threshold.  This prevents adversarially large inputs from
+/// consuming unbounded CPU time even on the zero-copy slice path.
+/// The default constructor [`Tokenizer::new`] sets no limit (`usize::MAX`).
 pub struct Tokenizer<'a> {
     input: &'a [u8],
     pos: usize,
     ssa: ServiceStringAdvice,
     state: TokState,
+    /// Maximum allowed segment byte length (tag + elements + terminators).
+    /// Checked at the end of each `read_value` call.  `usize::MAX` = unlimited.
+    max_segment_bytes: usize,
+    /// Byte position where the current segment started (set in `read_tag`).
+    segment_start: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,19 +159,66 @@ enum TokState {
 }
 
 impl<'a> Tokenizer<'a> {
+    /// Return the byte offset of the first non-UNA byte in `input`.
+    ///
+    /// If the input starts with the `UNA` service string advice (first 3
+    /// bytes are `b"UNA"`), the UNA header is exactly 9 bytes long and the
+    /// first segment tag starts at offset 9.  Otherwise parsing starts at 0.
+    #[inline]
+    fn una_start_pos(input: &[u8]) -> usize {
+        if input.len() >= 9 && &input[..3] == b"UNA" { 9 } else { 0 }
+    }
+
     /// Construct a zero-copy tokenizer over `input` with explicit service-string advice.
+    ///
+    /// No segment-size limit is applied.  Use [`Tokenizer::with_limit`] when
+    /// processing untrusted input to bound CPU and memory usage.
+    ///
+    /// # Security
+    ///
+    /// This constructor imposes **no upper bound** on how many bytes a single
+    /// segment may consume.  For untrusted or adversarially crafted input a
+    /// missing segment terminator can cause the tokenizer to scan the entire
+    /// input before returning an error.  Call [`Tokenizer::with_limit`]
+    /// instead, or use the higher-level [`crate::from_bytes`] /
+    /// [`crate::from_reader_with_config`] which default to a 64 KiB limit.
     pub fn new(input: &'a [u8], ssa: ServiceStringAdvice) -> Self {
-        // Skip past the UNA segment if present
-        let pos = if input.len() >= 9 && &input[..3] == b"UNA" {
-            9
-        } else {
-            0
-        };
         Self {
             input,
-            pos,
+            pos: Self::una_start_pos(input),
             ssa,
             state: TokState::ExpectTag,
+            max_segment_bytes: usize::MAX,
+            segment_start: 0,
+        }
+    }
+
+    /// Construct a tokenizer with a segment-size limit.
+    ///
+    /// If a single segment's byte length (from the start of the tag to the end
+    /// of the last value, not including the terminator itself) exceeds `limit`,
+    /// the iterator returns [`EdifactError::SegmentTooLong`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use edifact_rs::{ServiceStringAdvice, Tokenizer};
+    ///
+    /// let input = b"BGM+220+PO-4711+9'";
+    /// let ssa = ServiceStringAdvice::default();
+    /// let tokens: Vec<_> = Tokenizer::with_limit(input, ssa, 64)
+    ///     .collect::<Result<_, _>>()
+    ///     .unwrap();
+    /// assert!(!tokens.is_empty());
+    /// ```
+    pub fn with_limit(input: &'a [u8], ssa: ServiceStringAdvice, max_segment_bytes: usize) -> Self {
+        Self {
+            input,
+            pos: Self::una_start_pos(input),
+            ssa,
+            state: TokState::ExpectTag,
+            max_segment_bytes,
+            segment_start: 0,
         }
     }
 
@@ -239,6 +298,13 @@ impl<'a> Tokenizer<'a> {
         let span = Span::new(start, self.pos);
         let value = std::str::from_utf8(&self.input[start..self.pos])
             .map_err(|_| EdifactError::InvalidText { offset: start })?;
+        // Enforce the per-segment byte-length guard.
+        if self.pos - self.segment_start > self.max_segment_bytes {
+            return Err(EdifactError::SegmentTooLong {
+                offset: self.segment_start,
+                limit: self.max_segment_bytes,
+            });
+        }
         Ok((value, span))
     }
 
@@ -266,6 +332,8 @@ impl<'a> Tokenizer<'a> {
         let tag_bytes = &self.input[start..start + end];
         // Always advance pos so errors cannot cause an infinite retry loop.
         self.pos = start + end;
+        // Record segment start for the size-limit check in read_value.
+        self.segment_start = start;
         let tag = std::str::from_utf8(tag_bytes)
             .map_err(|_| EdifactError::InvalidSegmentTag(format!("{tag_bytes:?}")))?;
         if tag.len() != 3 || !tag.bytes().all(|b| b.is_ascii_uppercase()) {

@@ -115,8 +115,9 @@ pub enum EdifactError {
 
     /// Invalid UNA service string advice.
     ///
-    /// If present, the UNA segment must be exactly 9 bytes: "UNA" followed by 6 service characters.
-    #[error("invalid UNA service string advice: must be exactly 9 bytes")]
+    /// If present, the UNA segment must be exactly 9 bytes: "UNA" followed by 6 service
+    /// characters, all distinct, and none of them whitespace.
+    #[error("invalid UNA service string advice")]
     InvalidUna,
 
     /// Missing required element in a segment.
@@ -293,6 +294,42 @@ pub enum EdifactError {
         /// Configured maximum segment byte length.
         limit: usize,
     },
+
+    /// No handler was registered in [`crate::MessageDispatch`] for this message type.
+    ///
+    /// Returned by [`crate::MessageDispatch::dispatch`] when the message-type
+    /// extracted from the `UNH` segment does not match any registered handler
+    /// and no fallback was configured.
+    #[error("no handler registered for message type {message_type}")]
+    UnexpectedMessageType {
+        /// The unhandled message type string from the `UNH` segment.
+        message_type: String,
+    },
+
+    /// An interchange or message contains more segments or messages than can be
+    /// represented in a `u32` counter (> 4 294 967 295).
+    ///
+    /// This is effectively unreachable in practice — no real-world EDIFACT
+    /// interchange has billions of segments — but the parser returns this error
+    /// rather than silently saturating or wrapping the counter.
+    #[error("interchange too large: count {count} exceeds u32::MAX")]
+    InterchangeTooLarge {
+        /// The count that could not be represented as `u32`.
+        count: u64,
+    },
+
+    /// An [`crate::EventEmitter`] received events in an invalid sequence.
+    ///
+    /// This indicates a programming error in the caller's serialization code:
+    /// for example, emitting an [`crate::EdifactEvent::Element`] without a prior
+    /// [`crate::EdifactEvent::StartSegment`], or emitting
+    /// [`crate::EdifactEvent::ComponentElement`] without a preceding
+    /// [`crate::EdifactEvent::Element`].
+    #[error("invalid event sequence: {message}")]
+    InvalidEventSequence {
+        /// Description of the protocol violation.
+        message: &'static str,
+    },
 }
 
 
@@ -329,6 +366,9 @@ impl EdifactError {
             Self::InvalidReleaseSequence { .. } => "E019",
             Self::SegmentTooLong { .. } => "E020",
             Self::MissingRequiredComponent { .. } => "E021",
+            Self::UnexpectedMessageType { .. } => "E022",
+            Self::InterchangeTooLarge { .. } => "E023",
+            Self::InvalidEventSequence { .. } => "E024",
         }
     }
 
@@ -350,7 +390,7 @@ impl EdifactError {
             }
             Self::InvalidSegmentTag(_) => Some("Segment tags must be 3 ASCII uppercase letters"),
             Self::InvalidUna => {
-                Some("UNA must be exactly 9 bytes: 'UNA' followed by 6 service characters")
+                Some("UNA must be exactly 9 bytes: 'UNA' followed by 6 distinct, non-whitespace service characters")
             }
             Self::MissingRequiredElement { .. } => {
                 Some("Provide all mandatory elements for the segment per directory rules")
@@ -383,9 +423,14 @@ impl EdifactError {
                 let _ = limit; // used in the error message; hint is generic
                 Some("Increase max_segment_bytes in ReaderConfig or reject the input as malformed")
             }
+            Self::InvalidEventSequence { .. } => {
+                Some("Emit StartSegment before Element, and Element before ComponentElement")
+            }
             Self::ValidationFailed { .. }
             | Self::MessageCountMismatch { .. }
             | Self::SegmentCountMismatch { .. }
+            | Self::UnexpectedMessageType { .. }
+            | Self::InterchangeTooLarge { .. }
             | Self::InvalidUtf8
             | Self::Io(_) => None,
         }
@@ -495,6 +540,18 @@ impl miette::Diagnostic for EdifactError {
                 "Segment starting at byte offset {offset} exceeds the {limit}-byte limit. \
                  Use ReaderConfig::max_segment_bytes to adjust the limit if needed, \
                  or verify the input for a missing segment terminator",
+            ))),
+            Self::UnexpectedMessageType { message_type } => Some(Box::new(format!(
+                "No handler was registered for message type '{message_type}'. \
+                 Register a handler with MessageDispatch::on(\"{message_type}\", ...)",
+            ))),
+            Self::InterchangeTooLarge { count } => Some(Box::new(format!(
+                "Interchange contains {count} items which exceeds the u32::MAX limit. \
+                 This is an extremely unusual input; verify the message is not corrupted.",
+            ))),
+            Self::InvalidEventSequence { message } => Some(Box::new(format!(
+                "Event sequence violation: {message}. \
+                 Check that StartSegment is emitted before Element, and Element before ComponentElement.",
             ))),
         }
     }
@@ -643,14 +700,43 @@ impl std::error::Error for ValidationIssue {}
 #[derive(Debug, Clone, Default)]
 pub struct ValidationReport {
     /// Critical and error-level issues.
-    pub errors: Vec<ValidationIssue>,
+    pub(crate) errors: Vec<ValidationIssue>,
     /// Warning-level issues.
-    pub warnings: Vec<ValidationIssue>,
+    pub(crate) warnings: Vec<ValidationIssue>,
     /// Informational notes.
-    pub infos: Vec<ValidationIssue>,
+    pub(crate) infos: Vec<ValidationIssue>,
 }
 
 impl ValidationReport {
+    /// Returns all error-level [`ValidationIssue`]s in this report.
+    pub fn errors(&self) -> &[ValidationIssue] {
+        &self.errors
+    }
+
+    /// Returns all error-level [`ValidationIssue`]s mutably.
+    pub fn errors_mut(&mut self) -> &mut [ValidationIssue] {
+        &mut self.errors
+    }
+
+    /// Returns all warning-level [`ValidationIssue`]s in this report.
+    pub fn warnings(&self) -> &[ValidationIssue] {
+        &self.warnings
+    }
+
+    /// Returns all warning-level [`ValidationIssue`]s mutably.
+    pub fn warnings_mut(&mut self) -> &mut [ValidationIssue] {
+        &mut self.warnings
+    }
+
+    /// Returns all informational [`ValidationIssue`]s in this report.
+    pub fn infos(&self) -> &[ValidationIssue] {
+        &self.infos
+    }
+
+    /// Returns all informational [`ValidationIssue`]s mutably.
+    pub fn infos_mut(&mut self) -> &mut [ValidationIssue] {
+        &mut self.infos
+    }
     /// Add an error to the report.
     pub fn add_error(&mut self, issue: ValidationIssue) {
         self.errors.push(issue);
@@ -668,22 +754,22 @@ impl ValidationReport {
 
     /// Check if the report has any errors.
     pub fn has_errors(&self) -> bool {
-        !self.errors.is_empty()
+        !self.errors().is_empty()
     }
 
     /// Check if the report has any warnings.
     pub fn has_warnings(&self) -> bool {
-        !self.warnings.is_empty()
+        !self.warnings().is_empty()
     }
 
     /// Get the total count of all issues.
     pub fn total_issues(&self) -> usize {
-        self.errors.len() + self.warnings.len() + self.infos.len()
+        self.errors().len() + self.warnings().len() + self.infos().len()
     }
 
     /// Check if the validation passed (no errors, but may have warnings).
     pub fn is_valid(&self) -> bool {
-        self.errors.is_empty()
+        self.errors().is_empty()
     }
 
     /// Convert to a `Result`.
@@ -701,15 +787,15 @@ impl ValidationReport {
 
     /// Iterate over all issues in severity buckets: errors, warnings, then infos.
     pub fn iter_issues(&self) -> impl Iterator<Item = &ValidationIssue> {
-        self.errors
+        self.errors()
             .iter()
-            .chain(self.warnings.iter())
-            .chain(self.infos.iter())
+            .chain(self.warnings().iter())
+            .chain(self.infos().iter())
     }
 
     /// Return `true` if the report contains any issues (errors, warnings, or infos).
     pub fn has_any_issues(&self) -> bool {
-        !self.errors.is_empty() || !self.warnings.is_empty() || !self.infos.is_empty()
+        !self.errors().is_empty() || !self.warnings().is_empty() || !self.infos().is_empty()
     }
 
     /// Iterate over all issues matching an exact profile/MIG rule identifier.
@@ -730,9 +816,9 @@ impl ValidationReport {
         F: Fn(&ValidationIssue) -> bool,
     {
         Self {
-            errors: self.errors.iter().filter(|i| pred(i)).cloned().collect(),
-            warnings: self.warnings.iter().filter(|i| pred(i)).cloned().collect(),
-            infos: self.infos.iter().filter(|i| pred(i)).cloned().collect(),
+            errors: self.errors().iter().filter(|i| pred(i)).cloned().collect(),
+            warnings: self.warnings().iter().filter(|i| pred(i)).cloned().collect(),
+            infos: self.infos().iter().filter(|i| pred(i)).cloned().collect(),
         }
     }
 
@@ -828,9 +914,9 @@ impl ValidationReport {
 
         use std::fmt::Write as _;
         let mut out = String::from("Validation Report:");
-        let errors = sorted_refs(&self.errors);
-        let warnings = sorted_refs(&self.warnings);
-        let infos = sorted_refs(&self.infos);
+        let errors = sorted_refs(self.errors());
+        let warnings = sorted_refs(self.warnings());
+        let infos = sorted_refs(self.infos());
 
         if !errors.is_empty() {
             write!(out, "\n  Errors ({})", errors.len()).ok();
@@ -877,9 +963,9 @@ impl miette::Diagnostic for ValidationReport {
     fn help<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
         let msg = format!(
             "Validation found {} error(s), {} warning(s), {} info(s)",
-            self.errors.len(),
-            self.warnings.len(),
-            self.infos.len()
+            self.errors().len(),
+            self.warnings().len(),
+            self.infos().len()
         );
         Some(Box::new(msg))
     }
@@ -1035,9 +1121,9 @@ mod tests {
         );
 
         let only_orders_block = report.filter_by_rule_id("ORDERS-P001");
-        assert_eq!(only_orders_block.errors.len(), 1);
-        assert!(only_orders_block.warnings.is_empty());
-        assert!(only_orders_block.infos.is_empty());
+        assert_eq!(only_orders_block.errors().len(), 1);
+        assert!(only_orders_block.warnings().is_empty());
+        assert!(only_orders_block.infos().is_empty());
 
         let orders_family = report.filter_by_rule_prefix("ORDERS-");
         assert_eq!(orders_family.total_issues(), 2);

@@ -93,12 +93,12 @@ fn fuzz_parse_write_parse_invariant_small_message() {
 
 #[test]
 fn fuzz_validation_layers_no_panic() {
-    use edifact_rs::{Segment, ValidationContext, ValidationLayer, ValidationReport, Validator, validate_each};
+    use edifact_rs::{Segment, ValidationContext, ValidationLayer, ValidationReport, ValidationRuleContext, Validator, validate_each};
 
     struct NoopValidator;
 
     impl Validator for NoopValidator {
-        fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport) {
+        fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
             validate_each(segments, report, |_segment| Ok(()));
         }
     }
@@ -239,5 +239,42 @@ fn fuzz_message_windows_bytes_no_panic() {
         .for_each(|input: Vec<u8>| {
             // Consume the full iterator — any item may be Ok or Err.
             for _ in message_windows_bytes(&input) { /* consume */ }
+        });
+}
+
+#[test]
+fn fuzz_reader_no_panic_and_equivalence() {
+    // The reader-based path (OwnedSegmentStream) exercises distinct logic from the
+    // slice path: fast-path BufRead scan, slow-path byte accumulation, UNA detection
+    // across buffer boundaries, and max_segment_bytes guard.
+    //
+    // Two properties are tested:
+    //   1. No panic for any arbitrary byte sequence.
+    //   2. When both paths succeed, the resulting segments are identical.
+    use edifact_rs::from_reader;
+
+    check!()
+        .with_type::<Vec<u8>>()
+        .cloned()
+        .for_each(|input: Vec<u8>| {
+            // Use a small BufReader capacity to maximise buffer-boundary splits.
+            let reader = std::io::BufReader::with_capacity(8, std::io::Cursor::new(&input));
+            let reader_result: Result<Vec<_>, _> = from_reader(reader);
+            let slice_result: Result<Vec<_>, _> = from_bytes(&input).collect();
+
+            // Property 1: no panic (guaranteed by running the code above).
+
+            // Property 2: on success both paths must agree on tag sequence.
+            if let (Ok(reader_segs), Ok(slice_segs)) = (&reader_result, &slice_result) {
+                assert_eq!(
+                    reader_segs.len(),
+                    slice_segs.len(),
+                    "reader and slice paths returned different segment counts for input: {:?}",
+                    &input[..input.len().min(64)],
+                );
+                for (r, s) in reader_segs.iter().zip(slice_segs.iter()) {
+                    assert_eq!(r.tag, s.tag, "tag mismatch between reader and slice paths");
+                }
+            }
         });
 }

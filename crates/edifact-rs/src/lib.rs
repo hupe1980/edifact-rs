@@ -105,9 +105,9 @@
 //! let segments: Vec<_> = from_bytes(b"UNH+1+ORDERS:D:96A:UN'BGM+220+PO123+9'UNT+3+1'")
 //!     .collect::<Result<_, _>>()?;
 //!
-//! let pack = ProfileRulePack::builder("ORDERS-DEMO")
+//! let pack = ProfileRulePack::new("ORDERS-DEMO")
 //!     .for_message_type("ORDERS")
-//!     .with_rule_fn(|segments| {
+//!     .with_stateless_rule_fn(|segments| {
 //!         let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
 //!         let document_code = bgm.get_element(0)?.get_component(0)?;
 //!         (document_code == "220").then(|| {
@@ -164,6 +164,7 @@ pub(crate) mod parser;
 pub(crate) mod tokenizer;
 pub(crate) mod validator;
 pub(crate) mod writer;
+pub mod group;
 
 // ── typed serialization layer ─────────────────────────────────────────────────
 pub mod de;
@@ -171,19 +172,19 @@ pub(crate) mod event;
 pub mod ser;
 
 // ── flat re-exports: core ─────────────────────────────────────────────────────
-pub use envelope::validate_envelope;
+pub use envelope::{validate_envelope, InterchangeEnvelope, MessageEnvelope, MessageIdentifier, parse_unh};
 pub use error::{EdifactError, IoError, ValidationIssue, ValidationReport, ValidationSeverity};
 pub use model::{BorrowedElement, BorrowedSegment, Element, OwnedElement, OwnedSegment, Segment, Span};
 pub use parser::{
     Parser, ReaderConfig, from_bufread, from_bufread_stream, from_bufread_stream_with_config,
     from_reader_with_config,
 };
-pub use tokenizer::{ServiceStringAdvice, Tokenizer};
-pub use validator::{
+pub use tokenizer::{ServiceStringAdvice, Tokenizer};pub use validator::{
     ProfileRule, ProfileRulePack, ValidationContext, ValidationContextBuilder, ValidationLayer,
-    Validator, validate_each,
+    ValidationRuleContext, Validator, validate_each,
 };
 pub use writer::Writer;
+pub use group::{GroupDef, SegmentGroup, group_segments};
 
 // ── flat re-exports: serde ────────────────────────────────────────────────────
 
@@ -196,21 +197,10 @@ pub use de::{
     deserialize_messages_bytes, deserialize_messages_from_reader, deserialize_str,
     groups_are_contiguous_by_qualifier,
     message_windows_bytes, message_windows_from_reader,
+    message_type_from_window, MessageDispatch, DispatchedMessage,
 };
 
-/// Low-level helper functions for working with raw segments.
-///
-/// These are also used internally by `#[derive(EdifactDeserialize)]` generated code.
-pub mod helpers {
-    pub use crate::de::{
-        composite_element, contiguous_groups_by_qualifier, element_str,
-        find_qualified_segment, find_qualified_segment_owned, find_segment, find_segment_owned,
-        find_segment_typed, find_segments_iter, find_segments_typed, get_components_iter,
-        optional_component, optional_element, qualifier_matches_pattern,
-        required_component, required_element,
-    };
-}
-
+// ── Proc-macro support ─────────────────────────────────────────────────────────
 // Re-export helpers at root with doc(hidden) for macro-generated code compatibility.
 #[doc(hidden)]
 pub use de::{
@@ -264,10 +254,34 @@ impl<'a> Iterator for FromBytesIter<'a> {
 /// Parse `input` bytes into an iterator of [`Segment`]s.
 ///
 /// Borrows directly from `input` — zero allocation for segment data.
+///
+/// # Segment-size limit
+///
+/// Applies a default 64 KiB per-segment limit, matching the reader-based path.
+/// Use [`from_bytes_with_config`] to override.
 pub fn from_bytes(input: &[u8]) -> FromBytesIter<'_> {
+    from_bytes_with_config(input, parser::ReaderConfig::default())
+}
+
+/// Parse `input` bytes into an iterator of [`Segment`]s with explicit configuration.
+///
+/// The `config.max_segment_bytes` limit is enforced by the tokenizer, returning
+/// [`EdifactError::SegmentTooLong`] if a single segment exceeds the threshold.
+/// Pass `ReaderConfig::default().max_segment_bytes(usize::MAX)` to disable the limit.
+///
+/// # Example
+///
+/// ```
+/// use edifact_rs::{ReaderConfig, from_bytes_with_config};
+///
+/// let cfg = ReaderConfig::default().max_segment_bytes(128);
+/// let result: Result<Vec<_>, _> = from_bytes_with_config(b"BGM+220+1+9'", cfg).collect();
+/// assert!(result.is_ok());
+/// ```
+pub fn from_bytes_with_config<'a>(input: &'a [u8], config: parser::ReaderConfig) -> FromBytesIter<'a> {
     match tokenizer::ServiceStringAdvice::from_bytes_strict(input) {
         Ok(ssa) => {
-            let t = tokenizer::Tokenizer::new(input, ssa);
+            let t = tokenizer::Tokenizer::with_limit(input, ssa, config.max_segment_bytes);
             FromBytesIter {
                 parser: Some(parser::Parser::new(t)),
                 pending_error: None,

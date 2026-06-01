@@ -10,7 +10,9 @@ use std::io::Write;
 pub struct Writer<W: Write> {
     inner: W,
     ssa: ServiceStringAdvice,
-    segment_count: u32,
+    /// Running count of segments written.  `u64` to prevent silent overflow on
+    /// pathological inputs (a `u32` would wrap after ~4 billion segments).
+    segment_count: u64,
 }
 
 impl<W: Write> Writer<W> {
@@ -156,7 +158,8 @@ impl<W: Write> Writer<W> {
     }
 
     /// Number of segments written so far.
-    pub fn segment_count(&self) -> u32 {
+    /// Returns the total number of segments written so far.
+    pub fn segment_count(&self) -> u64 {
         self.segment_count
     }
 
