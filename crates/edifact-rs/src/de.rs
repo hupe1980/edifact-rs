@@ -1193,21 +1193,18 @@ impl MessageDispatch {
     /// Dispatch all messages from a reader.
     ///
     /// Parses the stream into message windows and dispatches each.  The
-    /// returned iterator yields owned [`DispatchedMessage`] values.
+    /// returned iterator yields owned [`DispatchedMessage`] values lazily:
+    /// each window is fully buffered in memory (as `Vec<OwnedSegment>`) before
+    /// dispatch, but windows are processed one at a time rather than all at once.
     pub fn dispatch_all_from_reader<R: Read + 'static>(
         &self,
         reader: R,
     ) -> impl Iterator<Item = Result<DispatchedMessage, EdifactError>> + '_ {
-        let windows: Vec<_> = message_windows_from_reader(reader).collect();
-        let results: Vec<_> = windows
-            .into_iter()
-            .map(|window| {
-                let window = window?;
-                let borrowed: Vec<Segment<'_>> = window.iter().map(|s| s.as_borrowed()).collect();
-                self.dispatch(&borrowed)
-            })
-            .collect();
-        results.into_iter()
+        message_windows_from_reader(reader).map(|window| {
+            let window = window?;
+            let borrowed: Vec<Segment<'_>> = window.iter().map(|s| s.as_borrowed()).collect();
+            self.dispatch(&borrowed)
+        })
     }
 }
 

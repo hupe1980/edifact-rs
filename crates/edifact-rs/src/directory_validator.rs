@@ -156,8 +156,9 @@ impl DirectoryValidator {
     /// This is the preferred constructor when code-generating directory data as
     /// a `static` array: no manual fn-pointer boilerplate is required.
     ///
-    /// No code-list validation is performed by default; call
-    /// [`with_code_list_rules`][Self::with_code_list_rules] to add it.
+    /// Code-list checks are **disabled** by default (the built-in `is_code_valid`
+    /// always returns `true`).  Call [`with_code_list_rules`][Self::with_code_list_rules]
+    /// to register directory-specific rules that actually validate code values.
     ///
     /// # Example
     ///
@@ -182,7 +183,7 @@ impl DirectoryValidator {
             message_type: None,
             enforce_known_tags: true,
             structure_checks: true,
-            code_list_checks: true,
+            code_list_checks: false,
         }
     }
 

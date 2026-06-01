@@ -115,8 +115,11 @@ pub enum EdifactError {
 
     /// Invalid UNA service string advice.
     ///
-    /// If present, the UNA segment must be exactly 9 bytes: "UNA" followed by 6 service
-    /// characters, all distinct, and none of them whitespace.
+    /// If present, the UNA segment must be exactly 9 bytes: `"UNA"` followed by
+    /// 6 service characters.  The four active characters (element separator,
+    /// component separator, release character, and segment terminator) must be
+    /// mutually distinct and must not be ASCII whitespace.  The decimal mark and
+    /// repetition separator characters are not validated by this check.
     #[error("invalid UNA service string advice")]
     InvalidUna,
 

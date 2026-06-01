@@ -65,9 +65,11 @@ pub struct GroupDef {
 
 /// A populated segment group produced by [`group_segments`].
 ///
-/// Segments belonging to this group are stored by value (cloned from the input
-/// slice).  String data inside each segment is still borrowed from the original
-/// input buffer via the `'a` lifetime parameter, so no deep allocation occurs.
+/// Each segment is cloned (shallow copy) from the input slice: the `Vec` of
+/// elements is heap-allocated per segment, but the string data inside each
+/// element still borrows from the original input buffer via the `'a` lifetime.
+/// For read-heavy workloads consider keeping the original segment slice and
+/// using group indices rather than cloned values.
 #[derive(Debug)]
 pub struct SegmentGroup<'a> {
     /// Group name from the schema, e.g. `"SG2"`, or `"ROOT"` for the envelope.

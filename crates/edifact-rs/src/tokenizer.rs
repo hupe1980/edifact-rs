@@ -143,8 +143,9 @@ pub struct Tokenizer<'a> {
     pos: usize,
     ssa: ServiceStringAdvice,
     state: TokState,
-    /// Maximum allowed segment byte length (tag + elements + terminators).
-    /// Checked at the end of each `read_value` call.  `usize::MAX` = unlimited.
+    /// Maximum allowed segment byte length (tag + elements, **excluding** the
+    /// segment terminator byte itself).  Checked in `read_value` and `read_tag`.
+    /// `usize::MAX` = unlimited.
     max_segment_bytes: usize,
     /// Byte position where the current segment started (set in `read_tag`).
     segment_start: usize,
@@ -316,8 +317,11 @@ impl<'a> Tokenizer<'a> {
         }
         let start = self.pos;
         // A segment tag is terminated by the element separator, segment terminator, or CR/LF.
-        // Use memchr for the element sep; fall back to a short scan (tags are ≤ 6 bytes).
-        let remaining = &self.input[self.pos..];
+        // Bound the scan to max_segment_bytes + 1 so adversarial input with no delimiters
+        // cannot force memchr to scan arbitrarily large buffers before we return an error.
+        let input_remaining = &self.input[self.pos..];
+        let scan_limit = self.max_segment_bytes.saturating_add(1).min(input_remaining.len());
+        let remaining = &input_remaining[..scan_limit];
         let end = memchr(self.ssa.element_sep, remaining)
             .or_else(|| memchr(self.ssa.segment_term, remaining))
             .unwrap_or(remaining.len());

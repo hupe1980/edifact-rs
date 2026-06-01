@@ -157,7 +157,6 @@ impl<W: Write> Writer<W> {
         Ok(self.inner)
     }
 
-    /// Number of segments written so far.
     /// Returns the total number of segments written so far.
     pub fn segment_count(&self) -> u64 {
         self.segment_count
