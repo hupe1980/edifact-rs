@@ -1060,7 +1060,9 @@ impl<I: Iterator<Item = Result<crate::OwnedSegment, EdifactError>>> Iterator
 /// Stream-parse EDIFACT bytes into an iterator of per-message windows.
 ///
 /// Each yielded [`MessageWindow`] spans one `UNH..UNT` pair, with segments
-/// borrowing from `input` — **zero heap allocations per segment**.
+/// borrowing from `input` for their text content. Segment assembly is
+/// zero-copy for borrowed input bytes; release-character unescaping may
+/// allocate owned component strings when necessary.
 /// Envelope segments (`UNB`, `UNZ`, …) are skipped automatically.
 ///
 /// The `message_type` and `association_code` fields are populated directly from

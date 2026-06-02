@@ -227,9 +227,11 @@ fn group_recursive_inner<'a>(
     while i < segments.len() {
         let tag = segments[i].tag;
 
-        // If this tag is a trigger for an ancestor group, stop and return
-        // so the ancestor can create a new group instance.
-        if stop_triggers.contains(&tag) {
+        // Compare by string value rather than using contains() because
+        // `tag` is borrowed from parsed input while `stop_triggers` holds
+        // `&'static str` values.
+        #[allow(clippy::manual_contains)]
+        if stop_triggers.iter().any(|t| *t == tag) {
             break;
         }
 
