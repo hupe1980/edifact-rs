@@ -1073,7 +1073,7 @@ impl<I: Iterator<Item = Result<crate::OwnedSegment, EdifactError>>> Iterator
 ///     .collect::<Result<_, _>>()
 ///     .unwrap();
 /// assert_eq!(windows.len(), 1);
-/// assert_eq!(windows[0].message_type, Some("ORDERS"));
+/// assert_eq!(windows[0].message_type.as_deref(), Some("ORDERS"));
 /// assert_eq!(windows[0].segments[0].tag, "UNH");
 /// assert_eq!(windows[0].segments.last().unwrap().tag, "UNT");
 /// ```
