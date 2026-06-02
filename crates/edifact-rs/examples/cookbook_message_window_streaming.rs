@@ -116,7 +116,7 @@ fn main() {
         .enumerate()
         .map(|(i, r)| (i, r.unwrap()))
     {
-        let msg_type = window.message_type.unwrap_or("?");
+        let msg_type = window.message_type.as_deref().unwrap_or("?");
         println!(
             "Window {}: type={msg_type}, segments={}",
             i + 1,

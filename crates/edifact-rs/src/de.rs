@@ -6,6 +6,7 @@
 //! `impl EdifactDeserialize for Vec<T>`.
 
 use crate::{EdifactError, Segment};
+use std::borrow::Cow;
 use std::io::Read;
 use std::str::FromStr;
 
@@ -766,14 +767,14 @@ where
 pub struct MessageWindow<'a> {
     /// EDIFACT message type extracted from `UNH` element 1, component 0.
     ///
-    /// `None` if the `UNH` segment is missing or its message-type component
-    /// is absent (malformed input).
-    pub message_type: Option<&'a str>,
+    /// Borrowed when the component can be referenced directly, owned when
+    /// release-character unescaping requires allocation.
+    pub message_type: Option<Cow<'a, str>>,
     /// Association-assigned code (DE 0057) from `UNH` element 1, component 4.
     ///
-    /// This is the MIG/profile version string, e.g. `"5.5.3a"`.  `None` if
-    /// the component is absent.
-    pub association_code: Option<&'a str>,
+    /// Borrowed when the component can be referenced directly, owned when
+    /// release-character unescaping requires allocation.
+    pub association_code: Option<Cow<'a, str>>,
     /// All segments in this window, from `UNH` through `UNT` (inclusive).
     pub segments: Vec<crate::Segment<'a>>,
 }
@@ -800,30 +801,21 @@ impl<'a> MessageWindow<'a> {
     }
 }
 
-/// Extract a non-empty string component from UNH element 1, recovering the `'a`
-/// lifetime from the `Cow<'a, str>` data.
+/// Extract a non-empty string component from UNH element 1, preserving the
+/// component's borrowed/owned state.
 ///
 /// By using two distinct lifetime parameters (`'b` for the borrow of `seg`,
 /// `'a` for the segment data), we tell the borrow checker that the returned
 /// `&'a str` lives independently of how long we hold `&seg`, which lets callers
 /// move `seg` into a containing struct after this call returns.
-fn unh_component<'a, 'b>(seg: &'b crate::Segment<'a>, comp_idx: usize) -> Option<&'a str>
+fn unh_component<'a, 'b>(seg: &'b crate::Segment<'a>, comp_idx: usize) -> Option<Cow<'a, str>>
 where
     'a: 'b,
 {
     seg.elements
         .get(1)
         .and_then(|e| e.components.get(comp_idx))
-        .and_then(|c| {
-            // Match on the Borrowed variant to recover &'a str directly.
-            // For segments parsed by from_bytes all components are Cow::Borrowed;
-            // the Owned arm handles any unusual (write-path) segments gracefully.
-            if let std::borrow::Cow::Borrowed(s) = c {
-                if s.is_empty() { None } else { Some(*s) }
-            } else {
-                None
-            }
-        })
+        .and_then(|c| if c.is_empty() { None } else { Some(c.clone()) })
 }
 
 /// An owned, heap-allocated `UNH..UNT` message window.
@@ -1706,6 +1698,24 @@ mod tests {
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].segments[0].tag, "UNH");
         assert_eq!(windows[0].segments.last().unwrap().tag, "UNT");
+        assert_eq!(windows[0].message_type.as_deref(), Some("ORDERS"));
+        assert_eq!(windows[0].association_code.as_deref(), None);
+    }
+
+    #[test]
+    fn message_windows_bytes_preserves_owned_unh_metadata() {
+        let input = b"UNB+UNOA:1+S+R+200101:0900+1'\
+                      UNH+1+ORD?ERS:D:96A:UN:5??5??3a'\
+                      BGM+220+PO-001+9'\
+                      UNT+3+1'\
+                      UNZ+1+1'";
+        let windows: Vec<_> = message_windows_bytes(input)
+            .collect::<Result<_, _>>()
+            .unwrap();
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].message_type.as_deref(), Some("ORDERS"));
+        assert_eq!(windows[0].association_code.as_deref(), Some("5?5?3a"));
     }
 
     #[test]

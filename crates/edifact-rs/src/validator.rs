@@ -398,10 +398,24 @@ impl ProfileRulePack {
     pub fn merge_with_override(mut self, mut other: Self) -> Self {
         for other_rule in other.rules.drain(..) {
             if let Some(ref id) = other_rule.id {
-                if let Some(pos) = self.rules.iter().position(|r| r.id.as_ref() == Some(id)) {
-                    self.rules[pos] = other_rule;
+                let mut insert_at = None;
+                let mut deduped_rules = Vec::with_capacity(self.rules.len());
+
+                for rule in self.rules.drain(..) {
+                    if rule.id.as_ref() == Some(id) {
+                        insert_at.get_or_insert(deduped_rules.len());
+                        continue;
+                    }
+                    deduped_rules.push(rule);
+                }
+
+                if let Some(pos) = insert_at {
+                    deduped_rules.insert(pos, other_rule);
+                    self.rules = deduped_rules;
                     continue;
                 }
+
+                self.rules = deduped_rules;
             }
             self.rules.push(other_rule);
         }
