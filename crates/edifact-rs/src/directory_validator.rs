@@ -107,14 +107,16 @@ impl<'a> SegmentDefRef<'a> {
             Self::Static(d) => d
                 .elements
                 .iter()
-                .rposition(|e| e.status == Status::Mandatory)
-                .map(|i| i + 1)
+                .filter(|e| e.status == Status::Mandatory)
+                .map(|e| e.position as usize)
+                .max()
                 .unwrap_or(0),
             Self::Owned(d) => d
                 .elements
                 .iter()
-                .rposition(|e| e.status == Status::Mandatory)
-                .map(|i| i + 1)
+                .filter(|e| e.status == Status::Mandatory)
+                .map(|e| e.position as usize)
+                .max()
                 .unwrap_or(0),
         }
     }

@@ -217,3 +217,24 @@ fn release_scoping_requires_matching_association_code() {
         "expected release mismatch to skip pack"
     );
 }
+
+#[test]
+fn pack_composition_preserves_compatible_release_scope() {
+    let base = ProfileRulePack::new("BASE")
+        .for_message_type("ORDERS")
+        .for_release("5.5.3a")
+        .with_stateless_rule_fn(|_| None);
+
+    let delta = ProfileRulePack::new("DELTA")
+        .for_message_type("ORDERS")
+        .with_stateless_rule_fn(|_| None);
+
+    let merged = base.merge(delta);
+    assert_eq!(merged.release(), Some("5.5.3a"));
+
+    let extended = ProfileRulePack::new("EXTENDED")
+        .for_message_type("ORDERS")
+        .with_stateless_rule_fn(|_| None)
+        .extend_from(&ProfileRulePack::new("BASE2").for_release("5.5.3a"));
+    assert_eq!(extended.release(), Some("5.5.3a"));
+}

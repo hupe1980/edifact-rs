@@ -331,7 +331,10 @@ impl ProfileRulePack {
     /// Prepend all rules from `base` to this pack.
     ///
     /// Rules from `base` are shared (via [`Arc`] cloning) and run first.
-    /// Message-type restrictions from `base` are also merged.
+    /// Message-type restrictions from `base` are also merged.  The resulting
+    /// release scope must be compatible with both packs: if one pack is scoped
+    /// to a release and the other is not, the scope is preserved; if both are
+    /// scoped, they must match.
     ///
     /// # Example
     ///
@@ -352,6 +355,7 @@ impl ProfileRulePack {
                 self.message_types.push(mt.clone());
             }
         }
+        self.release = merge_release_scopes(self.release.take(), base.release.clone());
         self
     }
 
@@ -360,12 +364,15 @@ impl ProfileRulePack {
     /// Rules from `self` run before rules from `other`.  If both packs contain
     /// named rules with the same id, **both run** — use
     /// [`merge_with_override`][Self::merge_with_override] to de-duplicate by id instead.
+    /// Release scoping follows the same compatibility rule as
+    /// [`extend_from`][Self::extend_from].
     pub fn merge(mut self, mut other: Self) -> Self {
         for message_type in other.message_types.drain(..) {
             if !self.message_types.contains(&message_type) {
                 self.message_types.push(message_type);
             }
         }
+        self.release = merge_release_scopes(self.release.take(), other.release.take());
         self.rules.append(&mut other.rules);
         self
     }
@@ -381,6 +388,8 @@ impl ProfileRulePack {
     ///   **retained unchanged**.
     ///
     /// Message-type restrictions from `other` are merged into `self`.
+    /// Release scoping follows the same compatibility rule as
+    /// [`extend_from`][Self::extend_from].
     ///
     /// # Example
     ///
@@ -424,7 +433,22 @@ impl ProfileRulePack {
                 self.message_types.push(message_type);
             }
         }
+        self.release = merge_release_scopes(self.release.take(), other.release.take());
         self
+    }
+}
+
+fn merge_release_scopes(current: Option<String>, incoming: Option<String>) -> Option<String> {
+    match (current, incoming) {
+        (Some(current), Some(incoming)) => {
+            assert_eq!(
+                current, incoming,
+                "cannot merge ProfileRulePack values with different release scopes"
+            );
+            Some(current)
+        }
+        (current @ Some(_), None) => current,
+        (None, incoming) => incoming,
     }
 }
 
