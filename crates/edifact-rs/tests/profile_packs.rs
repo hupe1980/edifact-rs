@@ -146,3 +146,74 @@ fn message_type_scoping_prevents_wrong_pack_application() {
         "expected scoped pack to be skipped: {report}"
     );
 }
+
+#[test]
+fn merge_with_override_replaces_named_rules_in_place() {
+    let segments = parse_segments(b"UNH+1+ORDERS:D:96A:UN'BGM+220+PO123+9'UNT+3+1'");
+
+    let base = ProfileRulePack::new("BASE")
+        .for_message_type("ORDERS")
+        .with_named_stateless_rule_fn("RULE-1", |_| {
+            Some(ValidationIssue::new(ValidationSeverity::Info, "base first"))
+        })
+        .with_named_stateless_rule_fn("RULE-2", |_| {
+            Some(ValidationIssue::new(
+                ValidationSeverity::Info,
+                "base second",
+            ))
+        });
+
+    let override_pack = ProfileRulePack::new("OVERRIDE")
+        .for_message_type("ORDERS")
+        .with_named_stateless_rule_fn("RULE-1", |_| {
+            Some(ValidationIssue::new(
+                ValidationSeverity::Info,
+                "override first",
+            ))
+        });
+
+    let pack = base.merge_with_override(override_pack);
+    assert_eq!(pack.rule_count(), 2);
+
+    let report = ValidationContext::builder()
+        .with_profile_pack(pack)
+        .build()
+        .validate_lenient(&segments);
+
+    assert_eq!(report.infos().len(), 2);
+    assert_eq!(report.infos()[0].message, "override first");
+    assert_eq!(report.infos()[1].message, "base second");
+}
+
+#[test]
+fn release_scoping_requires_matching_association_code() {
+    let matching = parse_segments(b"UNH+1+ORDERS:D:96A:UN:5.5.3a'BGM+220+PO123+9'UNT+3+1'");
+    let mismatching = parse_segments(b"UNH+1+ORDERS:D:96A:UN:5.5.4'BGM+220+PO123+9'UNT+3+1'");
+
+    let build_pack = || {
+        ProfileRulePack::new("ORDERS-553A")
+            .for_message_type("ORDERS")
+            .for_release("5.5.3a")
+            .with_stateless_rule_fn(|_| {
+                Some(
+                    ValidationIssue::new(ValidationSeverity::Error, "release-specific rule fired")
+                        .with_rule_id("DEMO-P100"),
+                )
+            })
+    };
+
+    let matching_report = ValidationContext::builder()
+        .with_profile_pack(build_pack())
+        .build()
+        .validate_lenient(&matching);
+    assert!(matching_report.has_errors());
+
+    let mismatching_report = ValidationContext::builder()
+        .with_profile_pack(build_pack())
+        .build()
+        .validate_lenient(&mismatching);
+    assert!(
+        mismatching_report.is_valid(),
+        "expected release mismatch to skip pack"
+    );
+}

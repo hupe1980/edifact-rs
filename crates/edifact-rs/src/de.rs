@@ -1154,7 +1154,7 @@ where
 ///
 /// This function is kept for source-level compatibility but may be removed in a
 /// future release.
-#[deprecated(since = "0.0.0", note = "use `MessageWindow::message_type` instead")]
+#[deprecated(since = "0.6.0", note = "use `MessageWindow::message_type` instead")]
 pub fn message_type_from_window<'a>(window: &'a [Segment<'a>]) -> Option<&'a str> {
     window
         .iter()

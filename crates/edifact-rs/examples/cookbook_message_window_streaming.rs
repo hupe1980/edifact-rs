@@ -70,16 +70,18 @@ fn demonstrate_error_propagation() {
     let broken = b"UNB+UNOA:1+S+R+200101:0900+1'\
                    UNH+1+ORDERS:D:96A:UN'BGM+220+OK+9'UNT+3+1'\
                    UNH+2+ORDERS:D:96A:UN'BGM+220+BROKEN+9'";
-    // Collecting all windows: the last window is never closed (no UNT), so it
-    // is simply not yielded (iteration ends when the inner iterator ends).
-    let windows: Vec<_> = message_windows_bytes(broken)
-        .collect::<Result<_, _>>()
-        .unwrap();
-    // Only the first, complete window is returned.
-    assert_eq!(windows.len(), 1);
+    // Collecting all windows: the unclosed window is surfaced as an error on
+    // the final iteration, after the first complete window has already been yielded.
+    let windows: Vec<_> = message_windows_bytes(broken).collect();
+    // The first window is complete, and the second item is the EOF error.
+    assert_eq!(windows.len(), 2);
+    assert!(matches!(
+        windows[1],
+        Err(edifact_rs::EdifactError::UnexpectedEof { .. })
+    ));
     println!(
         "Received {} complete window(s) before end-of-stream",
-        windows.len()
+        windows.iter().filter(|result| result.is_ok()).count()
     );
 
     // A UNH-while-in-flight scenario (no UNT before next UNH) is an error:

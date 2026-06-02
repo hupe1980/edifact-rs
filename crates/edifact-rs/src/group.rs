@@ -229,9 +229,7 @@ fn group_recursive_inner<'a>(
 
         // If this tag is a trigger for an ancestor group, stop and return
         // so the ancestor can create a new group instance.
-        // Use iterator comparison so a non-'static tag (&str from parsed input)
-        // can be compared against the 'static stop-trigger strings.
-        if stop_triggers.iter().any(|t| *t == tag) {
+        if stop_triggers.contains(&tag) {
             break;
         }
 

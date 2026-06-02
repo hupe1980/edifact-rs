@@ -67,7 +67,7 @@ let interchange = b"\
 
 for result in message_windows_bytes(interchange) {
     let window = result?;
-    // window.message_type  — Option<&str> from UNH element 0
+    // window.message_type  — Option<&str> from UNH element 1, component 0
     // window.association_code — Option<&str> from UNH DE 0057
     // window.segments     — [UNH, BGM, UNT]
     println!("{:?}: {} segments", window.message_type, window.segments.len());
