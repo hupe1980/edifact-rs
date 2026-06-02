@@ -442,9 +442,9 @@ fn merge_release_scopes(current: Option<String>, incoming: Option<String>) -> Op
     match (current, incoming) {
         (Some(current), Some(incoming)) => {
             // Both packs specify a release; they must match to compose safely.
-            // This is a debug assertion because users should not compose packs for
-            // different releases; if they do, it indicates a logic error in pack setup.
-            debug_assert_eq!(
+            // This assertion is always enforced (not debug-only) because mismatched
+            // release scopes would cause rules to apply to wrong message formats at runtime.
+            assert_eq!(
                 current, incoming,
                 "cannot merge ProfileRulePack values with different release scopes"
             );
