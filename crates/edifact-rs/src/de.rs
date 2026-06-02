@@ -783,7 +783,8 @@ impl<'a> MessageWindow<'a> {
     /// Build a `MessageWindow` from a completed segment buffer.
     ///
     /// Extracts `message_type` and `association_code` from the leading `UNH`
-    /// segment without additional allocation.
+    /// segment.  Metadata extraction is allocation-free for borrowed components;
+    /// release-character unescaping may allocate owned strings when necessary.
     fn from_segments(segments: Vec<crate::Segment<'a>>) -> Self {
         let message_type = segments
             .first()
@@ -862,9 +863,10 @@ impl OwnedMessageWindow {
 /// An iterator that groups borrowed EDIFACT segments into per-message windows.
 ///
 /// Zero-copy counterpart to [`MessageWindowsIter`] for in-memory byte slices.
-/// Each yielded [`MessageWindow`] borrows from the original input; no heap
-/// allocations occur per segment.  Envelope segments outside a `UNH..UNT` pair
-/// are silently skipped.
+/// Text content borrows from the original input; segment structure allocates
+/// element vectors during parsing. Release-character unescaping may further
+/// allocate owned strings when escape sequences are present. Envelope segments
+/// outside a `UNH..UNT` pair are silently skipped.
 ///
 /// Obtain this via [`message_windows_bytes`].
 pub struct MessageWindowsSliceIter<'a> {

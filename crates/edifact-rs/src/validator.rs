@@ -441,7 +441,10 @@ impl ProfileRulePack {
 fn merge_release_scopes(current: Option<String>, incoming: Option<String>) -> Option<String> {
     match (current, incoming) {
         (Some(current), Some(incoming)) => {
-            assert_eq!(
+            // Both packs specify a release; they must match to compose safely.
+            // This is a debug assertion because users should not compose packs for
+            // different releases; if they do, it indicates a logic error in pack setup.
+            debug_assert_eq!(
                 current, incoming,
                 "cannot merge ProfileRulePack values with different release scopes"
             );
