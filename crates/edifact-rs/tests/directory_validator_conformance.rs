@@ -201,16 +201,15 @@ fn conformance_surfaces_parse_errors_before_validation() {
 
 #[test]
 fn owned_definitions_take_precedence_over_static_lookup() {
-    let validator = DirectoryValidator::from_owned_definitions(vec![OwnedSegmentDef {
-        tag: "NAD".to_owned(),
-        name: "Name and address (runtime)".to_owned(),
-        elements: vec![OwnedElementRef {
-            position: 1,
-            data_element: "3035".to_owned(),
-            status: Status::Mandatory,
-            max_repeat: 1,
-        }],
-    }])
+    let validator = DirectoryValidator::from_owned_definitions(vec![
+        OwnedSegmentDef::new(
+            "NAD".to_owned(),
+            "Name and address (runtime)".to_owned(),
+            vec![
+                OwnedElementRef::new(1, "3035".to_owned(), Status::Mandatory, 1),
+            ],
+        ),
+    ])
     .with_directory_id("RUNTIME")
     .structure_only();
 
@@ -246,4 +245,30 @@ fn owned_definitions_take_precedence_over_static_lookup() {
             .any(|issue| issue.message.contains("required element")),
         "expected missing required element error, got {invalid_report:?}"
     );
+}
+
+#[test]
+fn owned_element_ref_try_new_rejects_position_zero() {
+    let err = OwnedElementRef::try_new(0, "3035".to_owned(), Status::Mandatory, 1)
+        .expect_err("position 0 must be rejected");
+    assert!(
+        matches!(err, EdifactError::InvalidElementPosition),
+        "expected InvalidElementPosition (E025), got {err:?}"
+    );
+    assert_eq!(err.stable_code(), "E025");
+}
+
+#[test]
+fn from_owned_definitions_accepts_valid_definitions() {
+    // All invariants are enforced at OwnedElementRef/OwnedSegmentDef construction time;
+    // from_owned_definitions is now infallible — this just verifies it doesn't panic.
+    let _validator = DirectoryValidator::from_owned_definitions(vec![
+        OwnedSegmentDef::new(
+            "BGM".to_owned(),
+            "test".to_owned(),
+            vec![
+                OwnedElementRef::new(1, "1001".to_owned(), Status::Mandatory, 1),
+            ],
+        ),
+    ]);
 }

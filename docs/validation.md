@@ -309,15 +309,17 @@ definition dictionary:
 use edifact_rs::{DirectoryValidatorBuilder, OwnedSegmentDef, OwnedElementRef, Status};
 
 let validator = DirectoryValidatorBuilder::new("CUSTOM-D96A")
-    .add_segment(OwnedSegmentDef {
-        tag: "BGM".to_owned(),
-        name: "Beginning of message".to_owned(),
-        elements: vec![
-            OwnedElementRef::new(1, "1001".to_owned(), Status::Conditional, 1).unwrap(),
-            OwnedElementRef::new(2, "1004".to_owned(), Status::Conditional, 1).unwrap(),
-            OwnedElementRef::new(3, "1225".to_owned(), Status::Conditional, 1).unwrap(),
-        ],
-    })
+    .add_segment(
+        OwnedSegmentDef::new(
+            "BGM".to_owned(),
+            "Beginning of message".to_owned(),
+            vec![
+                OwnedElementRef::new(1, "1001".to_owned(), Status::Conditional, 1),
+                OwnedElementRef::new(2, "1004".to_owned(), Status::Conditional, 1),
+                OwnedElementRef::new(3, "1225".to_owned(), Status::Conditional, 1),
+            ],
+        ),
+    )
     .build();
 ```
 

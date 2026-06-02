@@ -43,42 +43,135 @@ pub struct SegmentDefinition {
 /// to construct validators from data that is not available at compile time (e.g. loaded
 /// from JSON or a database at startup).
 ///
-/// The `position` field is always one-based (1 = first element). Use [`OwnedElementRef::new`]
-/// to construct instances with validated positions.
+/// Use [`OwnedElementRef::new`] for compile-time-known positions (panics on invalid
+/// input, no error handling noise) or [`OwnedElementRef::try_new`] when the position
+/// comes from an external source and you need a `Result`. Fields are private to prevent
+/// bypassing the position invariant through struct-literal syntax.
 #[derive(Debug, Clone)]
 pub struct OwnedElementRef {
     /// One-based element position.
-    pub position: u8,
+    position: u8,
     /// UN/EDIFACT data element identifier.
-    pub data_element: String,
+    data_element: String,
     /// Requirement status.
-    pub status: Status,
+    status: Status,
     /// Maximum repetition count.
-    pub max_repeat: u8,
+    max_repeat: u8,
 }
 
 /// Owned runtime equivalent of [`SegmentDefinition`].
 ///
 /// Used by [`DirectoryValidatorBuilder`] and [`DirectoryValidator::from_owned_definitions`].
+///
+/// Use [`OwnedSegmentDef::new`] for compile-time-known tags (panics on invalid input,
+/// no error handling noise) or [`OwnedSegmentDef::try_new`] when the tag comes from
+/// an external source and you need a `Result`. Fields are private to prevent bypassing
+/// the tag invariant through struct-literal syntax.
 #[derive(Debug, Clone)]
 pub struct OwnedSegmentDef {
     /// Segment tag (e.g. `"BGM"`).
-    pub tag: String,
+    tag: String,
     /// Human-readable segment name.
-    pub name: String,
+    name: String,
     /// Ordered element definitions.
-    pub elements: Vec<OwnedElementRef>,
+    elements: Vec<OwnedElementRef>,
 }
 
-impl OwnedElementRef {
-    /// Construct an owned element reference with validated position.
+impl OwnedSegmentDef {
+    /// Construct an owned segment definition.
     ///
-    /// Position must be >= 1 (one-based indexing).
+    /// This is the ergonomic constructor for compile-time-known tags (e.g.
+    /// `"BGM"`, `"UNH"`).  It panics immediately on invalid input so that
+    /// call sites with literal tag strings require no `.unwrap()` / `.expect()`
+    /// boilerplate.
+    ///
+    /// Use [`try_new`][Self::try_new] instead when the tag originates from an
+    /// external source (user input, config file, database) and you need a
+    /// `Result` to propagate errors gracefully.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `tag` is not exactly three ASCII uppercase letters.
+    pub fn new(tag: String, name: String, elements: Vec<OwnedElementRef>) -> Self {
+        assert!(
+            tag.len() == 3 && tag.bytes().all(|b| b.is_ascii_uppercase()),
+            "OwnedSegmentDef::new: tag must be exactly three ASCII uppercase letters, got {tag:?}"
+        );
+        Self { tag, name, elements }
+    }
+
+    /// Construct an owned segment definition, returning an error for invalid tags.
+    ///
+    /// Prefer this over [`new`][Self::new] when the tag comes from an external
+    /// source (user input, config file, database) and you want to handle the
+    /// error without panicking.
     ///
     /// # Errors
     ///
-    /// Returns an error if position is 0.
-    pub fn new(
+    /// Returns [`EdifactError::InvalidSegmentTag`] if `tag` is not exactly three
+    /// ASCII uppercase letters.
+    pub fn try_new(
+        tag: String,
+        name: String,
+        elements: Vec<OwnedElementRef>,
+    ) -> Result<Self, EdifactError> {
+        if tag.len() != 3 || !tag.bytes().all(|b| b.is_ascii_uppercase()) {
+            return Err(EdifactError::InvalidSegmentTag(tag));
+        }
+        Ok(Self { tag, name, elements })
+    }
+
+    /// Segment tag (e.g. `"BGM"`).
+    #[inline]
+    pub fn tag(&self) -> &str {
+        &self.tag
+    }
+
+    /// Human-readable segment name.
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Element definitions for this segment.
+    #[inline]
+    pub fn elements(&self) -> &[OwnedElementRef] {
+        &self.elements
+    }
+}
+
+impl OwnedElementRef {
+    /// Construct an owned element reference.
+    ///
+    /// This is the ergonomic constructor for compile-time-known positions.
+    /// It panics immediately on invalid input so that call sites with literal
+    /// position numbers require no `.unwrap()` / `.expect()` boilerplate.
+    ///
+    /// Use [`try_new`][Self::try_new] instead when the position originates from
+    /// an external source (user input, config file, database) and you need a
+    /// `Result` to propagate errors gracefully.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `position` is `0` (positions are one-based).
+    pub fn new(position: u8, data_element: String, status: Status, max_repeat: u8) -> Self {
+        assert!(
+            position != 0,
+            "OwnedElementRef::new: position must be >= 1 (one-based), got 0"
+        );
+        Self { position, data_element, status, max_repeat }
+    }
+
+    /// Construct an owned element reference, returning an error for position `0`.
+    ///
+    /// Prefer this over [`new`][Self::new] when the position comes from an
+    /// external source (user input, config file, database) and you want to
+    /// handle the error without panicking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError::InvalidElementPosition`] if `position` is `0`.
+    pub fn try_new(
         position: u8,
         data_element: String,
         status: Status,
@@ -87,12 +180,31 @@ impl OwnedElementRef {
         if position == 0 {
             return Err(EdifactError::InvalidElementPosition);
         }
-        Ok(Self {
-            position,
-            data_element,
-            status,
-            max_repeat,
-        })
+        Ok(Self { position, data_element, status, max_repeat })
+    }
+
+    /// One-based element position (always >= 1).
+    #[inline]
+    pub fn position(&self) -> u8 {
+        self.position
+    }
+
+    /// UN/EDIFACT data element identifier.
+    #[inline]
+    pub fn data_element(&self) -> &str {
+        &self.data_element
+    }
+
+    /// Requirement status of this element.
+    #[inline]
+    pub fn status(&self) -> Status {
+        self.status
+    }
+
+    /// Maximum repetition count for this element.
+    #[inline]
+    pub fn max_repeat(&self) -> u8 {
+        self.max_repeat
     }
 }
 
@@ -362,14 +474,11 @@ impl DirectoryValidator {
     ///
     /// ```rust,ignore
     /// let defs = vec![
-    ///     OwnedSegmentDef {
-    ///         tag: "BGM".to_owned(),
-    ///         name: "Beginning of message".to_owned(),
-    ///         elements: vec![
-    ///             OwnedElementRef { position: 1, data_element: "C002".to_owned(),
-    ///                               status: Status::Mandatory, max_repeat: 1 },
-    ///         ],
-    ///     },
+    ///     OwnedSegmentDef::new(
+    ///         "BGM".to_owned(),
+    ///         "Beginning of message".to_owned(),
+    ///         vec![OwnedElementRef::new(1, "C002".to_owned(), Status::Mandatory, 1)],
+    ///     ),
     /// ];
     /// let validator = DirectoryValidator::from_owned_definitions(defs)
     ///     .with_directory_id("runtime-profile");
@@ -685,18 +794,13 @@ impl Validator for DirectoryValidator {
 ///
 /// ```rust,ignore
 /// let validator = DirectoryValidatorBuilder::new("my-profile")
-///     .add_segment(OwnedSegmentDef {
-///         tag: "BGM".to_owned(),
-///         name: "Beginning of message".to_owned(),
-///         elements: vec![
-///             OwnedElementRef {
-///                 position: 1,
-///                 data_element: "C002".to_owned(),
-///                 status: Status::Mandatory,
-///                 max_repeat: 1,
-///             },
-///         ],
-///     })
+///     .add_segment(
+///         OwnedSegmentDef::new(
+///             "BGM".to_owned(),
+///             "Beginning of message".to_owned(),
+///             vec![OwnedElementRef::new(1, "C002".to_owned(), Status::Mandatory, 1)],
+///         ),
+///     )
 ///     .build();
 /// ```
 #[derive(Debug, Default)]
