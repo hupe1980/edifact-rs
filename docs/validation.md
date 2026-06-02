@@ -313,12 +313,9 @@ let validator = DirectoryValidatorBuilder::new("CUSTOM-D96A")
         tag: "BGM".to_owned(),
         name: "Beginning of message".to_owned(),
         elements: vec![
-            OwnedElementRef { position: 1, data_element: "1001".to_owned(),
-                              status: Status::Conditional, max_repeat: 1 },
-            OwnedElementRef { position: 2, data_element: "1004".to_owned(),
-                              status: Status::Conditional, max_repeat: 1 },
-            OwnedElementRef { position: 3, data_element: "1225".to_owned(),
-                              status: Status::Conditional, max_repeat: 1 },
+            OwnedElementRef::new(1, "1001".to_owned(), Status::Conditional, 1).unwrap(),
+            OwnedElementRef::new(2, "1004".to_owned(), Status::Conditional, 1).unwrap(),
+            OwnedElementRef::new(3, "1225".to_owned(), Status::Conditional, 1).unwrap(),
         ],
     })
     .build();
