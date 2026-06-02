@@ -42,6 +42,9 @@ pub struct SegmentDefinition {
 /// Used by [`DirectoryValidatorBuilder`] and [`DirectoryValidator::from_owned_definitions`]
 /// to construct validators from data that is not available at compile time (e.g. loaded
 /// from JSON or a database at startup).
+///
+/// The `position` field is always one-based (1 = first element). Use [`OwnedElementRef::new`]
+/// to construct instances with validated positions.
 #[derive(Debug, Clone)]
 pub struct OwnedElementRef {
     /// One-based element position.
@@ -65,6 +68,34 @@ pub struct OwnedSegmentDef {
     pub name: String,
     /// Ordered element definitions.
     pub elements: Vec<OwnedElementRef>,
+}
+
+impl OwnedElementRef {
+    /// Construct an owned element reference with validated position.
+    ///
+    /// Position must be >= 1 (one-based indexing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if position is 0.
+    pub fn new(
+        position: u8,
+        data_element: String,
+        status: Status,
+        max_repeat: u8,
+    ) -> Result<Self, EdifactError> {
+        if position == 0 {
+            return Err(EdifactError::InvalidSegmentTag(
+                "element position must be >= 1 (one-based)".to_string(),
+            ));
+        }
+        Ok(Self {
+            position,
+            data_element,
+            status,
+            max_repeat,
+        })
+    }
 }
 
 type SegmentLookupFn = Arc<dyn Fn(&str) -> Option<&'static SegmentDefinition> + Send + Sync>;

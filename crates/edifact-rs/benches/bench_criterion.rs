@@ -184,7 +184,7 @@ fn bench_validation(c: &mut Criterion) {
     let composed_profile_context = ValidationContext::builder()
         .with_message_type("ORDERS")
         .with_validator(ValidationLayer::Structure, NoopValidator)
-        .with_profile_pack(pack_a.merge(pack_b))
+        .with_profile_pack(pack_a.merge(pack_b).expect("merge compatible packs"))
         .build();
 
     group.bench_function("validate_structure_orders", |b| {

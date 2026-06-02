@@ -75,7 +75,9 @@ fn build_orders_pack() -> ProfileRulePack {
 
     ProfileRulePack::new("ORDERS-COMBINED")
         .merge(function_code_pack)
+        .expect("compatible packs")
         .merge(reference_pack)
+        .expect("compatible packs")
 }
 
 /// Map a `ValidationReport` to an application-level violation list.

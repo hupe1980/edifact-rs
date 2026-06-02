@@ -346,7 +346,7 @@ impl ProfileRulePack {
     ///     .extend_from(&base)
     ///     .with_stateless_rule_fn(/* 11001-specific rules */);
     /// ```
-    pub fn extend_from(mut self, base: &ProfileRulePack) -> Self {
+    pub fn extend_from(mut self, base: &ProfileRulePack) -> Result<Self, EdifactError> {
         let mut combined = base.rules.clone();
         combined.append(&mut self.rules);
         self.rules = combined;
@@ -355,8 +355,8 @@ impl ProfileRulePack {
                 self.message_types.push(mt.clone());
             }
         }
-        self.release = merge_release_scopes(self.release.take(), base.release.clone());
-        self
+        self.release = merge_release_scopes(self.release.take(), base.release.clone())?;
+        Ok(self)
     }
 
     /// Merge two packs into one combined pack.
@@ -366,15 +366,15 @@ impl ProfileRulePack {
     /// [`merge_with_override`][Self::merge_with_override] to de-duplicate by id instead.
     /// Release scoping follows the same compatibility rule as
     /// [`extend_from`][Self::extend_from].
-    pub fn merge(mut self, mut other: Self) -> Self {
+    pub fn merge(mut self, mut other: Self) -> Result<Self, EdifactError> {
         for message_type in other.message_types.drain(..) {
             if !self.message_types.contains(&message_type) {
                 self.message_types.push(message_type);
             }
         }
-        self.release = merge_release_scopes(self.release.take(), other.release.take());
+        self.release = merge_release_scopes(self.release.take(), other.release.take())?;
         self.rules.append(&mut other.rules);
-        self
+        Ok(self)
     }
 
     /// Merge `other` into `self`, with `other` taking precedence for any rule
@@ -404,54 +404,68 @@ impl ProfileRulePack {
     /// let result = base.merge_with_override(delta);
     /// assert_eq!(result.rule_count(), 1);
     /// ```
-    pub fn merge_with_override(mut self, mut other: Self) -> Self {
-        for other_rule in other.rules.drain(..) {
-            if let Some(ref id) = other_rule.id {
-                let mut insert_at = None;
-                let mut deduped_rules = Vec::with_capacity(self.rules.len());
-
-                for rule in self.rules.drain(..) {
-                    if rule.id.as_ref() == Some(id) {
-                        insert_at.get_or_insert(deduped_rules.len());
-                        continue;
-                    }
-                    deduped_rules.push(rule);
-                }
-
-                if let Some(pos) = insert_at {
-                    deduped_rules.insert(pos, other_rule);
-                    self.rules = deduped_rules;
-                    continue;
-                }
-
-                self.rules = deduped_rules;
+    pub fn merge_with_override(mut self, mut other: Self) -> Result<Self, EdifactError> {
+        // Build an id→index map for self.rules to avoid O(n*m) behavior.
+        let mut id_to_index: std::collections::HashMap<Arc<str>, usize> = Default::default();
+        for (idx, rule) in self.rules.iter().enumerate() {
+            if let Some(id) = &rule.id {
+                id_to_index.insert(id.clone(), idx);
             }
-            self.rules.push(other_rule);
         }
+
+        // Process overrides in a single pass: collect replacements and appends.
+        let mut replacements: Vec<(usize, NamedRule)> = Vec::new();
+        let mut to_append = Vec::new();
+
+        for other_rule in other.rules.drain(..) {
+            if let Some(id) = &other_rule.id {
+                if let Some(&idx) = id_to_index.get(id) {
+                    replacements.push((idx, other_rule));
+                } else {
+                    to_append.push(other_rule);
+                }
+            } else {
+                to_append.push(other_rule);
+            }
+        }
+
+        // Apply replacements in-place.
+        for (idx, rule) in replacements {
+            if idx < self.rules.len() {
+                self.rules[idx] = rule;
+            }
+        }
+
+        // Append new rules.
+        self.rules.append(&mut to_append);
+
         for message_type in other.message_types.drain(..) {
             if !self.message_types.contains(&message_type) {
                 self.message_types.push(message_type);
             }
         }
-        self.release = merge_release_scopes(self.release.take(), other.release.take());
-        self
+        self.release = merge_release_scopes(self.release.take(), other.release.take())?;
+        Ok(self)
     }
 }
 
-fn merge_release_scopes(current: Option<String>, incoming: Option<String>) -> Option<String> {
+fn merge_release_scopes(
+    current: Option<String>,
+    incoming: Option<String>,
+) -> Result<Option<String>, EdifactError> {
     match (current, incoming) {
         (Some(current), Some(incoming)) => {
             // Both packs specify a release; they must match to compose safely.
-            // This assertion is always enforced (not debug-only) because mismatched
-            // release scopes would cause rules to apply to wrong message formats at runtime.
-            assert_eq!(
-                current, incoming,
-                "cannot merge ProfileRulePack values with different release scopes"
-            );
-            Some(current)
+            if current != incoming {
+                return Err(EdifactError::InvalidSegmentTag(format!(
+                    "cannot merge ProfileRulePack values with different release scopes: {:?} vs {:?}",
+                    current, incoming
+                )));
+            }
+            Ok(Some(current))
         }
-        (current @ Some(_), None) => current,
-        (None, incoming) => incoming,
+        (current @ Some(_), None) => Ok(current),
+        (None, incoming) => Ok(incoming),
     }
 }
 

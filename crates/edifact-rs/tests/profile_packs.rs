@@ -69,7 +69,9 @@ fn merged_packs_accumulate_rules() {
             })
         });
 
-    let pack = document_rule.merge(reference_rule);
+    let pack = document_rule
+        .merge(reference_rule)
+        .expect("compatible packs");
     assert_eq!(pack.rule_count(), 2);
 
     let report = ValidationContext::builder()
@@ -104,6 +106,7 @@ fn builder_can_merge_existing_packs() {
                     )
                 }),
         )
+        .expect("compatible packs")
         .merge(
             ProfileRulePack::new("TWO")
                 .for_message_type("INVOIC")
@@ -113,7 +116,8 @@ fn builder_can_merge_existing_packs() {
                             .with_rule_id("DEMO-P011"),
                     )
                 }),
-        );
+        )
+        .expect("compatible packs");
 
     assert_eq!(pack.name(), "COMBINED");
     assert_eq!(pack.rule_count(), 2);
@@ -172,7 +176,9 @@ fn merge_with_override_replaces_named_rules_in_place() {
             ))
         });
 
-    let pack = base.merge_with_override(override_pack);
+    let pack = base
+        .merge_with_override(override_pack)
+        .expect("compatible packs");
     assert_eq!(pack.rule_count(), 2);
 
     let report = ValidationContext::builder()
@@ -229,12 +235,13 @@ fn pack_composition_preserves_compatible_release_scope() {
         .for_message_type("ORDERS")
         .with_stateless_rule_fn(|_| None);
 
-    let merged = base.merge(delta);
+    let merged = base.merge(delta).expect("compatible packs");
     assert_eq!(merged.release(), Some("5.5.3a"));
 
     let extended = ProfileRulePack::new("EXTENDED")
         .for_message_type("ORDERS")
         .with_stateless_rule_fn(|_| None)
-        .extend_from(&ProfileRulePack::new("BASE2").for_release("5.5.3a"));
+        .extend_from(&ProfileRulePack::new("BASE2").for_release("5.5.3a"))
+        .expect("compatible packs");
     assert_eq!(extended.release(), Some("5.5.3a"));
 }
