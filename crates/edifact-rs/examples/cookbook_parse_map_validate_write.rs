@@ -13,15 +13,20 @@
 //! ```
 
 use edifact_rs::{
-    ValidationContext, ValidationLayer, ValidationRuleContext, Validator, ValidationReport, Segment,
-    find_qualified_segment, from_bytes, segments_to_bytes, validate_each,
+    Segment, ValidationContext, ValidationLayer, ValidationReport, ValidationRuleContext,
+    Validator, find_qualified_segment, from_bytes, segments_to_bytes, validate_each,
 };
 
 /// A simple custom validator that checks for known segment tags
 struct SimpleValidator;
 
 impl Validator for SimpleValidator {
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
+    fn validate_batch(
+        &self,
+        segments: &[Segment<'_>],
+        report: &mut ValidationReport,
+        _context: &ValidationRuleContext<'_>,
+    ) {
         validate_each(segments, report, |_segment| {
             // Basic structural validation
             // In a real application, you would:
@@ -88,4 +93,3 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 
     Ok(())
 }
-

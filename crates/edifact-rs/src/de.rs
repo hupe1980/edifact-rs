@@ -231,7 +231,9 @@ where
         if !T::matches_owned_segment(&segment) {
             continue;
         }
-        out.push(T::edifact_deserialize_owned(std::slice::from_ref(&segment))?);
+        out.push(T::edifact_deserialize_owned(std::slice::from_ref(
+            &segment,
+        ))?);
     }
     Ok(out)
 }
@@ -503,17 +505,18 @@ pub fn required_component<'a>(
 /// Returns the component value, or None if absent or empty.
 ///
 /// Delegates to [`SegmentAccessor::get_component`].
-pub fn optional_component<'a>(seg: &'a Segment<'_>, elem_idx: usize, comp_idx: usize) -> Option<&'a str> {
+pub fn optional_component<'a>(
+    seg: &'a Segment<'_>,
+    elem_idx: usize,
+    comp_idx: usize,
+) -> Option<&'a str> {
     SegmentAccessor::get_component(seg, elem_idx, comp_idx)
 }
 
 /// Iterate over all components of an element without allocating a `Vec`.
 ///
 /// Yields an empty iterator if the element is absent.
-pub fn get_components_iter<'a>(
-    seg: &'a Segment<'_>,
-    idx: usize,
-) -> impl Iterator<Item = &'a str> {
+pub fn get_components_iter<'a>(seg: &'a Segment<'_>, idx: usize) -> impl Iterator<Item = &'a str> {
     seg.elements
         .get(idx)
         .into_iter()
@@ -592,9 +595,9 @@ pub fn find_qualified_segment_owned<'s>(
     tag: &str,
     qualifier: &str,
 ) -> Option<&'s crate::OwnedSegment> {
-    segments.iter().find(|s| {
-        s.tag == tag && s.element_str(0).unwrap_or("") == qualifier
-    })
+    segments
+        .iter()
+        .find(|s| s.tag == tag && s.element_str(0).unwrap_or("") == qualifier)
 }
 
 /// Segment accessor trait for ergonomic typed extraction.
@@ -627,7 +630,8 @@ pub trait SegmentAccessor<'a> {
     ) -> Result<Vec<&'a str>, EdifactError> {
         // Default implementation delegates to the zero-alloc iterator and
         // collects.  Implementors that can do better should override this.
-        self.repeating_components_iter(elem, start_idx, count).collect()
+        self.repeating_components_iter(elem, start_idx, count)
+            .collect()
     }
 
     /// Iterate over `count` required components starting at `start_idx` from element `elem`.
@@ -677,7 +681,10 @@ where
     fn code_element<T: FromStr>(&'s self, idx: usize) -> Result<T, EdifactError> {
         let raw = self.text_element(idx)?;
         raw.parse::<T>().map_err(|_| EdifactError::InvalidText {
-            offset: self.element_span(idx).map(|s| s.start).unwrap_or(self.span.start),
+            offset: self
+                .element_span(idx)
+                .map(|s| s.start)
+                .unwrap_or(self.span.start),
         })
     }
 
@@ -736,10 +743,134 @@ where
 
 // ── message-window streaming ──────────────────────────────────────────────────
 
+/// A complete `UNH..UNT` message window that borrows from the original input.
+///
+/// Produced by [`MessageWindowsSliceIter`] / [`message_windows_bytes`].
+/// The `message_type` and `association_code` fields are extracted from the
+/// `UNH` segment at construction time, so callers do not need to traverse the
+/// segment list themselves.
+///
+/// `segments` contains the full window including the `UNH` and `UNT` service
+/// segments so that envelope-aware consumers have access to them.
+///
+/// # Accessing segments
+///
+/// ```rust,ignore
+/// for window in message_windows_bytes(input) {
+///     let window = window?;
+///     println!("type={:?} code={:?}", window.message_type, window.association_code);
+///     let bgm = window.segments.iter().find(|s| s.tag == "BGM");
+/// }
+/// ```
+#[derive(Debug)]
+pub struct MessageWindow<'a> {
+    /// EDIFACT message type extracted from `UNH` element 1, component 0.
+    ///
+    /// `None` if the `UNH` segment is missing or its message-type component
+    /// is absent (malformed input).
+    pub message_type: Option<&'a str>,
+    /// Association-assigned code (DE 0057) from `UNH` element 1, component 4.
+    ///
+    /// This is the MIG/profile version string, e.g. `"5.5.3a"`.  `None` if
+    /// the component is absent.
+    pub association_code: Option<&'a str>,
+    /// All segments in this window, from `UNH` through `UNT` (inclusive).
+    pub segments: Vec<crate::Segment<'a>>,
+}
+
+impl<'a> MessageWindow<'a> {
+    /// Build a `MessageWindow` from a completed segment buffer.
+    ///
+    /// Extracts `message_type` and `association_code` from the leading `UNH`
+    /// segment without additional allocation.
+    fn from_segments(segments: Vec<crate::Segment<'a>>) -> Self {
+        let message_type = segments
+            .first()
+            .filter(|s| s.tag == "UNH")
+            .and_then(|unh| unh_component(unh, 0));
+        let association_code = segments
+            .first()
+            .filter(|s| s.tag == "UNH")
+            .and_then(|unh| unh_component(unh, 4));
+        Self {
+            message_type,
+            association_code,
+            segments,
+        }
+    }
+}
+
+/// Extract a non-empty string component from UNH element 1, recovering the `'a`
+/// lifetime from the `Cow<'a, str>` data.
+///
+/// By using two distinct lifetime parameters (`'b` for the borrow of `seg`,
+/// `'a` for the segment data), we tell the borrow checker that the returned
+/// `&'a str` lives independently of how long we hold `&seg`, which lets callers
+/// move `seg` into a containing struct after this call returns.
+fn unh_component<'a, 'b>(seg: &'b crate::Segment<'a>, comp_idx: usize) -> Option<&'a str>
+where
+    'a: 'b,
+{
+    seg.elements
+        .get(1)
+        .and_then(|e| e.components.get(comp_idx))
+        .and_then(|c| {
+            // Match on the Borrowed variant to recover &'a str directly.
+            // For segments parsed by from_bytes all components are Cow::Borrowed;
+            // the Owned arm handles any unusual (write-path) segments gracefully.
+            if let std::borrow::Cow::Borrowed(s) = c {
+                if s.is_empty() { None } else { Some(*s) }
+            } else {
+                None
+            }
+        })
+}
+
+/// An owned, heap-allocated `UNH..UNT` message window.
+///
+/// Produced by [`MessageWindowsIter`] / [`message_windows_from_reader`].
+/// Equivalent to [`MessageWindow`] but with all data owned, so it outlives
+/// the original reader.
+///
+/// `segments` contains the full window including the `UNH` and `UNT` service
+/// segments.
+#[derive(Debug, Clone)]
+pub struct OwnedMessageWindow {
+    /// EDIFACT message type extracted from `UNH` element 1, component 0.
+    pub message_type: Option<String>,
+    /// Association-assigned code (DE 0057) from `UNH` element 1, component 4.
+    pub association_code: Option<String>,
+    /// All segments in this window, from `UNH` through `UNT` (inclusive).
+    pub segments: Vec<crate::OwnedSegment>,
+}
+
+impl OwnedMessageWindow {
+    fn from_segments(segments: Vec<crate::OwnedSegment>) -> Self {
+        let unh = segments.first().filter(|s| s.tag == "UNH");
+        let message_type = unh
+            .and_then(|s| s.elements.get(1))
+            .and_then(|e| e.components.first())
+            .map(|c| c.as_ref())
+            .filter(|s: &&str| !s.is_empty())
+            .map(str::to_owned);
+        let association_code = unh
+            .and_then(|s| s.elements.get(1))
+            .and_then(|e| e.components.get(4))
+            .map(|c| c.as_ref())
+            .filter(|s: &&str| !s.is_empty())
+            .map(str::to_owned);
+        Self {
+            message_type,
+            association_code,
+            segments,
+        }
+    }
+}
+
 /// An iterator that groups borrowed EDIFACT segments into per-message windows.
 ///
 /// Zero-copy counterpart to [`MessageWindowsIter`] for in-memory byte slices.
-/// Each yielded `Vec<Segment<'_>>` borrows from the original input; no heap
+/// Each yielded [`MessageWindow`] borrows from the original input; no heap
 /// allocations occur per segment.  Envelope segments outside a `UNH..UNT` pair
 /// are silently skipped.
 ///
@@ -763,7 +894,7 @@ impl<'a> MessageWindowsSliceIter<'a> {
 }
 
 impl<'a> Iterator for MessageWindowsSliceIter<'a> {
-    type Item = Result<Vec<crate::Segment<'a>>, EdifactError>;
+    type Item = Result<MessageWindow<'a>, EdifactError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -807,7 +938,8 @@ impl<'a> Iterator for MessageWindowsSliceIter<'a> {
                 "UNT" if self.in_message => {
                     self.buf.push(segment);
                     self.in_message = false;
-                    return Some(Ok(std::mem::take(&mut self.buf)));
+                    let segments = std::mem::take(&mut self.buf);
+                    return Some(Ok(MessageWindow::from_segments(segments)));
                 }
                 _ if self.in_message => {
                     self.buf.push(segment);
@@ -822,7 +954,7 @@ impl<'a> Iterator for MessageWindowsSliceIter<'a> {
 
 /// An iterator that groups owned EDIFACT segments into per-message windows.
 ///
-/// Each yielded item is a `Vec<OwnedSegment>` containing the segments for one
+/// Each yielded item is an [`OwnedMessageWindow`] containing the segments for one
 /// complete `UNH..UNT` message, inclusive of both service segments.
 /// Envelope-level segments (`UNB`, `UNG`, `UNZ`, `UNE`) that sit outside any
 /// `UNH..UNT` pair are silently skipped.
@@ -864,7 +996,7 @@ impl<I: Iterator<Item = Result<crate::OwnedSegment, EdifactError>>> MessageWindo
 impl<I: Iterator<Item = Result<crate::OwnedSegment, EdifactError>>> Iterator
     for MessageWindowsIter<I>
 {
-    type Item = Result<Vec<crate::OwnedSegment>, EdifactError>;
+    type Item = Result<OwnedMessageWindow, EdifactError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -911,7 +1043,8 @@ impl<I: Iterator<Item = Result<crate::OwnedSegment, EdifactError>>> Iterator
                 "UNT" if self.in_message => {
                     self.buf.push(segment);
                     self.in_message = false;
-                    return Some(Ok(std::mem::take(&mut self.buf)));
+                    let segments = std::mem::take(&mut self.buf);
+                    return Some(Ok(OwnedMessageWindow::from_segments(segments)));
                 }
                 _ if self.in_message => {
                     self.buf.push(segment);
@@ -926,9 +1059,12 @@ impl<I: Iterator<Item = Result<crate::OwnedSegment, EdifactError>>> Iterator
 
 /// Stream-parse EDIFACT bytes into an iterator of per-message windows.
 ///
-/// Each window is a `Vec<Segment<'_>>` spanning one `UNH..UNT` pair, with
-/// segments borrowing from `input` — **zero heap allocations per segment**.
+/// Each yielded [`MessageWindow`] spans one `UNH..UNT` pair, with segments
+/// borrowing from `input` — **zero heap allocations per segment**.
 /// Envelope segments (`UNB`, `UNZ`, …) are skipped automatically.
+///
+/// The `message_type` and `association_code` fields are populated directly from
+/// the `UNH` segment so that routing logic does not need to traverse `segments`.
 ///
 /// # Example
 /// ```
@@ -943,8 +1079,9 @@ impl<I: Iterator<Item = Result<crate::OwnedSegment, EdifactError>>> Iterator
 ///     .collect::<Result<_, _>>()
 ///     .unwrap();
 /// assert_eq!(windows.len(), 1);
-/// assert_eq!(windows[0][0].tag, "UNH");
-/// assert_eq!(windows[0].last().unwrap().tag, "UNT");
+/// assert_eq!(windows[0].message_type, Some("ORDERS"));
+/// assert_eq!(windows[0].segments[0].tag, "UNH");
+/// assert_eq!(windows[0].segments.last().unwrap().tag, "UNT");
 /// ```
 pub fn message_windows_bytes(input: &[u8]) -> MessageWindowsSliceIter<'_> {
     MessageWindowsSliceIter::new(crate::from_bytes(input))
@@ -952,7 +1089,7 @@ pub fn message_windows_bytes(input: &[u8]) -> MessageWindowsSliceIter<'_> {
 
 /// Stream-parse EDIFACT from a reader into an iterator of per-message windows.
 ///
-/// Each window is a `Vec<OwnedSegment>` spanning one `UNH..UNT` pair.
+/// Each yielded [`OwnedMessageWindow`] spans one `UNH..UNT` pair.
 /// This variant reads lazily — only enough input to complete one window is
 /// consumed per [`Iterator::next`] call.
 pub fn message_windows_from_reader<R: Read>(
@@ -988,7 +1125,7 @@ where
 {
     message_windows_from_reader(reader).map(|window| {
         let window = window?;
-        T::edifact_deserialize_owned(&window)
+        T::edifact_deserialize_owned(&window.segments)
     })
 }
 
@@ -1001,7 +1138,7 @@ where
 {
     message_windows_bytes(input).map(|window| {
         let window = window?;
-        T::edifact_deserialize(&window)
+        T::edifact_deserialize(&window.segments)
     })
 }
 
@@ -1009,22 +1146,15 @@ where
 
 /// Extract the EDIFACT message type from a message window.
 ///
-/// Scans the segment slice for a `UNH` segment and returns a borrow of the
-/// message-type component (element 1, component 0).  Returns `None` if no
-/// `UNH` segment is present or if the message-type component is absent.
+/// # Deprecation
 ///
-/// # Example
+/// Prefer accessing [`MessageWindow::message_type`] or
+/// [`OwnedMessageWindow::message_type`] directly — they are populated at
+/// construction time at no extra cost.
 ///
-/// ```rust,ignore
-/// for window in message_windows_bytes(input) {
-///     let window = window?;
-///     match message_type_from_window(&window) {
-///         Some("ORDERS") => { /* … */ }
-///         Some("INVOIC") => { /* … */ }
-///         other => eprintln!("unhandled message type: {other:?}"),
-///     }
-/// }
-/// ```
+/// This function is kept for source-level compatibility but may be removed in a
+/// future release.
+#[deprecated(since = "0.0.0", note = "use `MessageWindow::message_type` instead")]
 pub fn message_type_from_window<'a>(window: &'a [Segment<'a>]) -> Option<&'a str> {
     window
         .iter()
@@ -1059,11 +1189,20 @@ impl std::fmt::Debug for DispatchedMessage {
     }
 }
 
-type DispatchHandlerFn =
-    Box<dyn for<'a> Fn(&[Segment<'a>]) -> Result<Box<dyn std::any::Any + Send + Sync>, EdifactError> + Send + Sync>;
+type DispatchHandlerFn = Box<
+    dyn for<'a> Fn(&[Segment<'a>]) -> Result<Box<dyn std::any::Any + Send + Sync>, EdifactError>
+        + Send
+        + Sync,
+>;
 
-type FallbackHandlerFn =
-    Box<dyn for<'a> Fn(&[Segment<'a>], &str) -> Result<Box<dyn std::any::Any + Send + Sync>, EdifactError> + Send + Sync>;
+type FallbackHandlerFn = Box<
+    dyn for<'a> Fn(
+            &[Segment<'a>],
+            &str,
+        ) -> Result<Box<dyn std::any::Any + Send + Sync>, EdifactError>
+        + Send
+        + Sync,
+>;
 
 /// Type-based dispatcher for mixed-message EDIFACT streams.
 ///
@@ -1162,18 +1301,22 @@ impl MessageDispatch {
         for (mt, handler) in &self.handlers {
             if *mt == message_type {
                 let value = handler(window)?;
-                return Ok(DispatchedMessage { message_type, value });
+                return Ok(DispatchedMessage {
+                    message_type,
+                    value,
+                });
             }
         }
 
         if let Some(fallback) = &self.fallback {
             let value = fallback(window, &message_type)?;
-            return Ok(DispatchedMessage { message_type, value });
+            return Ok(DispatchedMessage {
+                message_type,
+                value,
+            });
         }
 
-        Err(EdifactError::UnexpectedMessageType {
-            message_type,
-        })
+        Err(EdifactError::UnexpectedMessageType { message_type })
     }
 
     /// Dispatch all messages from a byte reader.
@@ -1186,7 +1329,7 @@ impl MessageDispatch {
     ) -> impl Iterator<Item = Result<DispatchedMessage, EdifactError>> + 'a {
         message_windows_bytes(input).map(move |window| {
             let window = window?;
-            self.dispatch(&window)
+            self.dispatch(&window.segments)
         })
     }
 
@@ -1202,7 +1345,8 @@ impl MessageDispatch {
     ) -> impl Iterator<Item = Result<DispatchedMessage, EdifactError>> + '_ {
         message_windows_from_reader(reader).map(|window| {
             let window = window?;
-            let borrowed: Vec<Segment<'_>> = window.iter().map(|s| s.as_borrowed()).collect();
+            let borrowed: Vec<Segment<'_>> =
+                window.segments.iter().map(|s| s.as_borrowed()).collect();
             self.dispatch(&borrowed)
         })
     }
@@ -1284,7 +1428,8 @@ mod tests {
 
     #[test]
     fn streaming_deserialize_first_from_reader() {
-        let input = std::io::Cursor::new(b"UNH+1+ORDERS:D:11A:UN'BGM+E03+11042+9'UNT+3+1'".to_vec());
+        let input =
+            std::io::Cursor::new(b"UNH+1+ORDERS:D:11A:UN'BGM+E03+11042+9'UNT+3+1'".to_vec());
         let bgm: BgmSegment = deserialize_first_from_reader(input).unwrap();
         assert_eq!(bgm.pruef_id, "11042");
     }
@@ -1422,21 +1567,21 @@ mod tests {
         // (value, pattern, expected)
         let cases: &[(&str, &str, bool)] = &[
             // ── empty inputs ────────────────────────────────────────────────
-            ("", "", true),        // empty matches empty
-            ("", "*", true),       // wildcard matches empty string
-            ("A", "", false),      // non-empty does not match empty pattern
-            ("", "A", false),      // empty does not match non-empty literal
+            ("", "", true),   // empty matches empty
+            ("", "*", true),  // wildcard matches empty string
+            ("A", "", false), // non-empty does not match empty pattern
+            ("", "A", false), // empty does not match non-empty literal
             // ── literal (no wildcard) ────────────────────────────────────────
             ("MS", "MS", true),
             ("BY", "BY", true),
-            ("ms", "MS", false),   // case-sensitive
-            ("MSX", "MS", false),  // prefix is NOT a match without wildcard
-            ("M", "MS", false),    // too short
+            ("ms", "MS", false),  // case-sensitive
+            ("MSX", "MS", false), // prefix is NOT a match without wildcard
+            ("M", "MS", false),   // too short
             // ── single wildcard at the end (prefix match) ────────────────────
             ("MS", "M*", true),
             ("MULTI", "MUL*", true),
             ("AB", "M*", false),
-            ("", "M*", false),     // empty does not start with 'M'
+            ("", "M*", false), // empty does not start with 'M'
             // ── single wildcard at the start (suffix match) ──────────────────
             ("MSG", "*G", true),
             ("G", "*G", true),
@@ -1445,21 +1590,21 @@ mod tests {
             // ── wildcard in the middle ───────────────────────────────────────
             ("MRY", "M*Y", true),
             ("MAY", "M*Y", true),
-            ("MY", "M*Y", true),   // zero-width wildcard: "M" + "" + "Y"
-            ("MYY", "M*Y", true),  // last 'Y' matches, wildcard = 'Y'
-            ("MAYZ", "M*Y", false),// does not end with 'Y'
+            ("MY", "M*Y", true),    // zero-width wildcard: "M" + "" + "Y"
+            ("MYY", "M*Y", true),   // last 'Y' matches, wildcard = 'Y'
+            ("MAYZ", "M*Y", false), // does not end with 'Y'
             ("AB", "M*Y", false),
             // ── bare wildcard (match-all) ────────────────────────────────────
-            ("*", "*", true),      // literal '*' value vs wildcard pattern
+            ("*", "*", true), // literal '*' value vs wildcard pattern
             ("anything", "*", true),
             ("", "*", true),
             // ── multiple wildcards ────────────────────────────────────────────
             ("ABCDE", "A*C*E", true),
-            ("ACE", "A*C*E", true),  // zero-width wildcards
+            ("ACE", "A*C*E", true), // zero-width wildcards
             ("AXCYE", "A*C*E", true),
             ("ABCDF", "A*C*E", false),
             // ── wildcard with empty segment between stars ─────────────────────
-            ("AB", "A**B", true),   // "A**B" → parts ["A", "", "B"] → ends_with_wildcard?
+            ("AB", "A**B", true), // "A**B" → parts ["A", "", "B"] → ends_with_wildcard?
             // ── pattern longer than value ─────────────────────────────────────
             ("AB", "A*B*C", false),
             // ── value contains pattern as substring but must anchor start ─────
@@ -1557,8 +1702,8 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0][0].tag, "UNH");
-        assert_eq!(windows[0].last().unwrap().tag, "UNT");
+        assert_eq!(windows[0].segments[0].tag, "UNH");
+        assert_eq!(windows[0].segments.last().unwrap().tag, "UNT");
     }
 
     #[test]
@@ -1619,7 +1764,11 @@ mod tests {
         assert_eq!(SegmentAccessor::get_element(&seg, 0), Some("220"));
         assert_eq!(SegmentAccessor::get_element(&seg, 1), Some("PO-001"));
         assert_eq!(SegmentAccessor::get_element(&seg, 2), Some("9"));
-        assert_eq!(SegmentAccessor::get_element(&seg, 9), None, "out-of-bounds must return None");
+        assert_eq!(
+            SegmentAccessor::get_element(&seg, 9),
+            None,
+            "out-of-bounds must return None"
+        );
     }
 
     #[test]
@@ -1627,8 +1776,16 @@ mod tests {
         let owned = parse_one("TST+++VALUE'");
         let seg = owned.as_borrowed();
         // elements 0 and 1 are empty; element 2 is "VALUE"
-        assert_eq!(SegmentAccessor::get_element(&seg, 0), None, "empty element must return None");
-        assert_eq!(SegmentAccessor::get_element(&seg, 1), None, "empty element must return None");
+        assert_eq!(
+            SegmentAccessor::get_element(&seg, 0),
+            None,
+            "empty element must return None"
+        );
+        assert_eq!(
+            SegmentAccessor::get_element(&seg, 1),
+            None,
+            "empty element must return None"
+        );
         assert_eq!(SegmentAccessor::get_element(&seg, 2), Some("VALUE"));
     }
 
@@ -1640,7 +1797,11 @@ mod tests {
         assert_eq!(seg.get_component(1, 1), Some("D"));
         assert_eq!(seg.get_component(1, 2), Some("96A"));
         assert_eq!(seg.get_component(1, 3), Some("UN"));
-        assert_eq!(seg.get_component(1, 9), None, "out-of-bounds must return None");
+        assert_eq!(
+            seg.get_component(1, 9),
+            None,
+            "out-of-bounds must return None"
+        );
     }
 
     #[test]

@@ -262,9 +262,7 @@ mod tests {
     #[test]
     fn writer_emitter_element_before_start_segment_is_err() {
         let mut e = WriterEmitter::new(Vec::<u8>::new());
-        let err = e
-            .emit(EdifactEvent::Element { value: "X" })
-            .unwrap_err();
+        let err = e.emit(EdifactEvent::Element { value: "X" }).unwrap_err();
         assert!(
             matches!(err, crate::EdifactError::InvalidEventSequence { .. }),
             "expected InvalidEventSequence, got {err:?}"

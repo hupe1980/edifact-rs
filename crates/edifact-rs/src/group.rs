@@ -274,8 +274,8 @@ fn group_recursive_inner<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::Element;
     use crate::Span;
+    use crate::model::Element;
 
     fn seg(tag: &'static str) -> Segment<'static> {
         Segment {
@@ -314,15 +314,16 @@ mod tests {
 
     #[test]
     fn repeated_trigger_creates_multiple_children() {
-        let segs = vec![
-            seg("UNH"),
-            seg("NAD"),
-            seg("NAD"),
-            seg("UNT"),
-        ];
+        let segs = vec![seg("UNH"), seg("NAD"), seg("NAD"), seg("UNT")];
         let tree = group_segments(&segs, SCHEMA, "ROOT");
         // Two NAD triggers → two SG1 children
-        assert_eq!(tree.children.iter().filter(|c| c.definition == "SG1").count(), 2);
+        assert_eq!(
+            tree.children
+                .iter()
+                .filter(|c| c.definition == "SG1")
+                .count(),
+            2
+        );
     }
 
     #[test]

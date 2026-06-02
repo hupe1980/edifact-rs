@@ -1,6 +1,6 @@
 use edifact_rs::{
-    EdifactError, ValidationContext, ValidationLayer, ValidationReport, ValidationRuleContext, Validator,
-    Segment, validate_each,
+    EdifactError, Segment, ValidationContext, ValidationLayer, ValidationReport,
+    ValidationRuleContext, Validator, validate_each,
 };
 
 /// A simple mock validator for testing the Validator trait and ValidationContext.
@@ -8,7 +8,12 @@ use edifact_rs::{
 struct SimpleStructureValidator;
 
 impl Validator for SimpleStructureValidator {
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
+    fn validate_batch(
+        &self,
+        segments: &[Segment<'_>],
+        report: &mut ValidationReport,
+        _context: &ValidationRuleContext<'_>,
+    ) {
         validate_each(segments, report, |segment| {
             // Simple validation: require UNH to have a message type component
             if segment.tag == "UNH" && segment.get_element(1).is_none() {
@@ -87,7 +92,12 @@ fn context_can_disable_code_list_layer() {
     struct MockCodeListValidator;
 
     impl Validator for MockCodeListValidator {
-        fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
+        fn validate_batch(
+            &self,
+            segments: &[Segment<'_>],
+            report: &mut ValidationReport,
+            _context: &ValidationRuleContext<'_>,
+        ) {
             validate_each(segments, report, |segment| {
                 if segment.tag == "BGM" {
                     return Err(EdifactError::InvalidCodeValue {
@@ -126,7 +136,12 @@ fn validation_context_supports_multiple_validators() {
     struct ValidatorB;
 
     impl Validator for ValidatorA {
-        fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
+        fn validate_batch(
+            &self,
+            segments: &[Segment<'_>],
+            report: &mut ValidationReport,
+            _context: &ValidationRuleContext<'_>,
+        ) {
             validate_each(segments, report, |segment| {
                 if segment.tag.starts_with('Z') {
                     return Err(EdifactError::InvalidSegmentForMessage {
@@ -143,7 +158,12 @@ fn validation_context_supports_multiple_validators() {
     }
 
     impl Validator for ValidatorB {
-        fn validate_batch(&self, _segments: &[Segment<'_>], _report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
+        fn validate_batch(
+            &self,
+            _segments: &[Segment<'_>],
+            _report: &mut ValidationReport,
+            _context: &ValidationRuleContext<'_>,
+        ) {
             // ValidatorB does nothing
         }
 
@@ -172,7 +192,13 @@ fn validation_context_propagates_message_type() {
     struct MessageTypeCapturingValidator(Arc<Mutex<Option<String>>>);
 
     impl Validator for MessageTypeCapturingValidator {
-        fn validate_batch(&self, _segments: &[Segment<'_>], _report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {}
+        fn validate_batch(
+            &self,
+            _segments: &[Segment<'_>],
+            _report: &mut ValidationReport,
+            _context: &ValidationRuleContext<'_>,
+        ) {
+        }
 
         fn set_message_type(&mut self, msg_type: Option<&str>) {
             *self.0.lock().unwrap() = msg_type.map(|s| s.to_owned());
@@ -195,7 +221,10 @@ fn validation_context_propagates_message_type() {
 
     let report = ctx.validate_lenient(&segments);
     assert!(!report.has_errors());
-    assert_eq!(*captured_message_type.lock().unwrap(), Some("ORDERS".to_owned()));
+    assert_eq!(
+        *captured_message_type.lock().unwrap(),
+        Some("ORDERS".to_owned())
+    );
 }
 
 // TEST 7.2: segments between UNB and first UNH are rejected

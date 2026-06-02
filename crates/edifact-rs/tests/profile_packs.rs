@@ -117,7 +117,10 @@ fn builder_can_merge_existing_packs() {
 
     assert_eq!(pack.name(), "COMBINED");
     assert_eq!(pack.rule_count(), 2);
-    assert_eq!(pack.message_types(), ["ORDERS".to_owned(), "INVOIC".to_owned()]);
+    assert_eq!(
+        pack.message_types(),
+        ["ORDERS".to_owned(), "INVOIC".to_owned()]
+    );
 }
 
 #[test]

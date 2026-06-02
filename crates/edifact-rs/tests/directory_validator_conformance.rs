@@ -128,7 +128,10 @@ fn conformance_rejects_mandatory_composite_when_all_components_empty() {
 
     assert!(report.has_errors(), "expected errors, got {report:?}");
     assert!(
-        report.errors().iter().any(|issue| issue.message.contains("required element")),
+        report
+            .errors()
+            .iter()
+            .any(|issue| issue.message.contains("required element")),
         "expected missing-required-element issue, got {report:?}"
     );
 }
@@ -190,5 +193,8 @@ fn conformance_can_run_structure_checks_without_code_lists() {
 fn conformance_surfaces_parse_errors_before_validation() {
     let input = b"DTM+137:20260401:102?"; // dangling release sequence
     let result = from_bytes(input).collect::<Result<Vec<_>, EdifactError>>();
-    assert!(matches!(result, Err(EdifactError::InvalidReleaseSequence { .. })));
+    assert!(matches!(
+        result,
+        Err(EdifactError::InvalidReleaseSequence { .. })
+    ));
 }

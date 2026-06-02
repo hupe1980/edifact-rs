@@ -158,13 +158,13 @@ pub mod directory_validator;
 pub(crate) mod envelope;
 /// Error types and validation reporting primitives.
 pub(crate) mod error;
+pub mod group;
 /// Core zero-copy and owned EDIFACT data model types.
 pub(crate) mod model;
 pub(crate) mod parser;
 pub(crate) mod tokenizer;
 pub(crate) mod validator;
 pub(crate) mod writer;
-pub mod group;
 
 // ── typed serialization layer ─────────────────────────────────────────────────
 pub mod de;
@@ -172,9 +172,14 @@ pub(crate) mod event;
 pub mod ser;
 
 // ── flat re-exports: core ─────────────────────────────────────────────────────
-pub use envelope::{validate_envelope, InterchangeEnvelope, MessageEnvelope, MessageIdentifier, parse_unh};
+pub use envelope::{
+    InterchangeEnvelope, MessageEnvelope, MessageIdentifier, parse_unh, validate_envelope,
+};
 pub use error::{EdifactError, IoError, ValidationIssue, ValidationReport, ValidationSeverity};
-pub use model::{BorrowedElement, BorrowedSegment, Element, OwnedElement, OwnedSegment, Segment, Span};
+pub use group::{GroupDef, SegmentGroup, group_segments};
+pub use model::{
+    BorrowedElement, BorrowedSegment, Element, OwnedElement, OwnedSegment, Segment, Span,
+};
 pub use parser::{
     Parser, ReaderConfig, from_bufread, from_bufread_stream, from_bufread_stream_with_config,
     from_reader_with_config,
@@ -185,38 +190,37 @@ pub use validator::{
     ValidationRuleContext, Validator, validate_each,
 };
 pub use writer::Writer;
-pub use group::{GroupDef, SegmentGroup, group_segments};
 
 // ── flat re-exports: serde ────────────────────────────────────────────────────
 
 /// User-facing deserialization API.
 pub use de::{
-    CompositeElement, EdifactCompositeDeserialize, EdifactDeserialize, EdifactSegmentTag,
-    MessageWindowsIter, MessageWindowsSliceIter, SegmentAccessor,
-    deserialize, deserialize_all_from_reader,
+    CompositeElement, DispatchedMessage, EdifactCompositeDeserialize, EdifactDeserialize,
+    EdifactSegmentTag, MessageDispatch, MessageWindow, MessageWindowsIter, MessageWindowsSliceIter,
+    OwnedMessageWindow, SegmentAccessor, deserialize, deserialize_all_from_reader,
     deserialize_all_streaming, deserialize_first_from_reader, deserialize_first_streaming,
     deserialize_messages_bytes, deserialize_messages_from_reader, deserialize_str,
-    groups_are_contiguous_by_qualifier,
-    message_windows_bytes, message_windows_from_reader,
-    message_type_from_window, MessageDispatch, DispatchedMessage,
+    groups_are_contiguous_by_qualifier, message_windows_bytes, message_windows_from_reader,
 };
 
 // ── Proc-macro support ─────────────────────────────────────────────────────────
 // Re-export helpers at root with doc(hidden) for macro-generated code compatibility.
 #[doc(hidden)]
 pub use de::{
-    composite_element, contiguous_groups_by_qualifier, element_str,
-    find_qualified_segment, find_qualified_segment_owned, find_segment, find_segment_owned,
-    find_segment_typed, find_segments_iter, find_segments_typed, get_components_iter,
-    optional_component, optional_element, qualifier_matches_pattern,
-    required_component, required_element,
+    composite_element, contiguous_groups_by_qualifier, element_str, find_qualified_segment,
+    find_qualified_segment_owned, find_segment, find_segment_owned, find_segment_typed,
+    find_segments_iter, find_segments_typed, get_components_iter, optional_component,
+    optional_element, qualifier_matches_pattern, required_component, required_element,
+};
+pub use directory_validator::{
+    DirectoryValidator, DirectoryValidatorBuilder, ElementRef, OwnedElementRef, OwnedSegmentDef,
+    SegmentDefinition, Status,
 };
 #[cfg(feature = "derive")]
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use edifact_rs_derive::{EdifactDeserialize, EdifactSerialize};
 pub use event::{EdifactEvent, EventEmitter, OwnedEdifactEvent, VecEmitter, WriterEmitter};
 pub use ser::{EdifactCompositeSerialize, EdifactSerialize, to_bytes, to_edifact_string};
-pub use directory_validator::{DirectoryValidator, ElementRef, SegmentDefinition, Status};
 
 // ── core free functions ───────────────────────────────────────────────────────
 
@@ -279,7 +283,10 @@ pub fn from_bytes(input: &[u8]) -> FromBytesIter<'_> {
 /// let result: Result<Vec<_>, _> = from_bytes_with_config(b"BGM+220+1+9'", cfg).collect();
 /// assert!(result.is_ok());
 /// ```
-pub fn from_bytes_with_config<'a>(input: &'a [u8], config: parser::ReaderConfig) -> FromBytesIter<'a> {
+pub fn from_bytes_with_config<'a>(
+    input: &'a [u8],
+    config: parser::ReaderConfig,
+) -> FromBytesIter<'a> {
     match tokenizer::ServiceStringAdvice::from_bytes_strict(input) {
         Ok(ssa) => {
             let t = tokenizer::Tokenizer::with_limit(input, ssa, config.max_segment_bytes);

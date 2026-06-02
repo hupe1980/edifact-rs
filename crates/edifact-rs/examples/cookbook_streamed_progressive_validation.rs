@@ -18,9 +18,12 @@ UNT+4+2'";
         .with_stateless_rule_fn(|segments| {
             let has_bgm = segments.iter().any(|segment| segment.tag == "BGM");
             (!has_bgm).then(|| {
-                ValidationIssue::new(ValidationSeverity::Error, "BGM is required per streamed message window")
-                    .with_rule_id("ORDERS-PROGRESSIVE-BGM")
-                    .with_segment("BGM")
+                ValidationIssue::new(
+                    ValidationSeverity::Error,
+                    "BGM is required per streamed message window",
+                )
+                .with_rule_id("ORDERS-PROGRESSIVE-BGM")
+                .with_segment("BGM")
             })
         })
         .with_stateless_rule_fn(|segments| {

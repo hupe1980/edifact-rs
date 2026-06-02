@@ -37,12 +37,43 @@ pub struct SegmentDefinition {
     pub elements: &'static [ElementRef],
 }
 
+/// Owned runtime equivalent of [`ElementRef`].
+///
+/// Used by [`DirectoryValidatorBuilder`] and [`DirectoryValidator::from_owned_definitions`]
+/// to construct validators from data that is not available at compile time (e.g. loaded
+/// from JSON or a database at startup).
+#[derive(Debug, Clone)]
+pub struct OwnedElementRef {
+    /// One-based element position.
+    pub position: u8,
+    /// UN/EDIFACT data element identifier.
+    pub data_element: String,
+    /// Requirement status.
+    pub status: Status,
+    /// Maximum repetition count.
+    pub max_repeat: u8,
+}
+
+/// Owned runtime equivalent of [`SegmentDefinition`].
+///
+/// Used by [`DirectoryValidatorBuilder`] and [`DirectoryValidator::from_owned_definitions`].
+#[derive(Debug, Clone)]
+pub struct OwnedSegmentDef {
+    /// Segment tag (e.g. `"BGM"`).
+    pub tag: String,
+    /// Human-readable segment name.
+    pub name: String,
+    /// Ordered element definitions.
+    pub elements: Vec<OwnedElementRef>,
+}
+
 type SegmentLookupFn = Arc<dyn Fn(&str) -> Option<&'static SegmentDefinition> + Send + Sync>;
 type IsCodeValidFn = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 type SuggestCodeFn = Arc<dyn Fn(&str, &str) -> Option<&'static str> + Send + Sync>;
 type ExpectedComponentsFn = Arc<dyn Fn(&str, usize) -> Option<u8> + Send + Sync>;
 type AdditionalStructureRuleRefFn = fn(&Segment<'_>) -> Result<(), EdifactError>;
-type AdditionalStructureRuleFn = Arc<dyn Fn(&Segment<'_>) -> Result<(), EdifactError> + Send + Sync>;
+type AdditionalStructureRuleFn =
+    Arc<dyn Fn(&Segment<'_>) -> Result<(), EdifactError> + Send + Sync>;
 /// Returns the `(element_index, component_index, data_element_id)` tuples to
 /// validate against a code list for the given segment tag.
 type CodeListRulesFn = Arc<dyn Fn(&str) -> &'static [(usize, usize, &'static str)] + Send + Sync>;
@@ -53,6 +84,80 @@ type CodeListRulesFn = Arc<dyn Fn(&str) -> &'static [(usize, usize, &'static str
 /// canonical ordering — their relative order in the returned slice is taken
 /// as the expected order in the message.
 type RequiredSegmentsFn = Arc<dyn Fn(&str) -> &'static [&'static str] + Send + Sync>;
+
+/// Internal enum that unifies lookup results from static and owned segment definitions.
+///
+/// Allows `validate_segment` to handle both code-generated (`&'static`) and
+/// runtime-constructed ([`OwnedSegmentDef`]) definitions without duplication.
+enum SegmentDefRef<'a> {
+    Static(&'static SegmentDefinition),
+    Owned(&'a OwnedSegmentDef),
+}
+
+impl<'a> SegmentDefRef<'a> {
+    fn elements_len(&self) -> usize {
+        match self {
+            Self::Static(d) => d.elements.len(),
+            Self::Owned(d) => d.elements.len(),
+        }
+    }
+
+    fn min_mandatory_index(&self) -> usize {
+        match self {
+            Self::Static(d) => d
+                .elements
+                .iter()
+                .rposition(|e| e.status == Status::Mandatory)
+                .map(|i| i + 1)
+                .unwrap_or(0),
+            Self::Owned(d) => d
+                .elements
+                .iter()
+                .rposition(|e| e.status == Status::Mandatory)
+                .map(|i| i + 1)
+                .unwrap_or(0),
+        }
+    }
+
+    fn mandatory_positions(&self) -> impl Iterator<Item = (usize, &str)> {
+        enum E<A, B> {
+            A(A),
+            B(B),
+        }
+        impl<A, B, I> Iterator for E<A, B>
+        where
+            A: Iterator<Item = I>,
+            B: Iterator<Item = I>,
+        {
+            type Item = I;
+            fn next(&mut self) -> Option<I> {
+                match self {
+                    E::A(a) => a.next(),
+                    E::B(b) => b.next(),
+                }
+            }
+        }
+        match self {
+            Self::Static(d) => E::A(
+                d.elements
+                    .iter()
+                    .filter(|e| e.status == Status::Mandatory)
+                    .map(|e| ((e.position as usize).saturating_sub(1), e.data_element)),
+            ),
+            Self::Owned(d) => E::B(
+                d.elements
+                    .iter()
+                    .filter(|e| e.status == Status::Mandatory)
+                    .map(|e| {
+                        (
+                            (e.position as usize).saturating_sub(1),
+                            e.data_element.as_str(),
+                        )
+                    }),
+            ),
+        }
+    }
+}
 
 /// Default required-segments mapping used when no custom function is provided.
 fn default_required_segments(message_type: &str) -> &'static [&'static str] {
@@ -97,8 +202,12 @@ pub(crate) fn base_code_list_rules(tag: &str) -> &'static [(usize, usize, &'stat
 /// the scope of this implementation.
 #[derive(Clone)]
 pub struct DirectoryValidator {
-    directory_id: &'static str,
+    directory_id: String,
     segment_lookup: SegmentLookupFn,
+    /// Runtime-owned segment definitions (from builder / JSON / DB).
+    ///
+    /// When `Some`, takes precedence over `segment_lookup` for tag resolution.
+    owned_defs: Option<Arc<Vec<OwnedSegmentDef>>>,
     is_code_valid: IsCodeValidFn,
     suggest_code: SuggestCodeFn,
     expected_components: ExpectedComponentsFn,
@@ -135,8 +244,9 @@ impl DirectoryValidator {
         additional_structure_rule: Option<AdditionalStructureRuleRefFn>,
     ) -> Self {
         Self {
-            directory_id,
+            directory_id: directory_id.to_owned(),
             segment_lookup: Arc::new(segment_lookup),
+            owned_defs: None,
             is_code_valid: Arc::new(is_code_valid),
             suggest_code: Arc::new(suggest_code),
             expected_components: Arc::new(expected_components),
@@ -170,10 +280,55 @@ impl DirectoryValidator {
     /// ```
     pub fn from_definitions(definitions: &'static [SegmentDefinition]) -> Self {
         Self {
-            directory_id: "custom",
-            segment_lookup: Arc::new(move |tag: &str| {
-                definitions.iter().find(|d| d.tag == tag)
-            }),
+            directory_id: "custom".to_owned(),
+            segment_lookup: Arc::new(move |tag: &str| definitions.iter().find(|d| d.tag == tag)),
+            owned_defs: None,
+            is_code_valid: Arc::new(|_de: &str, _code: &str| true),
+            suggest_code: Arc::new(|_de: &str, _code: &str| None),
+            expected_components: Arc::new(|_tag: &str, _idx: usize| None),
+            code_list_rules: Arc::new(base_code_list_rules),
+            additional_structure_rule: None,
+            required_segments: Arc::new(default_required_segments),
+            message_type: None,
+            enforce_known_tags: true,
+            structure_checks: true,
+            code_list_checks: false,
+        }
+    }
+
+    /// Create a validator from a runtime-owned collection of segment definitions.
+    ///
+    /// Use this (or [`DirectoryValidatorBuilder`]) when segment definitions are
+    /// loaded from an external source at startup (JSON, database, YAML, …) rather
+    /// than being known at compile time.
+    ///
+    /// Code-list checks are **disabled** by default; enable them by chaining
+    /// [`with_code_list_rules`][Self::with_code_list_rules] and setting
+    /// `is_code_valid` via a custom [`new`][Self::new] call or by subclassing
+    /// the builder.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let defs = vec![
+    ///     OwnedSegmentDef {
+    ///         tag: "BGM".to_owned(),
+    ///         name: "Beginning of message".to_owned(),
+    ///         elements: vec![
+    ///             OwnedElementRef { position: 1, data_element: "C002".to_owned(),
+    ///                               status: Status::Mandatory, max_repeat: 1 },
+    ///         ],
+    ///     },
+    /// ];
+    /// let validator = DirectoryValidator::from_owned_definitions(defs)
+    ///     .with_directory_id("runtime-profile");
+    /// ```
+    pub fn from_owned_definitions(definitions: Vec<OwnedSegmentDef>) -> Self {
+        Self {
+            directory_id: "custom".to_owned(),
+            // The static lookup is never consulted when `owned_defs` is `Some`.
+            segment_lookup: Arc::new(|_| None),
+            owned_defs: Some(Arc::new(definitions)),
             is_code_valid: Arc::new(|_de: &str, _code: &str| true),
             suggest_code: Arc::new(|_de: &str, _code: &str| None),
             expected_components: Arc::new(|_tag: &str, _idx: usize| None),
@@ -188,8 +343,8 @@ impl DirectoryValidator {
     }
 
     /// Set the directory identifier string (used in error messages).
-    pub fn with_directory_id(mut self, id: &'static str) -> Self {
-        self.directory_id = id;
+    pub fn with_directory_id(mut self, id: impl Into<String>) -> Self {
+        self.directory_id = id.into();
         self
     }
 
@@ -197,7 +352,10 @@ impl DirectoryValidator {
     ///
     /// Directories can supply a directory-specific implementation that extends or
     /// replaces the base rules from `base_code_list_rules`.
-    pub fn with_code_list_rules(mut self, f: impl Fn(&str) -> &'static [(usize, usize, &'static str)] + Send + Sync + 'static) -> Self {
+    pub fn with_code_list_rules(
+        mut self,
+        f: impl Fn(&str) -> &'static [(usize, usize, &'static str)] + Send + Sync + 'static,
+    ) -> Self {
         self.code_list_rules = Arc::new(f);
         self
     }
@@ -328,32 +486,38 @@ impl DirectoryValidator {
 }
 
 impl DirectoryValidator {
+    fn resolve_def<'a>(&'a self, tag: &str) -> Option<SegmentDefRef<'a>> {
+        if let Some(owned) = &self.owned_defs {
+            owned
+                .iter()
+                .find(|d| d.tag == tag)
+                .map(SegmentDefRef::Owned)
+        } else {
+            (self.segment_lookup)(tag).map(SegmentDefRef::Static)
+        }
+    }
+
     fn validate_segment(&self, seg: &Segment<'_>) -> Result<(), EdifactError> {
         if !self.structure_checks && !self.code_list_checks {
             return Ok(());
         }
 
-        let Some(def) = (self.segment_lookup)(seg.tag) else {
+        let Some(def) = self.resolve_def(seg.tag) else {
             if self.structure_checks && self.enforce_known_tags {
                 return Err(EdifactError::InvalidSegmentForMessage {
                     tag: seg.tag.to_owned(),
                     message_type: self
                         .message_type
                         .clone()
-                        .unwrap_or_else(|| self.directory_id.to_owned()),
+                        .unwrap_or_else(|| self.directory_id.clone()),
                     offset: seg.tag_span.start,
                 });
             }
             return Ok(());
         };
 
-        let max_elements = def.elements.len();
-        let min_elements = def
-            .elements
-            .iter()
-            .rposition(|e| e.status == Status::Mandatory)
-            .map(|idx| idx + 1)
-            .unwrap_or(0);
+        let max_elements = def.elements_len();
+        let min_elements = def.min_mandatory_index();
         let actual = seg.elements.len();
 
         if self.structure_checks && (actual < min_elements || actual > max_elements) {
@@ -367,12 +531,7 @@ impl DirectoryValidator {
         }
 
         if self.structure_checks {
-            for element in def
-                .elements
-                .iter()
-                .filter(|e| e.status == Status::Mandatory)
-            {
-                let idx = (element.position as usize).saturating_sub(1);
+            for (idx, _de) in def.mandatory_positions() {
                 let is_present = seg
                     .elements
                     .get(idx)
@@ -404,7 +563,12 @@ impl Validator for DirectoryValidator {
         self.message_type = message_type.map(str::to_owned);
     }
 
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
+    fn validate_batch(
+        &self,
+        segments: &[Segment<'_>],
+        report: &mut ValidationReport,
+        _context: &ValidationRuleContext<'_>,
+    ) {
         for seg in segments {
             if let Err(err) = self.validate_segment(seg) {
                 report_error(report, err);
@@ -455,6 +619,80 @@ impl Validator for DirectoryValidator {
                 }
             }
         }
+    }
+}
+
+// ── DirectoryValidatorBuilder ─────────────────────────────────────────────────
+
+/// Builder for [`DirectoryValidator`] using runtime-owned segment definitions.
+///
+/// Use this when segment definitions are loaded from an external source at
+/// startup (JSON, database, YAML, …) rather than being available as `static`
+/// arrays at compile time.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let validator = DirectoryValidatorBuilder::new("my-profile")
+///     .add_segment(OwnedSegmentDef {
+///         tag: "BGM".to_owned(),
+///         name: "Beginning of message".to_owned(),
+///         elements: vec![
+///             OwnedElementRef {
+///                 position: 1,
+///                 data_element: "C002".to_owned(),
+///                 status: Status::Mandatory,
+///                 max_repeat: 1,
+///             },
+///         ],
+///     })
+///     .build();
+/// ```
+#[derive(Debug, Default)]
+pub struct DirectoryValidatorBuilder {
+    directory_id: Option<String>,
+    segments: Vec<OwnedSegmentDef>,
+}
+
+impl DirectoryValidatorBuilder {
+    /// Create a new builder with the given directory identifier.
+    ///
+    /// The identifier is used in error messages; set a human-readable value
+    /// such as `"UTILMD-5.5.3a"` or `"custom-profile"`.
+    pub fn new(directory_id: impl Into<String>) -> Self {
+        Self {
+            directory_id: Some(directory_id.into()),
+            segments: Vec::new(),
+        }
+    }
+
+    /// Add a segment definition to the builder.
+    ///
+    /// Definitions can be added in any order; the resulting validator looks
+    /// them up by tag at validation time.
+    pub fn add_segment(mut self, def: OwnedSegmentDef) -> Self {
+        self.segments.push(def);
+        self
+    }
+
+    /// Extend the builder with multiple segment definitions at once.
+    pub fn add_segments(mut self, defs: impl IntoIterator<Item = OwnedSegmentDef>) -> Self {
+        self.segments.extend(defs);
+        self
+    }
+
+    /// Build the [`DirectoryValidator`].
+    ///
+    /// Returns a validator backed by the accumulated [`OwnedSegmentDef`]s.
+    /// Code-list checks are disabled by default; chain
+    /// [`DirectoryValidator::with_code_list_rules`] on the returned value to
+    /// enable them.
+    pub fn build(self) -> DirectoryValidator {
+        let mut validator = DirectoryValidator::from_owned_definitions(self.segments);
+        if let Some(id) = self.directory_id {
+            validator.directory_id = id;
+        }
+        validator
     }
 }
 
@@ -511,7 +749,11 @@ mod tests {
         );
 
         let mut report = ValidationReport::default();
-        validator.validate_batch(&segments, &mut report, &crate::validator::ValidationRuleContext::empty());
+        validator.validate_batch(
+            &segments,
+            &mut report,
+            &crate::validator::ValidationRuleContext::empty(),
+        );
         assert!(!report.has_errors());
     }
 
@@ -533,7 +775,11 @@ mod tests {
         let owned = parse_single(b"DTM+137:20200101:'");
         let seg = owned.as_borrowed();
         let count = DirectoryValidator::effective_component_count(&seg, 0);
-        assert_eq!(count, Some(2), "trailing empty component should be stripped");
+        assert_eq!(
+            count,
+            Some(2),
+            "trailing empty component should be stripped"
+        );
     }
 
     #[test]
@@ -542,7 +788,11 @@ mod tests {
         let owned = parse_single(b"NAD+MS++:'");
         let seg = owned.as_borrowed();
         let count = DirectoryValidator::effective_component_count(&seg, 2);
-        assert_eq!(count, Some(0), "all-empty composite should have effective count 0");
+        assert_eq!(
+            count,
+            Some(0),
+            "all-empty composite should have effective count 0"
+        );
     }
 
     #[test]
@@ -551,7 +801,11 @@ mod tests {
         let owned = parse_single(b"DTM+137:20200101:102'");
         let seg = owned.as_borrowed();
         let count = DirectoryValidator::effective_component_count(&seg, 0);
-        assert_eq!(count, Some(3), "no components should be stripped when all non-empty");
+        assert_eq!(
+            count,
+            Some(3),
+            "no components should be stripped when all non-empty"
+        );
     }
 
     #[test]
@@ -586,7 +840,11 @@ mod tests {
         .with_code_list_rules(custom_rules);
 
         let mut report = ValidationReport::default();
-        validator.validate_batch(&segments, &mut report, &crate::validator::ValidationRuleContext::empty());
+        validator.validate_batch(
+            &segments,
+            &mut report,
+            &crate::validator::ValidationRuleContext::empty(),
+        );
         assert!(
             report.has_warnings(),
             "INVALID is not in the custom code list so validation must warn"

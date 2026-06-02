@@ -29,9 +29,15 @@ impl<W: Write> Writer<W> {
     pub fn with_una(mut inner: W, ssa: ServiceStringAdvice) -> Result<Self, EdifactError> {
         // EDIFACT syntax requires all delimiter bytes to be ASCII (0x00–0x7F).
         // Non-ASCII bytes would bisect multi-byte UTF-8 sequences in data values.
-        if [ssa.component_sep, ssa.element_sep, ssa.decimal_mark, ssa.release_char, ssa.segment_term]
-            .iter()
-            .any(|&b| b > 0x7F)
+        if [
+            ssa.component_sep,
+            ssa.element_sep,
+            ssa.decimal_mark,
+            ssa.release_char,
+            ssa.segment_term,
+        ]
+        .iter()
+        .any(|&b| b > 0x7F)
         {
             return Err(EdifactError::InvalidUna);
         }
@@ -109,11 +115,15 @@ impl<W: Write> Writer<W> {
             if let Some(first) = parts.next() {
                 // SAFETY: input is valid UTF-8 and we split on a single-byte delimiter,
                 // so each part remains a valid UTF-8 slice.
-                self.write_escaped(std::str::from_utf8(first).map_err(|_| EdifactError::InvalidUtf8)?)?;
+                self.write_escaped(
+                    std::str::from_utf8(first).map_err(|_| EdifactError::InvalidUtf8)?,
+                )?;
             }
             for part in parts {
                 self.inner.write_all(&[comp_sep])?;
-                self.write_escaped(std::str::from_utf8(part).map_err(|_| EdifactError::InvalidUtf8)?)?;
+                self.write_escaped(
+                    std::str::from_utf8(part).map_err(|_| EdifactError::InvalidUtf8)?,
+                )?;
             }
         }
         self.inner.write_all(&[self.ssa.segment_term])?;
@@ -126,11 +136,7 @@ impl<W: Write> Writer<W> {
     /// `elements` is a slice of elements; each element is a sequence of component strings.
     /// This avoids the lifetime constraints of [`Self::write_segment`] when building
     /// segments from runtime-owned data (e.g. inside [`crate::WriterEmitter`]).
-    pub fn write_segment_parts<E>(
-        &mut self,
-        tag: &str,
-        elements: &[E],
-    ) -> Result<(), EdifactError>
+    pub fn write_segment_parts<E>(&mut self, tag: &str, elements: &[E]) -> Result<(), EdifactError>
     where
         E: AsRef<[String]>,
     {
@@ -266,9 +272,8 @@ mod tests {
             Segment::new("UNZ", vec![Element::of(&["0"]), Element::of(&["1"])]),
         ];
         let bytes = crate::segments_to_bytes(&segs).unwrap();
-        let rt: Vec<crate::OwnedSegment> =
-            crate::parser::from_reader(std::io::Cursor::new(&bytes))
-                .expect("round-trip parse failed");
+        let rt: Vec<crate::OwnedSegment> = crate::parser::from_reader(std::io::Cursor::new(&bytes))
+            .expect("round-trip parse failed");
         assert_eq!(rt[0].tag, "UNB");
         assert_eq!(rt[0].as_borrowed().element_str(0), Some("UNOA"));
         assert_eq!(rt[1].tag, "UNZ");
@@ -295,7 +300,13 @@ mod tests {
 
         // write_segment_parts: pre-split; no hard-coded `:` in element strings
         writer
-            .write_segment_parts("BGM", &[vec!["220".to_owned(), "SUB1".to_owned()], vec!["PO1".to_owned()]])
+            .write_segment_parts(
+                "BGM",
+                &[
+                    vec!["220".to_owned(), "SUB1".to_owned()],
+                    vec!["PO1".to_owned()],
+                ],
+            )
             .expect("write failed");
 
         let out = writer.finish().expect("finish failed");
@@ -306,14 +317,26 @@ mod tests {
         assert!(s.contains("BGM"), "BGM segment missing: {s}");
         // Slice after UNA so assertions target segment output, not UNA header bytes.
         let after_una = s.find("BGM").map(|i| &s[i..]).unwrap_or(s);
-        assert!(after_una.contains('!'), "missing element sep in segment: {after_una}");
-        assert!(after_una.contains('|'), "missing component sep in segment: {after_una}");
-        assert!(after_una.ends_with('~'), "missing segment term in segment: {after_una}");
+        assert!(
+            after_una.contains('!'),
+            "missing element sep in segment: {after_una}"
+        );
+        assert!(
+            after_una.contains('|'),
+            "missing component sep in segment: {after_una}"
+        );
+        assert!(
+            after_una.ends_with('~'),
+            "missing segment term in segment: {after_una}"
+        );
         // Decimal mark appears in the UNA header (no decimal-bearing values in this segment).
         assert!(s.contains(','), "missing decimal mark in UNA: {s}");
         assert!(!s.contains('+'), "default element sep leaked: {s}");
         assert!(!s.contains(':'), "default component sep leaked: {s}");
         // segment_term '~' is not the default; ensure no default ' leaks (UNA itself aside)
-        assert!(!after_una.contains('\''), "default segment term leaked after UNA: {after_una}");
+        assert!(
+            !after_una.contains('\''),
+            "default segment term leaked after UNA: {after_una}"
+        );
     }
 }

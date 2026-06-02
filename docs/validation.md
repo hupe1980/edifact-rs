@@ -284,11 +284,11 @@ let ctx = ValidationContext::builder()
 
 for result in message_windows_from_reader(input) {
     let window = result?;
-    let borrowed: Vec<_> = window.iter().map(|s| s.as_borrowed()).collect();
+    let borrowed: Vec<_> = window.segments.iter().map(|s| s.as_borrowed()).collect();
     let report = ctx.validate_lenient(&borrowed);
     println!(
-        "message {}: {} error(s)",
-        window[0].element_str(0).unwrap_or("?"),
+        "message {:?}: {} error(s)",
+        window.message_type,
         report.errors.len()
     );
 }
@@ -306,17 +306,22 @@ for a complete example.
 definition dictionary:
 
 ```rust
-use edifact_rs::{DirectoryValidator, SegmentDefinition, ElementDefinition};
+use edifact_rs::{DirectoryValidatorBuilder, OwnedSegmentDef, OwnedElementRef, Status};
 
-let mut validator = DirectoryValidator::new();
-validator.register(SegmentDefinition {
-    tag: "BGM".to_owned(),
-    elements: vec![
-        ElementDefinition { min_length: 1, max_length: 3, is_mandatory: true },
-        ElementDefinition { min_length: 1, max_length: 35, is_mandatory: true },
-        ElementDefinition { min_length: 1, max_length: 3, is_mandatory: false },
-    ],
-});
+let validator = DirectoryValidatorBuilder::new("CUSTOM-D96A")
+    .add_segment(OwnedSegmentDef {
+        tag: "BGM".to_owned(),
+        name: "Beginning of message".to_owned(),
+        elements: vec![
+            OwnedElementRef { position: 1, data_element: "1001".to_owned(),
+                              status: Status::Conditional, max_repeat: 1 },
+            OwnedElementRef { position: 2, data_element: "1004".to_owned(),
+                              status: Status::Conditional, max_repeat: 1 },
+            OwnedElementRef { position: 3, data_element: "1225".to_owned(),
+                              status: Status::Conditional, max_repeat: 1 },
+        ],
+    })
+    .build();
 ```
 
 > **Scope note**: `DirectoryValidator` validates element presence and length within

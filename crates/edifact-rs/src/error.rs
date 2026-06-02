@@ -97,7 +97,9 @@ pub enum EdifactError {
     ///
     /// The `UNT` segment declares the number of segments in the message (including `UNH`/`UNT`),
     /// but the actual count differs.
-    #[error("segment count mismatch in message {message_ref}: UNT declared {expected}, found {actual}")]
+    #[error(
+        "segment count mismatch in message {message_ref}: UNT declared {expected}, found {actual}"
+    )]
     SegmentCountMismatch {
         /// Segment count declared in the UNT segment.
         expected: u32,
@@ -335,8 +337,6 @@ pub enum EdifactError {
     },
 }
 
-
-
 impl From<std::io::Error> for EdifactError {
     fn from(e: std::io::Error) -> Self {
         Self::Io(IoError(e))
@@ -392,15 +392,15 @@ impl EdifactError {
                 Some("Release character must escape one following byte; trailing '?' is invalid")
             }
             Self::InvalidSegmentTag(_) => Some("Segment tags must be 3 ASCII uppercase letters"),
-            Self::InvalidUna => {
-                Some("UNA must be exactly 9 bytes: 'UNA' followed by 6 distinct, non-whitespace service characters")
-            }
+            Self::InvalidUna => Some(
+                "UNA must be exactly 9 bytes: 'UNA' followed by 6 distinct, non-whitespace service characters",
+            ),
             Self::MissingRequiredElement { .. } => {
                 Some("Provide all mandatory elements for the segment per directory rules")
             }
-            Self::MissingRequiredComponent { .. } => {
-                Some("Provide all mandatory components for the composite element per directory rules")
-            }
+            Self::MissingRequiredComponent { .. } => Some(
+                "Provide all mandatory components for the composite element per directory rules",
+            ),
             Self::InvalidSegmentForMessage { .. } => {
                 Some("Remove unsupported segment or switch to the correct message type")
             }
@@ -486,7 +486,11 @@ impl miette::Diagnostic for EdifactError {
                 "UNZ declares {expected} message(s) but {actual} UNH/UNT pair(s) were found. \
                  Check the UNZ message count",
             ))),
-            Self::SegmentCountMismatch { expected, actual, message_ref } => Some(Box::new(format!(
+            Self::SegmentCountMismatch {
+                expected,
+                actual,
+                message_ref,
+            } => Some(Box::new(format!(
                 "UNT for message {message_ref} declares {expected} segment(s) but {actual} were found. \
                  Check the UNT segment count",
             ))),
@@ -496,47 +500,79 @@ impl miette::Diagnostic for EdifactError {
             Self::MissingRequiredElement { tag, element_index } => Some(Box::new(format!(
                 "Segment {tag} requires element at index {element_index}",
             ))),
-            Self::MissingRequiredComponent { tag, element_index, component_index } => {
-                Some(Box::new(format!(
-                    "Segment {tag} element {element_index} requires component at index {component_index}",
-                )))
-            }
+            Self::MissingRequiredComponent {
+                tag,
+                element_index,
+                component_index,
+            } => Some(Box::new(format!(
+                "Segment {tag} element {element_index} requires component at index {component_index}",
+            ))),
             Self::Io(e) => Some(Box::new(format!("I/O error: {e}"))),
-            Self::InvalidSegmentForMessage { tag, message_type, .. } => Some(Box::new(format!(
+            Self::InvalidSegmentForMessage {
+                tag, message_type, ..
+            } => Some(Box::new(format!(
                 "Segment {tag} should not appear in a {message_type} message. \
                  Check the directory definition",
             ))),
-            Self::InvalidElementCount { tag, min, max, actual, .. } => Some(Box::new(format!(
+            Self::InvalidElementCount {
+                tag,
+                min,
+                max,
+                actual,
+                ..
+            } => Some(Box::new(format!(
                 "Segment {tag} should have between {min} and {max} elements, but has {actual}. \
                  Check segment structure",
             ))),
-            Self::InvalidComponentCount { tag, element_index, expected, actual, .. } => {
-                Some(Box::new(format!(
-                    "In segment {tag}, element {element_index} should have {expected} components \
+            Self::InvalidComponentCount {
+                tag,
+                element_index,
+                expected,
+                actual,
+                ..
+            } => Some(Box::new(format!(
+                "In segment {tag}, element {element_index} should have {expected} components \
                      but has {actual}. Check element structure",
-                )))
-            }
-            Self::InvalidCodeValue { tag, element_index, value, code_list, .. } => {
-                Some(Box::new(format!(
-                    "Value '{value}' in segment {tag} element {element_index} is not in the \
+            ))),
+            Self::InvalidCodeValue {
+                tag,
+                element_index,
+                value,
+                code_list,
+                ..
+            } => Some(Box::new(format!(
+                "Value '{value}' in segment {tag} element {element_index} is not in the \
                      {code_list} code list. Check the directory for valid codes",
-                )))
-            }
-            Self::MissingSegment { tag, expected_position } => Some(Box::new(format!(
+            ))),
+            Self::MissingSegment {
+                tag,
+                expected_position,
+            } => Some(Box::new(format!(
                 "Segment {tag} is required at position {expected_position} but is missing. \
                  Add this segment to the message",
             ))),
-            Self::QualifierMismatch { tag, actual, expected, .. } => Some(Box::new(format!(
+            Self::QualifierMismatch {
+                tag,
+                actual,
+                expected,
+                ..
+            } => Some(Box::new(format!(
                 "Segment {tag} has qualifier '{actual}' but expected '{expected}'. \
                  Check the segment's first component",
             ))),
-            Self::ConditionalRequirementNotMet { tag, element_index, condition, .. } => {
-                Some(Box::new(format!(
-                    "In segment {tag}, element {element_index} is conditionally required when: \
+            Self::ConditionalRequirementNotMet {
+                tag,
+                element_index,
+                condition,
+                ..
+            } => Some(Box::new(format!(
+                "In segment {tag}, element {element_index} is conditionally required when: \
                      {condition}. Check if the condition is met",
-                )))
-            }
-            Self::ValidationFailed { error_count, first_message } => Some(Box::new(format!(
+            ))),
+            Self::ValidationFailed {
+                error_count,
+                first_message,
+            } => Some(Box::new(format!(
                 "Validation found {error_count} issue(s). Start by fixing: {first_message}",
             ))),
             Self::SegmentTooLong { offset, limit } => Some(Box::new(format!(
@@ -781,11 +817,7 @@ impl ValidationReport {
     /// there is at least one error-level issue, **preserving warnings and infos**
     /// in the `Err` variant so callers can inspect the full report.
     pub fn result(self) -> Result<Self, Self> {
-        if self.is_valid() {
-            Ok(self)
-        } else {
-            Err(self)
-        }
+        if self.is_valid() { Ok(self) } else { Err(self) }
     }
 
     /// Iterate over all issues in severity buckets: errors, warnings, then infos.
@@ -820,7 +852,12 @@ impl ValidationReport {
     {
         Self {
             errors: self.errors().iter().filter(|i| pred(i)).cloned().collect(),
-            warnings: self.warnings().iter().filter(|i| pred(i)).cloned().collect(),
+            warnings: self
+                .warnings()
+                .iter()
+                .filter(|i| pred(i))
+                .cloned()
+                .collect(),
             infos: self.infos().iter().filter(|i| pred(i)).cloned().collect(),
         }
     }
@@ -838,6 +875,33 @@ impl ValidationReport {
                 .as_deref()
                 .is_some_and(|id| id.starts_with(prefix))
         })
+    }
+
+    /// Return a cloned report containing only issues that reference `segment_tag`.
+    ///
+    /// Issues whose `segment_tag` field does not match are dropped; the severity
+    /// buckets (errors / warnings / infos) are preserved.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use edifact_rs::{ValidationReport, ValidationIssue, ValidationSeverity};
+    ///
+    /// let mut report = ValidationReport::default();
+    /// report.add_error(
+    ///     ValidationIssue::new(ValidationSeverity::Error, "BGM missing")
+    ///         .with_segment("BGM"),
+    /// );
+    /// report.add_error(
+    ///     ValidationIssue::new(ValidationSeverity::Error, "NAD missing")
+    ///         .with_segment("NAD"),
+    /// );
+    /// let bgm_issues = report.for_segment("BGM");
+    /// assert_eq!(bgm_issues.errors().len(), 1);
+    /// assert_eq!(bgm_issues.errors()[0].segment_tag.as_deref(), Some("BGM"));
+    /// ```
+    pub fn for_segment(&self, segment_tag: &str) -> Self {
+        self.filter_report(|issue| issue.segment_tag.as_deref() == Some(segment_tag))
     }
 
     /// Return a deterministic, stable text representation for snapshots and logs.

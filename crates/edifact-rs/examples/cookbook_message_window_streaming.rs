@@ -13,16 +13,13 @@
 //! automatically and yield only the `UNH..UNT` windows.
 
 use edifact_rs::{
-    EdifactDeserialize, EdifactSerialize, OwnedSegment, Segment, message_windows_bytes,
-    message_windows_from_reader,
+    EdifactDeserialize, EdifactSerialize, message_windows_bytes, message_windows_from_reader,
 };
 
 // ── 1. Manual approach: inspect windows as raw segment slices ─────────────────
 
 fn count_messages_in_interchange(input: &[u8]) -> usize {
-    message_windows_bytes(input)
-        .filter_map(Result::ok)
-        .count()
+    message_windows_bytes(input).filter_map(Result::ok).count()
 }
 
 // ── 2. Typed message struct via derive macros ─────────────────────────────────
@@ -57,9 +54,8 @@ fn collect_order_ids(input: &[u8]) -> Vec<Option<String>> {
     message_windows_from_reader(reader)
         .filter_map(Result::ok)
         .map(|window| {
-            // Each window is a Vec<OwnedSegment>; borrow to deserialise.
-            let borrowed: Vec<Segment<'_>> = window.iter().map(OwnedSegment::as_borrowed).collect();
-            OrdersMessage::edifact_deserialize(&borrowed)
+            // Each window is an OwnedMessageWindow; deserialise directly from its segments.
+            OrdersMessage::edifact_deserialize_owned(&window.segments)
                 .ok()
                 .and_then(|m| m.bgm.into_iter().next())
                 .and_then(|bgm| bgm.doc_id)
@@ -81,13 +77,19 @@ fn demonstrate_error_propagation() {
         .unwrap();
     // Only the first, complete window is returned.
     assert_eq!(windows.len(), 1);
-    println!("Received {} complete window(s) before end-of-stream", windows.len());
+    println!(
+        "Received {} complete window(s) before end-of-stream",
+        windows.len()
+    );
 
     // A UNH-while-in-flight scenario (no UNT before next UNH) is an error:
     let double_unh = b"UNH+1+ORDERS:D:96A:UN'BGM+220+X+9'\
                        UNH+2+ORDERS:D:96A:UN'BGM+220+Y+9'UNT+3+2'";
     let results: Vec<_> = message_windows_bytes(double_unh).collect();
-    assert!(results.iter().any(|r| r.is_err()), "expected an error for double-UNH");
+    assert!(
+        results.iter().any(|r| r.is_err()),
+        "expected an error for double-UNH"
+    );
     println!("Double-UNH correctly produces an error");
 }
 
@@ -112,14 +114,12 @@ fn main() {
         .enumerate()
         .map(|(i, r)| (i, r.unwrap()))
     {
-        let unh = &window[0];
-        let msg_ref = unh
-            .elements
-            .first()
-            .and_then(|e| e.components.first())
-            .map(|c| c.as_ref())
-            .unwrap_or("?");
-        println!("Window {}: msg_ref={msg_ref}, segments={}", i + 1, window.len());
+        let msg_type = window.message_type.unwrap_or("?");
+        println!(
+            "Window {}: type={msg_type}, segments={}",
+            i + 1,
+            window.segments.len()
+        );
     }
 
     // ── typed streaming ───────────────────────────────────────────────────────

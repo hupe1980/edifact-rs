@@ -49,7 +49,9 @@ fn bench_parse_small(b: Bencher) {
 fn bench_parse_1mb(b: Bencher) {
     let data = one_mb();
     b.bench(|| {
-        let _ = from_bytes(data).collect::<Result<Vec<_>, _>>().expect("bench fixture must be valid EDIFACT");
+        let _ = from_bytes(data)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("bench fixture must be valid EDIFACT");
     });
 }
 
@@ -69,7 +71,8 @@ fn bench_serialize_sample_message(b: Bencher) {
     let segments = sample_segments();
 
     b.bench(|| {
-        let _ = segments_to_bytes(&segments).expect("serialization of known-good segments must not fail");
+        let _ = segments_to_bytes(&segments)
+            .expect("serialization of known-good segments must not fail");
     });
 }
 
@@ -81,6 +84,7 @@ fn bench_roundtrip_small(b: Bencher) {
         let segs: Vec<_> = from_bytes(sample_msg())
             .collect::<Result<Vec<_>, _>>()
             .expect("bench fixture must be valid EDIFACT");
-        let _bytes = segments_to_bytes(&segs).expect("serialization of known-good segments must not fail");
+        let _bytes =
+            segments_to_bytes(&segs).expect("serialization of known-good segments must not fail");
     });
 }

@@ -40,20 +40,21 @@
 
 use std::io::Cursor;
 
-use edifact_rs::{EdifactError, OwnedSegment, message_windows_from_reader};
+use edifact_rs::{EdifactError, OwnedMessageWindow, message_windows_from_reader};
 
 // ── Pattern A: buffer, then parse ─────────────────────────────────────────────
 
 async fn pattern_a_parse_from_bytes(edi_bytes: Vec<u8>) -> Result<usize, EdifactError> {
     // Zero async I/O: the bytes are already in memory.
-    let segments: Vec<_> = edifact_rs::from_bytes(&edi_bytes)
-        .collect::<Result<_, _>>()?;
+    let segments: Vec<_> = edifact_rs::from_bytes(&edi_bytes).collect::<Result<_, _>>()?;
     Ok(segments.len())
 }
 
 // ── Pattern B: spawn_blocking ─────────────────────────────────────────────────
 
-async fn pattern_b_spawn_blocking(edi_bytes: Vec<u8>) -> Result<Vec<Vec<OwnedSegment>>, EdifactError> {
+async fn pattern_b_spawn_blocking(
+    edi_bytes: Vec<u8>,
+) -> Result<Vec<OwnedMessageWindow>, EdifactError> {
     tokio::task::spawn_blocking(move || {
         let cursor = Cursor::new(edi_bytes);
         message_windows_from_reader(cursor).collect::<Result<_, _>>()
@@ -70,10 +71,8 @@ async fn pattern_b_spawn_blocking(edi_bytes: Vec<u8>) -> Result<Vec<Vec<OwnedSeg
 
 /// Parse an EDIFACT interchange in a blocking thread and stream `UNH..UNT`
 /// windows to an async consumer through a channel.
-async fn channel_bridge(
-    edi_bytes: Vec<u8>,
-) -> Result<Vec<Vec<OwnedSegment>>, EdifactError> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Vec<OwnedSegment>, EdifactError>>(8);
+async fn channel_bridge(edi_bytes: Vec<u8>) -> Result<Vec<OwnedMessageWindow>, EdifactError> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<OwnedMessageWindow, EdifactError>>(8);
 
     // Producer: blocking thread
     tokio::task::spawn_blocking(move || {
@@ -86,7 +85,7 @@ async fn channel_bridge(
     });
 
     // Consumer: async side
-    let mut messages: Vec<Vec<OwnedSegment>> = Vec::new();
+    let mut messages: Vec<OwnedMessageWindow> = Vec::new();
     while let Some(window) = rx.recv().await {
         messages.push(window?);
     }

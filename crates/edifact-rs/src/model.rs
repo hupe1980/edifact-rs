@@ -315,7 +315,12 @@ impl<'a> BorrowedSegment<'a> {
     /// Shorthand: first component of element `n` — the most common access pattern.
     #[inline]
     pub fn element_str(&self, n: usize) -> Option<&'a str> {
-        self.0.elements.get(n)?.components.first().map(|c| c.as_str())
+        self.0
+            .elements
+            .get(n)?
+            .components
+            .first()
+            .map(|c| c.as_str())
     }
 
     /// Return the byte span of the element at position `n`, if it exists.
@@ -347,7 +352,11 @@ impl OwnedSegment {
     /// Zero-allocation equivalent of `as_borrowed().get_element(elem)?.get_component(comp)`.
     #[inline]
     pub fn component_str(&self, elem: usize, comp: usize) -> Option<&str> {
-        self.elements.get(elem)?.components.get(comp).map(|s| s.as_str())
+        self.elements
+            .get(elem)?
+            .components
+            .get(comp)
+            .map(|s| s.as_str())
     }
 
     #[inline]

@@ -62,11 +62,14 @@ fn build_orders_pack() -> ProfileRulePack {
             let bgm = segments.iter().find(|s| s.tag == "BGM")?;
             let reference = bgm.get_element(1)?.get_component(0)?;
             reference.is_empty().then(|| {
-                ValidationIssue::new(ValidationSeverity::Error, "BGM purchase-order reference is empty")
-                    .with_rule_id("ORDERS-P002-REF")
-                    .with_segment("BGM")
-                    .with_element_index(1)
-                    .with_suggestion("Populate BGM element 1 with the buyer's PO reference number")
+                ValidationIssue::new(
+                    ValidationSeverity::Error,
+                    "BGM purchase-order reference is empty",
+                )
+                .with_rule_id("ORDERS-P002-REF")
+                .with_segment("BGM")
+                .with_element_index(1)
+                .with_suggestion("Populate BGM element 1 with the buyer's PO reference number")
             })
         });
 
@@ -85,15 +88,14 @@ fn extract_violations(report: &ValidationReport) -> Vec<OrdersViolation> {
     // Map profile rule IDs to domain violation types.
     for issue in report.filter_by_rule_prefix("ORDERS-P001").iter_issues() {
         // Rule ORDERS-P001-FUNC carries the disallowed code in the message text.
-        let code = issue
-            .message
-            .split('\'')
-            .nth(1)
-            .unwrap_or("?")
-            .to_owned();
+        let code = issue.message.split('\'').nth(1).unwrap_or("?").to_owned();
         violations.push(OrdersViolation::UnsupportedFunctionCode { code });
     }
-    if report.issues_for_rule_id("ORDERS-P002-REF").next().is_some() {
+    if report
+        .issues_for_rule_id("ORDERS-P002-REF")
+        .next()
+        .is_some()
+    {
         violations.push(OrdersViolation::MissingPoReference);
     }
 
@@ -124,7 +126,10 @@ impl Validator for MaxSegmentValidator {
             report.add_warning(
                 ValidationIssue::new(
                     ValidationSeverity::Warning,
-                    format!("message has {count} segments; agreed maximum is {}", self.limit),
+                    format!(
+                        "message has {count} segments; agreed maximum is {}",
+                        self.limit
+                    ),
                 )
                 .with_rule_id("ORDERS-P099-SEGCOUNT")
                 .with_suggestion(format!(
@@ -147,7 +152,10 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
         .with_validator(ValidationLayer::Profile, MaxSegmentValidator { limit: 100 })
         .build()
         .validate_lenient(&valid_segments);
-    assert!(!report.has_errors(), "valid message should produce no errors");
+    assert!(
+        !report.has_errors(),
+        "valid message should produce no errors"
+    );
     println!("valid message: no violations");
 
     // ── message with unsupported function code ────────────────────────────────
@@ -161,7 +169,9 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
     println!("function-code violations: {violations:?}");
     assert_eq!(
         violations,
-        vec![OrdersViolation::UnsupportedFunctionCode { code: "5".to_owned() }]
+        vec![OrdersViolation::UnsupportedFunctionCode {
+            code: "5".to_owned()
+        }]
     );
 
     // ── rule-ID based filtering (Pattern A) ───────────────────────────────────
@@ -182,7 +192,9 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
         tiny_limit_report.has_warnings(),
         "expected a segment-count warning"
     );
-    let seg_count_issues: Vec<_> = tiny_limit_report.issues_for_rule_id("ORDERS-P099-SEGCOUNT").collect();
+    let seg_count_issues: Vec<_> = tiny_limit_report
+        .issues_for_rule_id("ORDERS-P099-SEGCOUNT")
+        .collect();
     println!("segment-count issue: {}", seg_count_issues[0].message);
 
     println!("All profile error-mapping examples passed.");
