@@ -97,7 +97,11 @@ impl OwnedSegmentDef {
             tag.len() == 3 && tag.bytes().all(|b| b.is_ascii_uppercase()),
             "OwnedSegmentDef::new: tag must be exactly three ASCII uppercase letters, got {tag:?}"
         );
-        Self { tag, name, elements }
+        Self {
+            tag,
+            name,
+            elements,
+        }
     }
 
     /// Construct an owned segment definition, returning an error for invalid tags.
@@ -118,7 +122,11 @@ impl OwnedSegmentDef {
         if tag.len() != 3 || !tag.bytes().all(|b| b.is_ascii_uppercase()) {
             return Err(EdifactError::InvalidSegmentTag(tag));
         }
-        Ok(Self { tag, name, elements })
+        Ok(Self {
+            tag,
+            name,
+            elements,
+        })
     }
 
     /// Segment tag (e.g. `"BGM"`).
@@ -159,7 +167,12 @@ impl OwnedElementRef {
             position != 0,
             "OwnedElementRef::new: position must be >= 1 (one-based), got 0"
         );
-        Self { position, data_element, status, max_repeat }
+        Self {
+            position,
+            data_element,
+            status,
+            max_repeat,
+        }
     }
 
     /// Construct an owned element reference, returning an error for position `0`.
@@ -180,7 +193,12 @@ impl OwnedElementRef {
         if position == 0 {
             return Err(EdifactError::InvalidElementPosition);
         }
-        Ok(Self { position, data_element, status, max_repeat })
+        Ok(Self {
+            position,
+            data_element,
+            status,
+            max_repeat,
+        })
     }
 
     /// One-based element position (always >= 1).
