@@ -85,9 +85,7 @@ impl OwnedElementRef {
         max_repeat: u8,
     ) -> Result<Self, EdifactError> {
         if position == 0 {
-            return Err(EdifactError::InvalidSegmentTag(
-                "element position must be >= 1 (one-based)".to_string(),
-            ));
+            return Err(EdifactError::InvalidElementPosition);
         }
         Ok(Self {
             position,
@@ -126,10 +124,25 @@ enum SegmentDefRef<'a> {
 }
 
 impl<'a> SegmentDefRef<'a> {
-    fn elements_len(&self) -> usize {
+    /// Returns the highest defined element position (one-based → used directly as
+    /// the maximum zero-based slot count for element-count validation).
+    ///
+    /// For owned definitions the highest `position` value may exceed the number
+    /// of entries in the `elements` vec when positions are non-consecutive.
+    fn max_element_position(&self) -> usize {
         match self {
-            Self::Static(d) => d.elements.len(),
-            Self::Owned(d) => d.elements.len(),
+            Self::Static(d) => d
+                .elements
+                .iter()
+                .map(|e| e.position as usize)
+                .max()
+                .unwrap_or(0),
+            Self::Owned(d) => d
+                .elements
+                .iter()
+                .map(|e| e.position as usize)
+                .max()
+                .unwrap_or(0),
         }
     }
 
@@ -549,7 +562,7 @@ impl DirectoryValidator {
             return Ok(());
         };
 
-        let max_elements = def.elements_len();
+        let max_elements = def.max_element_position();
         let min_elements = def.min_mandatory_index();
         let actual = seg.elements.len();
 

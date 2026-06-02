@@ -457,10 +457,7 @@ fn merge_release_scopes(
         (Some(current), Some(incoming)) => {
             // Both packs specify a release; they must match to compose safely.
             if current != incoming {
-                return Err(EdifactError::InvalidSegmentTag(format!(
-                    "cannot merge ProfileRulePack values with different release scopes: {:?} vs {:?}",
-                    current, incoming
-                )));
+                return Err(EdifactError::IncompatibleReleaseScopes { current, incoming });
             }
             Ok(Some(current))
         }

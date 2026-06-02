@@ -194,15 +194,13 @@ pub use writer::Writer;
 // ── flat re-exports: serde ────────────────────────────────────────────────────
 
 /// User-facing deserialization API.
-#[allow(deprecated)]
 pub use de::{
     CompositeElement, DispatchedMessage, EdifactCompositeDeserialize, EdifactDeserialize,
     EdifactSegmentTag, MessageDispatch, MessageWindow, MessageWindowsIter, MessageWindowsSliceIter,
     OwnedMessageWindow, SegmentAccessor, deserialize, deserialize_all_from_reader,
     deserialize_all_streaming, deserialize_first_from_reader, deserialize_first_streaming,
     deserialize_messages_bytes, deserialize_messages_from_reader, deserialize_str,
-    groups_are_contiguous_by_qualifier, message_type_from_window, message_windows_bytes,
-    message_windows_from_reader,
+    groups_are_contiguous_by_qualifier, message_windows_bytes, message_windows_from_reader,
 };
 
 // ── Proc-macro support ─────────────────────────────────────────────────────────

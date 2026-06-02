@@ -335,6 +335,28 @@ pub enum EdifactError {
         /// Description of the protocol violation.
         message: &'static str,
     },
+
+    /// An [`crate::OwnedElementRef`] has `position = 0`, which is never valid.
+    ///
+    /// Element positions are one-based: position 1 refers to the first element
+    /// slot.  Position 0 is reserved and invalid.  Use [`crate::OwnedElementRef::new`]
+    /// to catch this at construction time.
+    #[error("element definition contains invalid position 0; positions must be >= 1 (one-based)")]
+    InvalidElementPosition,
+
+    /// Two [`crate::ProfileRulePack`] values with incompatible release scopes were composed.
+    ///
+    /// When composing packs via [`crate::ProfileRulePack::merge`],
+    /// [`crate::ProfileRulePack::extend_from`], or
+    /// [`crate::ProfileRulePack::merge_with_override`], both packs must either
+    /// share the same release scope or at most one may carry a scope.
+    #[error("incompatible release scopes: cannot compose {current:?} with {incoming:?}")]
+    IncompatibleReleaseScopes {
+        /// Release scope of the pack being composed into.
+        current: String,
+        /// Release scope of the pack being composed in.
+        incoming: String,
+    },
 }
 
 impl From<std::io::Error> for EdifactError {
@@ -372,6 +394,8 @@ impl EdifactError {
             Self::UnexpectedMessageType { .. } => "E022",
             Self::InterchangeTooLarge { .. } => "E023",
             Self::InvalidEventSequence { .. } => "E024",
+            Self::InvalidElementPosition => "E025",
+            Self::IncompatibleReleaseScopes { .. } => "E026",
         }
     }
 
@@ -429,6 +453,12 @@ impl EdifactError {
             Self::InvalidEventSequence { .. } => {
                 Some("Emit StartSegment before Element, and Element before ComponentElement")
             }
+            Self::InvalidElementPosition => Some(
+                "Set element position to a value >= 1; positions are one-based (1 = first element slot)",
+            ),
+            Self::IncompatibleReleaseScopes { .. } => Some(
+                "Only compose ProfileRulePack values that share the same release scope,                  or where at most one has a release scope set",
+            ),
             Self::ValidationFailed { .. }
             | Self::MessageCountMismatch { .. }
             | Self::SegmentCountMismatch { .. }
@@ -591,6 +621,15 @@ impl miette::Diagnostic for EdifactError {
             Self::InvalidEventSequence { message } => Some(Box::new(format!(
                 "Event sequence violation: {message}. \
                  Check that StartSegment is emitted before Element, and Element before ComponentElement.",
+            ))),
+            Self::InvalidElementPosition => Some(Box::new(
+                "Element positions must be >= 1 (one-based). \
+                 Ensure no OwnedElementRef is constructed with position == 0",
+            )),
+            Self::IncompatibleReleaseScopes { current, incoming } => Some(Box::new(format!(
+                "Release scope {current:?} and {incoming:?} are incompatible. \
+                 Only compose ProfileRulePack values that share the same release scope, \
+                 or where at most one carries a release scope",
             ))),
         }
     }

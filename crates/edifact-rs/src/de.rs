@@ -1138,27 +1138,6 @@ where
     })
 }
 
-// ── message_type_from_window ──────────────────────────────────────────────────
-
-/// Extract the EDIFACT message type from a message window.
-///
-/// # Deprecation
-///
-/// Prefer accessing [`MessageWindow::message_type`] or
-/// [`OwnedMessageWindow::message_type`] directly — they are populated at
-/// construction time at no extra cost.
-///
-/// This function is kept for source-level compatibility but may be removed in a
-/// future release.
-#[deprecated(since = "0.6.0", note = "use `MessageWindow::message_type` instead")]
-pub fn message_type_from_window<'a>(window: &'a [Segment<'a>]) -> Option<&'a str> {
-    window
-        .iter()
-        .find(|s| s.tag == "UNH")
-        .and_then(|unh| unh.get_element(1))
-        .and_then(|e| e.get_component(0))
-}
-
 // ── MessageDispatch ───────────────────────────────────────────────────────────
 
 /// A type-erased deserialized message produced by [`MessageDispatch`].
