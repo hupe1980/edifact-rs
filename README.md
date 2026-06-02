@@ -334,7 +334,7 @@ edifact-rs workspace
 | `Segment<'a>` | Zero-copy view with `tag: &'a str` and borrowed elements |
 | `OwnedSegment` | Heap-owned copy; `.borrow()` returns O(1) `BorrowedSegment` |
 | `BorrowedSegment<'a>` | Zero-allocation view of `OwnedSegment` |
-| `EdifactError` | Stable error codes (E001–E020) with byte offsets |
+| `EdifactError` | Stable error codes (E001–E026) with byte offsets |
 | `ValidationReport` | Collected issues with lenient/strict modes |
 | `ProfileRulePack` | Composable, filterable business-rule bundles |
 | `MessageWindow<'a>` | Zero-copy window: `message_type`, `association_code`, borrowed `segments` |

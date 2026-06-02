@@ -1,7 +1,7 @@
 # Error Reference 🔴
 
 All errors returned by `edifact-rs` are variants of `EdifactError`. Every variant
-carries a stable, semver-protected code (`E001`–`E021`) accessible via
+carries a stable, semver-protected code (`E001`–`E026`) accessible via
 `err.stable_code()`. The enum is marked `#[non_exhaustive]` so future variants can
 be added without breaking existing match arms.
 
@@ -32,6 +32,11 @@ be added without breaking existing match arms.
 | E019 | `InvalidReleaseSequence` | Parser | `offset` |
 | E020 | `SegmentTooLong` | Reader parser | `offset` |
 | E021 | `MissingRequiredComponent` | Deserializer | — |
+| E022 | `UnexpectedMessageType` | Message dispatch | — |
+| E023 | `InterchangeTooLarge` | Envelope builder | — |
+| E024 | `InvalidEventSequence` | Event emitter | — |
+| E025 | `InvalidElementPosition` | Directory builder | — |
+| E026 | `IncompatibleReleaseScopes` | Profile pack composer | — |
 
 ---
 
@@ -350,6 +355,92 @@ element that was present but did not contain the required component.
 
 **Fix**: Provide the missing component inside the composite element, or mark the
 field `Option<T>` if it is truly optional.
+
+---
+
+### E022 — `UnexpectedMessageType`
+
+```
+no handler registered for message type {message_type}
+```
+
+**When**: `MessageDispatch::dispatch` was called with a message whose `UNH` segment
+specifies a type that has no registered handler and no fallback was configured.
+
+**Fields**: `message_type: String`.
+
+**Fix**: Register a handler with `MessageDispatch::on("TYPE", ...)`, or add a
+catch-all fallback handler.
+
+---
+
+### E023 — `InterchangeTooLarge`
+
+```
+interchange too large: count {count} exceeds u32::MAX
+```
+
+**When**: An interchange being built has accumulated more than 4 294 967 295 items.
+This is effectively unreachable on real-world data; it usually indicates corrupted
+or synthetic input.
+
+**Fields**: `count: u64`.
+
+**Fix**: Verify the input is not corrupted. If genuinely processing very large
+interchanges, partition the input into smaller batches.
+
+---
+
+### E024 — `InvalidEventSequence`
+
+```
+invalid event sequence: {message}
+```
+
+**When**: An `EventEmitter` received events in an invalid order — for example an
+`Element` event before `StartSegment`, or a `ComponentElement` event before
+`Element`.
+
+**Fields**: `message: &'static str` describing the violation.
+
+**Fix**: Emit `StartSegment` before `Element`, and `Element` before
+`ComponentElement`. This error always indicates a programming mistake in the
+caller's serialization code.
+
+---
+
+### E025 — `InvalidElementPosition`
+
+```
+element definition contains invalid position 0; positions must be >= 1 (one-based)
+```
+
+**When**: An `OwnedElementRef` was constructed with `position = 0`. Element
+positions are one-based — position 1 is the first element slot. Position 0 is
+never valid.
+
+**Fix**: Pass `position >= 1` to `OwnedElementRef::new`. Use
+`OwnedElementRef::new` (which validates at construction time) rather than
+building the struct directly.
+
+---
+
+### E026 — `IncompatibleReleaseScopes`
+
+```
+incompatible release scopes: cannot compose {current:?} with {incoming:?}
+```
+
+**When**: Two `ProfileRulePack` values with different release scopes were
+composed via `merge`, `extend_from`, or `merge_with_override`. Both packs must
+either share the same release scope or at most one may carry a scope.
+
+**Fields**: `current: String` (scope on the receiving pack), `incoming: String`
+(scope on the pack being merged in).
+
+**Fix**: Ensure both packs target the same release with
+`ProfileRulePack::for_release`, or remove the scope from one pack before
+composing.
 
 ---
 

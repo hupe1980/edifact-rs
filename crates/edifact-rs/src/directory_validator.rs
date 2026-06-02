@@ -146,7 +146,12 @@ impl<'a> SegmentDefRef<'a> {
         }
     }
 
-    fn min_mandatory_index(&self) -> usize {
+    /// Returns the highest position number among mandatory elements (one-based).
+    ///
+    /// This equals the minimum number of elements that must be present in a
+    /// segment: if the highest-positioned mandatory element is at position 5,
+    /// the segment must supply at least 5 elements.
+    fn last_mandatory_position(&self) -> usize {
         match self {
             Self::Static(d) => d
                 .elements
@@ -563,7 +568,7 @@ impl DirectoryValidator {
         };
 
         let max_elements = def.max_element_position();
-        let min_elements = def.min_mandatory_index();
+        let min_elements = def.last_mandatory_position();
         let actual = seg.elements.len();
 
         if self.structure_checks && (actual < min_elements || actual > max_elements) {

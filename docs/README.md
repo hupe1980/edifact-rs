@@ -19,7 +19,7 @@ first install to production-grade performance tuning.
 | [Profile Packs](profile-packs.md) | `ProfileRulePack`, rule authoring, merging, filtering |
 | [Diagnostics](diagnostics.md) | `diagnostics` feature, miette integration |
 | [Async Integration](async-integration.md) | Tokio patterns A / B / C |
-| [Error Reference](error-reference.md) | All `EdifactError` variants and stable codes E001–E020 |
+| [Error Reference](error-reference.md) | All `EdifactError` variants and stable codes E001–E026 |
 | [Performance](performance.md) | Zero-copy, allocation budgets, benchmarking |
 
 ---

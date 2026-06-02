@@ -457,7 +457,7 @@ impl EdifactError {
                 "Set element position to a value >= 1; positions are one-based (1 = first element slot)",
             ),
             Self::IncompatibleReleaseScopes { .. } => Some(
-                "Only compose ProfileRulePack values that share the same release scope,                  or where at most one has a release scope set",
+                "Only compose ProfileRulePack values that share the same release scope, or where at most one has a release scope set",
             ),
             Self::ValidationFailed { .. }
             | Self::MessageCountMismatch { .. }
