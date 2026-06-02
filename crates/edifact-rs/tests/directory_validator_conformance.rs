@@ -1,6 +1,6 @@
 use edifact_rs::{
-    DirectoryValidator, EdifactError, ElementRef, SegmentDefinition, Status, ValidationReport,
-    ValidationRuleContext, Validator, from_bytes,
+    DirectoryValidator, EdifactError, ElementRef, OwnedElementRef, OwnedSegmentDef,
+    SegmentDefinition, Status, ValidationReport, ValidationRuleContext, Validator, from_bytes,
 };
 
 static DTM_ELEMENTS: &[ElementRef] = &[
@@ -128,7 +128,10 @@ fn conformance_rejects_mandatory_composite_when_all_components_empty() {
 
     assert!(report.has_errors(), "expected errors, got {report:?}");
     assert!(
-        report.errors().iter().any(|issue| issue.message.contains("required element")),
+        report
+            .errors()
+            .iter()
+            .any(|issue| issue.message.contains("required element")),
         "expected missing-required-element issue, got {report:?}"
     );
 }
@@ -190,5 +193,84 @@ fn conformance_can_run_structure_checks_without_code_lists() {
 fn conformance_surfaces_parse_errors_before_validation() {
     let input = b"DTM+137:20260401:102?"; // dangling release sequence
     let result = from_bytes(input).collect::<Result<Vec<_>, EdifactError>>();
-    assert!(matches!(result, Err(EdifactError::InvalidReleaseSequence { .. })));
+    assert!(matches!(
+        result,
+        Err(EdifactError::InvalidReleaseSequence { .. })
+    ));
+}
+
+#[test]
+fn owned_definitions_take_precedence_over_static_lookup() {
+    let validator = DirectoryValidator::from_owned_definitions(vec![OwnedSegmentDef::new(
+        "NAD".to_owned(),
+        "Name and address (runtime)".to_owned(),
+        vec![OwnedElementRef::new(
+            1,
+            "3035".to_owned(),
+            Status::Mandatory,
+            1,
+        )],
+    )])
+    .with_directory_id("RUNTIME")
+    .structure_only();
+
+    let valid_segments = from_bytes(b"NAD+BY'")
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let mut valid_report = ValidationReport::default();
+    validator.validate_batch(
+        &valid_segments,
+        &mut valid_report,
+        &ValidationRuleContext::empty(),
+    );
+    assert!(
+        valid_report.is_valid(),
+        "expected runtime definition to win over static lookup"
+    );
+
+    let invalid_segments = from_bytes(b"NAD+'").collect::<Result<Vec<_>, _>>().unwrap();
+    let mut invalid_report = ValidationReport::default();
+    validator.validate_batch(
+        &invalid_segments,
+        &mut invalid_report,
+        &ValidationRuleContext::empty(),
+    );
+    assert!(
+        invalid_report.has_errors(),
+        "expected runtime mandatory check to apply"
+    );
+    assert!(
+        invalid_report
+            .errors()
+            .iter()
+            .any(|issue| issue.message.contains("required element")),
+        "expected missing required element error, got {invalid_report:?}"
+    );
+}
+
+#[test]
+fn owned_element_ref_try_new_rejects_position_zero() {
+    let err = OwnedElementRef::try_new(0, "3035".to_owned(), Status::Mandatory, 1)
+        .expect_err("position 0 must be rejected");
+    assert!(
+        matches!(err, EdifactError::InvalidElementPosition),
+        "expected InvalidElementPosition (E025), got {err:?}"
+    );
+    assert_eq!(err.stable_code(), "E025");
+}
+
+#[test]
+fn from_owned_definitions_accepts_valid_definitions() {
+    // All invariants are enforced at OwnedElementRef/OwnedSegmentDef construction time;
+    // from_owned_definitions is now infallible — this just verifies it doesn't panic.
+    let _validator = DirectoryValidator::from_owned_definitions(vec![OwnedSegmentDef::new(
+        "BGM".to_owned(),
+        "test".to_owned(),
+        vec![OwnedElementRef::new(
+            1,
+            "1001".to_owned(),
+            Status::Mandatory,
+            1,
+        )],
+    )]);
 }

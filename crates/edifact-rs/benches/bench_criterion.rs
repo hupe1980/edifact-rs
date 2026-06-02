@@ -1,8 +1,8 @@
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use edifact_rs::{
     ProfileRulePack, ServiceStringAdvice, Tokenizer, ValidationContext, ValidationIssue,
-    ValidationLayer, ValidationReport, ValidationRuleContext, ValidationSeverity, Validator, from_bytes, from_reader,
-    segments_to_bytes,
+    ValidationLayer, ValidationReport, ValidationRuleContext, ValidationSeverity, Validator,
+    from_bytes, from_reader, segments_to_bytes,
 };
 use std::io::{Cursor, Read};
 
@@ -91,11 +91,13 @@ fn bench_writer(c: &mut Criterion) {
     let mut group = c.benchmark_group("writer");
 
     let segments = sample_segments();
-    let bytes = segments_to_bytes(&segments).expect("serialization of known-good segments must not fail");
+    let bytes =
+        segments_to_bytes(&segments).expect("serialization of known-good segments must not fail");
     group.throughput(Throughput::Bytes(bytes.len() as u64));
     group.bench_function("sample_message", |b| {
         b.iter(|| {
-            let out = segments_to_bytes(black_box(&segments)).expect("serialization of known-good segments must not fail");
+            let out = segments_to_bytes(black_box(&segments))
+                .expect("serialization of known-good segments must not fail");
             black_box(out);
         });
     });
@@ -182,7 +184,7 @@ fn bench_validation(c: &mut Criterion) {
     let composed_profile_context = ValidationContext::builder()
         .with_message_type("ORDERS")
         .with_validator(ValidationLayer::Structure, NoopValidator)
-        .with_profile_pack(pack_a.merge(pack_b))
+        .with_profile_pack(pack_a.merge(pack_b).expect("merge compatible packs"))
         .build();
 
     group.bench_function("validate_structure_orders", |b| {

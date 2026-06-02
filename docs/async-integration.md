@@ -56,10 +56,10 @@ it is safe to call from an async context without `spawn_blocking`.
 reader-based streaming.
 
 ```rust,no_run
-use edifact_rs::{OwnedSegment, message_windows_from_reader};
+use edifact_rs::{OwnedMessageWindow, message_windows_from_reader};
 
 async fn process_large_interchange(path: String)
-    -> Result<Vec<Vec<OwnedSegment>>, Box<dyn std::error::Error>>
+    -> Result<Vec<OwnedMessageWindow>, Box<dyn std::error::Error>>
 {
     let windows = tokio::task::spawn_blocking(move || {
         let f = std::fs::File::open(&path)?;
@@ -83,14 +83,14 @@ the async worker threads free.
 window on the async side as soon as it is parsed, without buffering all windows.
 
 ```rust,no_run
-use edifact_rs::{EdifactError, OwnedSegment, message_windows_from_reader};
+use edifact_rs::{EdifactError, OwnedMessageWindow, message_windows_from_reader};
 use tokio::sync::mpsc;
 
 async fn stream_interchange(
     bytes: Vec<u8>,
-) -> Result<Vec<Vec<OwnedSegment>>, EdifactError> {
+) -> Result<Vec<OwnedMessageWindow>, EdifactError> {
     // Channel with backpressure (capacity = 8 windows in flight)
-    let (tx, mut rx) = mpsc::channel::<Result<Vec<OwnedSegment>, EdifactError>>(8);
+    let (tx, mut rx) = mpsc::channel::<Result<OwnedMessageWindow, EdifactError>>(8);
 
     // Producer: blocking thread
     tokio::task::spawn_blocking(move || {
@@ -103,7 +103,7 @@ async fn stream_interchange(
     });
 
     // Consumer: async side — processes windows as they arrive
-    let mut all: Vec<Vec<OwnedSegment>> = Vec::new();
+    let mut all: Vec<OwnedMessageWindow> = Vec::new();
     while let Some(result) = rx.recv().await {
         all.push(result?);
     }

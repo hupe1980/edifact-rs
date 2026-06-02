@@ -28,13 +28,13 @@
 
 ```toml
 [dependencies]
-edifact-rs = "0.5"
+edifact-rs = "0.6"
 
 # Optional: derive macros (included by default)
-# edifact-rs = { version = "0.5", features = ["derive"] }
+# edifact-rs = { version = "0.6", features = ["derive"] }
 
 # Optional: rich miette diagnostics
-# edifact-rs = { version = "0.5", features = ["diagnostics"] }
+# edifact-rs = { version = "0.6", features = ["diagnostics"] }
 ```
 
 ### Feature flags
@@ -184,10 +184,11 @@ let interchange = std::io::Cursor::new(b"\
     UNH+2+ORDERS:D:96A:UN'BGM+220+PO-002+9'UNT+3+2'\
     UNZ+2+1'".to_vec());
 
-// Iterate raw windows:
+// Iterate raw windows — each window carries type info and the segment slice:
 for window in message_windows_from_reader(interchange.clone()) {
-    let segs = window?;
-    println!("window: {} segments", segs.len());
+    let window = window?;
+    println!("type={:?} segments={}",
+        window.message_type, window.segments.len());
 }
 
 // Or deserialize directly — zero Vec<Segment> allocation per window:
@@ -274,7 +275,7 @@ let context = ValidationContext::builder()
 Enable the `diagnostics` feature for human-readable, span-annotated error output powered by [`miette`](https://docs.rs/miette):
 
 ```toml
-edifact-rs = { version = "0.5", features = ["diagnostics"] }
+edifact-rs = { version = "0.6", features = ["diagnostics"] }
 ```
 
 ```
@@ -333,9 +334,11 @@ edifact-rs workspace
 | `Segment<'a>` | Zero-copy view with `tag: &'a str` and borrowed elements |
 | `OwnedSegment` | Heap-owned copy; `.borrow()` returns O(1) `BorrowedSegment` |
 | `BorrowedSegment<'a>` | Zero-allocation view of `OwnedSegment` |
-| `EdifactError` | Stable error codes (E001–E020) with byte offsets |
+| `EdifactError` | Stable error codes (E001–E026) with byte offsets |
 | `ValidationReport` | Collected issues with lenient/strict modes |
 | `ProfileRulePack` | Composable, filterable business-rule bundles |
+| `MessageWindow<'a>` | Zero-copy window: `message_type`, `association_code`, borrowed `segments` |
+| `OwnedMessageWindow` | Owned window: heap `message_type`, `association_code`, owned `segments` |
 
 ---
 

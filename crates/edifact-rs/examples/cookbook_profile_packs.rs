@@ -65,7 +65,9 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
     // `.merge` combines both packs into one; rules run in declaration order.
     let pack = ProfileRulePack::new("ORDERS-COMBINED")
         .merge(document_pack)
-        .merge(reference_pack);
+        .expect("compatible packs")
+        .merge(reference_pack)
+        .expect("compatible packs");
 
     let report = ValidationContext::builder()
         .with_profile_pack(pack)

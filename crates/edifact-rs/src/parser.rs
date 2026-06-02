@@ -417,9 +417,7 @@ fn try_fast_segment<R: BufRead>(
         Err(e) => FastSegment::Err(e),
         Ok(segs) => match segs.into_iter().next() {
             None => FastSegment::Skip(pos + 1),
-            Some(s) => {
-                FastSegment::Parsed(OwnedSegment::from(s).offset(seg_start), pos + 1)
-            }
+            Some(s) => FastSegment::Parsed(OwnedSegment::from(s).offset(seg_start), pos + 1),
         },
     }
     // `buf` borrow released here — `reader.consume()` is safe to call in the caller.
@@ -439,7 +437,12 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
             // ── Fast path (after UNA has been consumed) ───────────────────
             if self.state == StreamState::Running {
                 let seg_start = self.stream_offset;
-                match try_fast_segment(&mut self.reader, self.ssa, seg_start, self.config.max_segment_bytes) {
+                match try_fast_segment(
+                    &mut self.reader,
+                    self.ssa,
+                    seg_start,
+                    self.config.max_segment_bytes,
+                ) {
                     FastSegment::Parsed(seg, n) => {
                         self.reader.consume(n);
                         self.stream_offset += n;

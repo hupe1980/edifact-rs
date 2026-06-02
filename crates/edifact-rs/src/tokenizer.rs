@@ -83,9 +83,15 @@ impl ServiceStringAdvice {
         ];
         let no_ws = |b: u8| !matches!(b, b' ' | b'\t' | b'\r' | b'\n');
         // All must be non-whitespace and mutually distinct (6 pairwise checks).
-        no_ws(e) && no_ws(c) && no_ws(r) && no_ws(t)
-            && e != c && e != r && e != t
-            && c != r && c != t
+        no_ws(e)
+            && no_ws(c)
+            && no_ws(r)
+            && no_ws(t)
+            && e != c
+            && e != r
+            && e != t
+            && c != r
+            && c != t
             && r != t
     }
 }
@@ -120,7 +126,6 @@ pub enum Token<'a> {
         span: Span,
     },
 }
-
 
 #[derive(Debug)]
 pub(crate) struct RawSegment {
@@ -168,7 +173,11 @@ impl<'a> Tokenizer<'a> {
     /// first segment tag starts at offset 9.  Otherwise parsing starts at 0.
     #[inline]
     fn una_start_pos(input: &[u8]) -> usize {
-        if input.len() >= 9 && &input[..3] == b"UNA" { 9 } else { 0 }
+        if input.len() >= 9 && &input[..3] == b"UNA" {
+            9
+        } else {
+            0
+        }
     }
 
     /// Construct a zero-copy tokenizer over `input` with explicit service-string advice.
@@ -321,7 +330,10 @@ impl<'a> Tokenizer<'a> {
         // Bound the scan to max_segment_bytes + 1 so adversarial input with no delimiters
         // cannot force memchr to scan arbitrarily large buffers before we return an error.
         let input_remaining = &self.input[self.pos..];
-        let scan_limit = self.max_segment_bytes.saturating_add(1).min(input_remaining.len());
+        let scan_limit = self
+            .max_segment_bytes
+            .saturating_add(1)
+            .min(input_remaining.len());
         let remaining = &input_remaining[..scan_limit];
         let end = memchr(self.ssa.element_sep, remaining)
             .or_else(|| memchr(self.ssa.segment_term, remaining))
@@ -331,7 +343,10 @@ impl<'a> Tokenizer<'a> {
             // First byte is already a delimiter — tag is zero-length, which is invalid.
             let byte = self.input[self.pos];
             self.pos += 1;
-            return Err(EdifactError::InvalidDelimiter { byte, offset: start });
+            return Err(EdifactError::InvalidDelimiter {
+                byte,
+                offset: start,
+            });
         }
 
         // Enforce the per-segment byte-length guard in read_tag as well.
@@ -539,7 +554,11 @@ mod tests {
         assert!(segments.iter().any(|s| s.tag == "BGM"));
         // The release sequence '?+' inside 'test?+value' should survive in the element.
         let bgm = segments.iter().find(|s| s.tag == "BGM").unwrap();
-        let raw_val = bgm.elements.get(1).and_then(|e| e.components.first()).map(|s| s.as_str());
+        let raw_val = bgm
+            .elements
+            .get(1)
+            .and_then(|e| e.components.first())
+            .map(|s| s.as_str());
         assert_eq!(raw_val, Some("test+value"));
     }
 }

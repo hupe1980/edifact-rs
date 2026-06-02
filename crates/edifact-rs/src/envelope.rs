@@ -74,15 +74,19 @@ pub struct MessageIdentifier<'a> {
 /// segment is absent, or [`EdifactError::MissingRequiredComponent`] if
 /// component 0 of that element (the message type) is absent.
 pub fn parse_unh<'a>(unh: &'a Segment<'a>) -> Result<MessageIdentifier<'a>, EdifactError> {
-    let elem = unh.get_element(1).ok_or_else(|| EdifactError::MissingRequiredElement {
-        tag: "UNH".to_owned(),
-        element_index: 1,
-    })?;
-    let message_type = elem.get_component(0).ok_or_else(|| EdifactError::MissingRequiredComponent {
-        tag: "UNH".to_owned(),
-        element_index: 1,
-        component_index: 0,
-    })?;
+    let elem = unh
+        .get_element(1)
+        .ok_or_else(|| EdifactError::MissingRequiredElement {
+            tag: "UNH".to_owned(),
+            element_index: 1,
+        })?;
+    let message_type =
+        elem.get_component(0)
+            .ok_or_else(|| EdifactError::MissingRequiredComponent {
+                tag: "UNH".to_owned(),
+                element_index: 1,
+                component_index: 0,
+            })?;
     Ok(MessageIdentifier {
         message_type,
         version: elem.get_component(1).unwrap_or(""),
@@ -116,8 +120,8 @@ pub fn validate_envelope(
 ) -> Result<(InterchangeEnvelope, Vec<MessageEnvelope>), EdifactError> {
     let mut interchange_env = extract_interchange(segments)?;
     let message_envs = extract_messages(segments)?;
-    interchange_env.actual_message_count = u32::try_from(message_envs.len())
-        .map_err(|_| EdifactError::InterchangeTooLarge {
+    interchange_env.actual_message_count =
+        u32::try_from(message_envs.len()).map_err(|_| EdifactError::InterchangeTooLarge {
             count: message_envs.len() as u64,
         })?;
 
@@ -190,11 +194,12 @@ fn extract_interchange(segments: &[Segment<'_>]) -> Result<InterchangeEnvelope, 
         });
     }
 
-    let declared_message_count: u32 = required_component(unz, 0, 0)?
-        .parse()
-        .map_err(|_| EdifactError::InvalidText {
-            offset: unz.span.start,
-        })?;
+    let declared_message_count: u32 =
+        required_component(unz, 0, 0)?
+            .parse()
+            .map_err(|_| EdifactError::InvalidText {
+                offset: unz.span.start,
+            })?;
 
     Ok(InterchangeEnvelope {
         syntax_identifier,
@@ -258,10 +263,11 @@ fn extract_messages(segments: &[Segment<'_>]) -> Result<Vec<MessageEnvelope>, Ed
                     .unwrap_or("")
                     .to_owned();
 
-                let declared_segment_count: u32 = required_component(seg, 0, 0)?
-                    .parse()
-                    .map_err(|_| EdifactError::InvalidText {
-                        offset: seg.span.start,
+                let declared_segment_count: u32 =
+                    required_component(seg, 0, 0)?.parse().map_err(|_| {
+                        EdifactError::InvalidText {
+                            offset: seg.span.start,
+                        }
                     })?;
                 let unt_ref = required_component(seg, 1, 0)?;
                 if unt_ref != message_ref {
@@ -274,11 +280,12 @@ fn extract_messages(segments: &[Segment<'_>]) -> Result<Vec<MessageEnvelope>, Ed
                 }
 
                 // actual count = segments from UNH (inclusive) to UNT (inclusive)
-                let actual_segment_count = u32::try_from(i - msg_start_idx + 1)
-                    .map_err(|_| EdifactError::InterchangeTooLarge {
+                let actual_segment_count = u32::try_from(i - msg_start_idx + 1).map_err(|_| {
+                    EdifactError::InterchangeTooLarge {
                         // SAFETY: usize ≤ u64::MAX on all supported targets
                         count: u64::try_from(i - msg_start_idx + 1).unwrap_or(u64::MAX),
-                    })?;
+                    }
+                })?;
 
                 in_message = false;
                 messages.push(MessageEnvelope {
@@ -416,14 +423,19 @@ mod tests {
         let input =
             b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A:UN:EAN010'BGM+220+PO-1+9'UNZ+1+1'";
         let result = parse_and_validate(input);
-        assert!(matches!(result, Err(EdifactError::MissingSegment { ref tag, .. }) if tag == "UNT"));
+        assert!(
+            matches!(result, Err(EdifactError::MissingSegment { ref tag, .. }) if tag == "UNT")
+        );
     }
 
     #[test]
     fn stray_segment_outside_message_returns_err() {
         let input = b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A:UN:EAN010'BGM+220+PO-1+9'UNT+3+1'BGM+999+PO-2+9'UNZ+1+1'";
         let result = parse_and_validate(input);
-        assert!(matches!(result, Err(EdifactError::InvalidSegmentForMessage { .. })));
+        assert!(matches!(
+            result,
+            Err(EdifactError::InvalidSegmentForMessage { .. })
+        ));
     }
 
     #[test]
@@ -463,7 +475,8 @@ mod tests {
 
     #[test]
     fn missing_unh_message_type_components_return_err() {
-        let input = b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A'BGM+220+PO-1+9'UNT+3+1'UNZ+1+1'";
+        let input =
+            b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A'BGM+220+PO-1+9'UNT+3+1'UNZ+1+1'";
         let result = parse_and_validate(input);
         // UNH element 1 = "ORDERS:D:11A" — component 3 (controlling agency) is absent.
         assert!(
@@ -474,9 +487,12 @@ mod tests {
 
     #[test]
     fn nested_unz_inside_message_returns_err() {
-        let input = b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A:UN:EAN010'UNZ+1+1'UNT+2+1'UNZ+1+1'";
+        let input =
+            b"UNB+UNOA:3+S+R+200101:0900+1'UNH+1+ORDERS:D:11A:UN:EAN010'UNZ+1+1'UNT+2+1'UNZ+1+1'";
         let result = parse_and_validate(input);
-        assert!(matches!(result, Err(EdifactError::InvalidSegmentForMessage { tag, .. }) if tag == "UNZ"));
+        assert!(
+            matches!(result, Err(EdifactError::InvalidSegmentForMessage { tag, .. }) if tag == "UNZ")
+        );
     }
 
     // ── UNG/UNE functional-group regression guard ────────────────────────────

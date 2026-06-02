@@ -60,11 +60,13 @@ fn fuzz_parse_write_parse_invariant_small_message() {
                 .unwrap();
 
             let encoded = segments_to_bytes(&segs).unwrap();
-            let reparsed = from_bytes(&encoded)
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
+            let reparsed = from_bytes(&encoded).collect::<Result<Vec<_>, _>>().unwrap();
 
-            assert_eq!(reparsed.len(), segs.len(), "segment count must survive round-trip");
+            assert_eq!(
+                reparsed.len(),
+                segs.len(),
+                "segment count must survive round-trip"
+            );
             for (orig, rt) in segs.iter().zip(reparsed.iter()) {
                 assert_eq!(orig.tag, rt.tag, "tag must survive round-trip");
                 assert_eq!(
@@ -81,8 +83,7 @@ fn fuzz_parse_write_parse_invariant_small_message() {
                         orig.tag,
                     );
                     assert_eq!(
-                        oe.components,
-                        re.components,
+                        oe.components, re.components,
                         "component values must survive round-trip for tag {} element {ei}",
                         orig.tag,
                     );
@@ -93,12 +94,20 @@ fn fuzz_parse_write_parse_invariant_small_message() {
 
 #[test]
 fn fuzz_validation_layers_no_panic() {
-    use edifact_rs::{Segment, ValidationContext, ValidationLayer, ValidationReport, ValidationRuleContext, Validator, validate_each};
+    use edifact_rs::{
+        Segment, ValidationContext, ValidationLayer, ValidationReport, ValidationRuleContext,
+        Validator, validate_each,
+    };
 
     struct NoopValidator;
 
     impl Validator for NoopValidator {
-        fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
+        fn validate_batch(
+            &self,
+            segments: &[Segment<'_>],
+            report: &mut ValidationReport,
+            _context: &ValidationRuleContext<'_>,
+        ) {
             validate_each(segments, report, |_segment| Ok(()));
         }
     }
@@ -125,12 +134,11 @@ fn fuzz_validation_layers_no_panic() {
 fn fuzz_qualifier_matches_pattern_no_panic() {
     use edifact_rs::qualifier_matches_pattern;
     // For any two arbitrary strings the function must never panic.
-    check!()
-        .with_type::<(String, String)>()
-        .cloned()
-        .for_each(|(value, pattern): (String, String)| {
+    check!().with_type::<(String, String)>().cloned().for_each(
+        |(value, pattern): (String, String)| {
             let _ = qualifier_matches_pattern(&value, &pattern);
-        });
+        },
+    );
 }
 
 #[test]

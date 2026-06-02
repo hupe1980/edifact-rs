@@ -12,8 +12,8 @@ synchronous (`std::io::Read`) and can be bridged to async runtimes — see
 | API | Source | Output | Memory model |
 |---|---|---|---|
 | `from_reader_iter(reader)` | `impl Read` | `Iterator<Item = Result<OwnedSegment, _>>` | O(1) — one segment at a time |
-| `message_windows_bytes(input)` | `&[u8]` | `Iterator<Item = Result<Vec<OwnedSegment>, _>>` | O(window) — one message window |
-| `message_windows_from_reader(reader)` | `impl Read` | `Iterator<Item = Result<Vec<OwnedSegment>, _>>` | O(window) — lazy I/O |
+| `message_windows_bytes(input)` | `&[u8]` | `Iterator<Item = Result<MessageWindow<'_>, _>>` | O(window) — one message window |
+| `message_windows_from_reader(reader)` | `impl Read` | `Iterator<Item = Result<OwnedMessageWindow, _>>` | O(window) — lazy I/O |
 | `deserialize_first_streaming(input)` | `&[u8]` | `Result<T, _>` | Stops at first match |
 | `deserialize_all_streaming(input)` | `&[u8]` | `Result<Vec<T>, _>` | Collects matching segments |
 | `deserialize_first_from_reader(reader)` | `impl Read` | `Result<T, _>` | Stops at first match |
@@ -66,9 +66,12 @@ let interchange = b"\
     UNZ+2+1'";
 
 for result in message_windows_bytes(interchange) {
-    let window: Vec<edifact_rs::OwnedSegment> = result?;
-    // window = [UNH, BGM, UNT]
-    println!("{} segments in this message", window.len());
+    let window = result?;
+    // window.message_type  — Option<Cow<'_, str>> from UNH element 1, component 0
+    // window.association_code — Option<Cow<'_, str>> from UNH DE 0057
+    // call .as_deref() when you want an Option<&str>
+    // window.segments     — [UNH, BGM, UNT]
+    println!("{:?}: {} segments", window.message_type, window.segments.len());
 }
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
@@ -83,8 +86,8 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
     let f = File::open("multi_message.edi")?;
     for result in message_windows_from_reader(f) {
         let window = result?;
-        let msg_ref = window[0].element_str(0).unwrap_or("?");
-        println!("message reference: {msg_ref}");
+        // window.message_type is extracted from the UNH segment automatically
+        println!("message type: {:?}", window.message_type);
     }
     Ok(())
 }
@@ -193,7 +196,7 @@ macro generates an override of `edifact_deserialize_owned` that accesses
 intermediate `Vec<Segment<'_>>` is allocated**.
 
 This makes the reader path allocate at most:
-- One `Vec<OwnedSegment>` per message window (released after deserialization)
+- One `OwnedMessageWindow` per message window (released after deserialization)
 - The deserialized `T` value itself
 
 ---
@@ -233,8 +236,8 @@ let ctx = ValidationContext::builder()
 
 for result in message_windows_from_reader(input) {
     let window = result?;
-    // Borrow the owned window for validation
-    let borrowed: Vec<_> = window.iter().map(|s| s.as_borrowed()).collect();
+    // validate using borrowed views of the OwnedMessageWindow's segments
+    let borrowed: Vec<_> = window.segments.iter().map(|s| s.as_borrowed()).collect();
     let report = ctx.validate_lenient(&borrowed);
     if !report.is_valid() {
         for e in &report.errors {

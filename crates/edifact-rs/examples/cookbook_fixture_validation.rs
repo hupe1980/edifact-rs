@@ -1,5 +1,6 @@
 use edifact_rs::{
-    ValidationContext, ValidationLayer, ValidationRuleContext, Validator, ValidationReport, Segment, validate_each,
+    Segment, ValidationContext, ValidationLayer, ValidationReport, ValidationRuleContext,
+    Validator, validate_each,
 };
 
 const D11A_CONFORMING: &str = include_str!("../tests/fixtures/d11a_conforming.edi");
@@ -11,7 +12,12 @@ const D11A_MALFORMED: &str = include_str!("../tests/fixtures/d11a_malformed.edi"
 struct DemoStructuralValidator;
 
 impl Validator for DemoStructuralValidator {
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
+    fn validate_batch(
+        &self,
+        segments: &[Segment<'_>],
+        report: &mut ValidationReport,
+        _context: &ValidationRuleContext<'_>,
+    ) {
         validate_each(segments, report, |_segment| {
             // Implement custom structural validation logic here
             // For example, check required segments, segment sequences, etc.
@@ -25,7 +31,12 @@ impl Validator for DemoStructuralValidator {
 struct DemoCodeListValidator;
 
 impl Validator for DemoCodeListValidator {
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
+    fn validate_batch(
+        &self,
+        segments: &[Segment<'_>],
+        report: &mut ValidationReport,
+        _context: &ValidationRuleContext<'_>,
+    ) {
         validate_each(segments, report, |_segment| {
             // Implement custom code-list validation logic here
             // For example, check codes against allowed value sets

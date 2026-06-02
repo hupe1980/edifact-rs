@@ -72,7 +72,11 @@ pub trait ProfileRule: Send + Sync {
     /// Evaluate the rule against the given segments.
     ///
     /// Return `Some(issue)` if the rule is violated, or `None` if the segments pass.
-    fn evaluate(&self, segments: &[Segment<'_>], context: &ValidationRuleContext<'_>) -> Option<ValidationIssue>;
+    fn evaluate(
+        &self,
+        segments: &[Segment<'_>],
+        context: &ValidationRuleContext<'_>,
+    ) -> Option<ValidationIssue>;
 }
 
 /// Wraps a context-aware closure as a [`ProfileRule`].
@@ -84,7 +88,11 @@ where
         + Send
         + Sync,
 {
-    fn evaluate(&self, segments: &[Segment<'_>], context: &ValidationRuleContext<'_>) -> Option<ValidationIssue> {
+    fn evaluate(
+        &self,
+        segments: &[Segment<'_>],
+        context: &ValidationRuleContext<'_>,
+    ) -> Option<ValidationIssue> {
         (self.0)(segments, context)
     }
 }
@@ -96,8 +104,34 @@ impl<F> ProfileRule for StatelessClosureProfileRule<F>
 where
     F: for<'a> Fn(&[Segment<'a>]) -> Option<ValidationIssue> + Send + Sync,
 {
-    fn evaluate(&self, segments: &[Segment<'_>], _context: &ValidationRuleContext<'_>) -> Option<ValidationIssue> {
+    fn evaluate(
+        &self,
+        segments: &[Segment<'_>],
+        _context: &ValidationRuleContext<'_>,
+    ) -> Option<ValidationIssue> {
         (self.0)(segments)
+    }
+}
+
+/// A rule entry inside a [`ProfileRulePack`], optionally carrying a stable identifier.
+///
+/// The `id` is used by [`ProfileRulePack::merge_with_override`] to de-duplicate rules:
+/// when two packs contain a rule with the same id, the rule from the *other* (override)
+/// pack replaces the one in `self`.
+struct NamedRule {
+    /// Stable identifier for this rule, e.g. `"AHB-11001-BGM-M"`.
+    ///
+    /// `None` for anonymous rules that can never be overridden by id.
+    id: Option<Arc<str>>,
+    rule: Arc<dyn ProfileRule + Send + Sync>,
+}
+
+impl Clone for NamedRule {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            rule: Arc::clone(&self.rule),
+        }
     }
 }
 
@@ -105,7 +139,11 @@ where
 pub struct ProfileRulePack {
     name: String,
     message_types: Vec<String>,
-    rules: Vec<Arc<dyn ProfileRule + Send + Sync>>,
+    /// Association-assigned code (DE 0057) this pack is bound to, e.g. `"5.5.3a"`.
+    ///
+    /// `None` means the pack applies universally regardless of association code.
+    release: Option<String>,
+    rules: Vec<NamedRule>,
     bail_on_first_error: bool,
 }
 
@@ -115,6 +153,7 @@ impl ProfileRulePack {
         Self {
             name: name.into(),
             message_types: Vec::new(),
+            release: None,
             rules: Vec::new(),
             bail_on_first_error: false,
         }
@@ -133,6 +172,13 @@ impl ProfileRulePack {
     /// Return the number of rules in this pack.
     pub fn rule_count(&self) -> usize {
         self.rules.len()
+    }
+
+    /// Return the association-assigned release code this pack is bound to, if any.
+    ///
+    /// `None` means the pack applies to messages of any association code.
+    pub fn release(&self) -> Option<&str> {
+        self.release.as_deref()
     }
 
     /// Restrict this pack to one or more EDIFACT message types from the `UNH` segment.
@@ -155,6 +201,25 @@ impl ProfileRulePack {
         if !self.message_types.contains(&message_type) {
             self.message_types.push(message_type);
         }
+        self
+    }
+
+    /// Bind this pack to a specific association-assigned code (DE 0057).
+    ///
+    /// When a release is set, rules are only evaluated against messages whose
+    /// `UNH` element 1, component 4 matches `release` exactly (e.g. `"5.5.3a"`).
+    /// Packs with no bound release are universal — they run for every message
+    /// regardless of its association code.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let pack = ProfileRulePack::new("UTILMD-5.5.3a")
+    ///     .for_message_type("UTILMD")
+    ///     .for_release("5.5.3a");
+    /// ```
+    pub fn for_release(mut self, release: impl Into<String>) -> Self {
+        self.release = Some(release.into());
         self
     }
 
@@ -184,7 +249,29 @@ impl ProfileRulePack {
             + Sync
             + 'static,
     {
-        self.rules.push(Arc::new(ClosureProfileRule(rule)));
+        self.rules.push(NamedRule {
+            id: None,
+            rule: Arc::new(ClosureProfileRule(rule)),
+        });
+        self
+    }
+
+    /// Add a context-aware rule closure with a stable identifier.
+    ///
+    /// The `id` is used by [`merge_with_override`][Self::merge_with_override] to de-duplicate
+    /// rules across packs: if `other` has a rule with the same `id`, it replaces the
+    /// corresponding rule in `self`.
+    pub fn with_named_rule_fn<F>(mut self, id: impl Into<Arc<str>>, rule: F) -> Self
+    where
+        F: for<'a> Fn(&[Segment<'a>], &ValidationRuleContext<'_>) -> Option<ValidationIssue>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.rules.push(NamedRule {
+            id: Some(id.into()),
+            rule: Arc::new(ClosureProfileRule(rule)),
+        });
         self
     }
 
@@ -196,20 +283,58 @@ impl ProfileRulePack {
     where
         F: for<'a> Fn(&[Segment<'a>]) -> Option<ValidationIssue> + Send + Sync + 'static,
     {
-        self.rules.push(Arc::new(StatelessClosureProfileRule(rule)));
+        self.rules.push(NamedRule {
+            id: None,
+            rule: Arc::new(StatelessClosureProfileRule(rule)),
+        });
+        self
+    }
+
+    /// Add a context-free rule closure with a stable identifier.
+    ///
+    /// See [`with_named_rule_fn`][Self::with_named_rule_fn] for override semantics.
+    pub fn with_named_stateless_rule_fn<F>(mut self, id: impl Into<Arc<str>>, rule: F) -> Self
+    where
+        F: for<'a> Fn(&[Segment<'a>]) -> Option<ValidationIssue> + Send + Sync + 'static,
+    {
+        self.rules.push(NamedRule {
+            id: Some(id.into()),
+            rule: Arc::new(StatelessClosureProfileRule(rule)),
+        });
         self
     }
 
     /// Add a rule that implements [`ProfileRule`].
     pub fn with_rule(mut self, rule: impl ProfileRule + 'static) -> Self {
-        self.rules.push(Arc::new(rule));
+        self.rules.push(NamedRule {
+            id: None,
+            rule: Arc::new(rule),
+        });
+        self
+    }
+
+    /// Add a named rule that implements [`ProfileRule`].
+    ///
+    /// See [`with_named_rule_fn`][Self::with_named_rule_fn] for override semantics.
+    pub fn with_named_rule(
+        mut self,
+        id: impl Into<Arc<str>>,
+        rule: impl ProfileRule + 'static,
+    ) -> Self {
+        self.rules.push(NamedRule {
+            id: Some(id.into()),
+            rule: Arc::new(rule),
+        });
         self
     }
 
     /// Prepend all rules from `base` to this pack.
     ///
     /// Rules from `base` are shared (via [`Arc`] cloning) and run first.
-    /// Message-type restrictions from `base` are also merged.
+    /// Message-type restrictions from `base` are also merged.  The resulting
+    /// release scope must be compatible with both packs: if one pack is scoped
+    /// to a release and the other is not, the scope is preserved; if both are
+    /// scoped, they must match.
     ///
     /// # Example
     ///
@@ -221,7 +346,7 @@ impl ProfileRulePack {
     ///     .extend_from(&base)
     ///     .with_stateless_rule_fn(/* 11001-specific rules */);
     /// ```
-    pub fn extend_from(mut self, base: &ProfileRulePack) -> Self {
+    pub fn extend_from(mut self, base: &ProfileRulePack) -> Result<Self, EdifactError> {
         let mut combined = base.rules.clone();
         combined.append(&mut self.rules);
         self.rules = combined;
@@ -230,38 +355,149 @@ impl ProfileRulePack {
                 self.message_types.push(mt.clone());
             }
         }
-        self
+        self.release = merge_release_scopes(self.release.take(), base.release.clone())?;
+        Ok(self)
     }
 
     /// Merge two packs into one combined pack.
     ///
-    /// Rules from `self` run before rules from `other`.
-    pub fn merge(mut self, mut other: Self) -> Self {
+    /// Rules from `self` run before rules from `other`.  If both packs contain
+    /// named rules with the same id, **both run** — use
+    /// [`merge_with_override`][Self::merge_with_override] to de-duplicate by id instead.
+    /// Release scoping follows the same compatibility rule as
+    /// [`extend_from`][Self::extend_from].
+    pub fn merge(mut self, mut other: Self) -> Result<Self, EdifactError> {
         for message_type in other.message_types.drain(..) {
             if !self.message_types.contains(&message_type) {
                 self.message_types.push(message_type);
             }
         }
+        self.release = merge_release_scopes(self.release.take(), other.release.take())?;
         self.rules.append(&mut other.rules);
-        self
+        Ok(self)
+    }
+
+    /// Merge `other` into `self`, with `other` taking precedence for any rule
+    /// whose id already exists in `self`.
+    ///
+    /// - Rules in `other` that have a stable id matching a rule in `self` **replace**
+    ///   the rule at the same position in `self`.
+    /// - Rules in `other` with no id, or with an id not present in `self`, are
+    ///   **appended** to `self`.
+    /// - Rules present only in `self` (no matching override in `other`) are
+    ///   **retained unchanged**.
+    ///
+    /// Message-type restrictions from `other` are merged into `self`.
+    /// Release scoping follows the same compatibility rule as
+    /// [`extend_from`][Self::extend_from].
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let base = ProfileRulePack::new("UTILMD-5.4")
+    ///     .with_named_stateless_rule_fn("AHB-11001-BGM-M", |segs| { /* old rule */ None });
+    ///
+    /// let delta = ProfileRulePack::new("UTILMD-5.5-delta")
+    ///     .with_named_stateless_rule_fn("AHB-11001-BGM-M", |segs| { /* updated rule */ None });
+    ///
+    /// // `result` runs the updated BGM-M rule only once:
+    /// let result = base.merge_with_override(delta);
+    /// assert_eq!(result.rule_count(), 1);
+    /// ```
+    pub fn merge_with_override(mut self, mut other: Self) -> Result<Self, EdifactError> {
+        // Build an id→index map for self.rules to avoid O(n*m) behavior.
+        let mut id_to_index: std::collections::HashMap<Arc<str>, usize> = Default::default();
+        for (idx, rule) in self.rules.iter().enumerate() {
+            if let Some(id) = &rule.id {
+                id_to_index.insert(id.clone(), idx);
+            }
+        }
+
+        // Process overrides in a single pass: collect replacements and appends.
+        let mut replacements: Vec<(usize, NamedRule)> = Vec::new();
+        let mut to_append = Vec::new();
+
+        for other_rule in other.rules.drain(..) {
+            if let Some(id) = &other_rule.id {
+                if let Some(&idx) = id_to_index.get(id) {
+                    replacements.push((idx, other_rule));
+                } else {
+                    to_append.push(other_rule);
+                }
+            } else {
+                to_append.push(other_rule);
+            }
+        }
+
+        // Apply replacements in-place.
+        for (idx, rule) in replacements {
+            if idx < self.rules.len() {
+                self.rules[idx] = rule;
+            }
+        }
+
+        // Append new rules.
+        self.rules.append(&mut to_append);
+
+        for message_type in other.message_types.drain(..) {
+            if !self.message_types.contains(&message_type) {
+                self.message_types.push(message_type);
+            }
+        }
+        self.release = merge_release_scopes(self.release.take(), other.release.take())?;
+        Ok(self)
+    }
+}
+
+fn merge_release_scopes(
+    current: Option<String>,
+    incoming: Option<String>,
+) -> Result<Option<String>, EdifactError> {
+    match (current, incoming) {
+        (Some(current), Some(incoming)) => {
+            // Both packs specify a release; they must match to compose safely.
+            if current != incoming {
+                return Err(EdifactError::IncompatibleReleaseScopes { current, incoming });
+            }
+            Ok(Some(current))
+        }
+        (current @ Some(_), None) => Ok(current),
+        (None, incoming) => Ok(incoming),
     }
 }
 
 impl Validator for ProfileRulePack {
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, context: &ValidationRuleContext<'_>) {
-        let message_type = segments
-            .iter()
-            .find(|segment| segment.tag == "UNH")
-            .and_then(|segment| segment.get_element(1))
-            .and_then(|element| element.get_component(0));
+    fn validate_batch(
+        &self,
+        segments: &[Segment<'_>],
+        report: &mut ValidationReport,
+        context: &ValidationRuleContext<'_>,
+    ) {
+        let unh = segments.iter().find(|segment| segment.tag == "UNH");
+
+        // Message-type filter: skip if no registered type matches.
+        let message_type = unh
+            .and_then(|s| s.get_element(1))
+            .and_then(|e| e.get_component(0));
         if !self.message_types.is_empty()
             && !message_type.is_some_and(|mt| self.message_types.iter().any(|t| t == mt))
         {
             return;
         }
 
-        for rule in &self.rules {
-            if let Some(issue) = rule.evaluate(segments, context) {
+        // Release filter: skip if pack is bound to a specific association code that
+        // does not match the message's UNH DE 0057 (element 1, component 4).
+        if let Some(bound_release) = &self.release {
+            let msg_association = unh
+                .and_then(|s| s.get_element(1))
+                .and_then(|e| e.get_component(4));
+            if msg_association != Some(bound_release.as_str()) {
+                return;
+            }
+        }
+
+        for named in &self.rules {
+            if let Some(issue) = named.rule.evaluate(segments, context) {
                 let was_error = match issue.severity {
                     ValidationSeverity::Critical | ValidationSeverity::Error => {
                         report.add_error(issue);
@@ -289,6 +525,7 @@ impl std::fmt::Debug for ProfileRulePack {
         f.debug_struct("ProfileRulePack")
             .field("name", &self.name)
             .field("message_types", &self.message_types)
+            .field("release", &self.release)
             .field("rule_count", &self.rules.len())
             .field("bail_on_first_error", &self.bail_on_first_error)
             .finish()
@@ -553,7 +790,12 @@ pub trait Validator: Send + Sync {
     /// Validate a full segment set and append issues to `report`.
     ///
     /// Implementations that do not need the context may ignore the `context` parameter.
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, context: &ValidationRuleContext<'_>);
+    fn validate_batch(
+        &self,
+        segments: &[Segment<'_>],
+        report: &mut ValidationReport,
+        context: &ValidationRuleContext<'_>,
+    );
 
     /// Configure message-type metadata for validators that support explicit scoping.
     fn set_message_type(&mut self, _message_type: Option<&str>) {}
@@ -737,7 +979,12 @@ mod tests {
     struct WarnBgm;
 
     impl Validator for RejectBgm {
-        fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
+        fn validate_batch(
+            &self,
+            segments: &[Segment<'_>],
+            report: &mut ValidationReport,
+            _context: &ValidationRuleContext<'_>,
+        ) {
             validate_each(segments, report, |segment| {
                 if segment.tag == "BGM" {
                     return Err(EdifactError::InvalidSegmentForMessage {
@@ -752,7 +999,12 @@ mod tests {
     }
 
     impl Validator for WarnBgm {
-        fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
+        fn validate_batch(
+            &self,
+            segments: &[Segment<'_>],
+            report: &mut ValidationReport,
+            _context: &ValidationRuleContext<'_>,
+        ) {
             validate_each(segments, report, |segment| {
                 if segment.tag == "BGM" {
                     return Err(EdifactError::InvalidCodeValue {
@@ -855,10 +1107,7 @@ mod tests {
             },
         );
 
-        let issue = report
-            .errors()
-            .first()
-            .expect("expected one issue");
+        let issue = report.errors().first().expect("expected one issue");
         assert_eq!(issue.error_code, Some("E021"));
         assert_eq!(issue.segment_tag.as_deref(), Some("BGM"));
         assert_eq!(issue.element_index, Some(2));

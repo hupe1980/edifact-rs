@@ -17,15 +17,20 @@
 
 fn run_validation() -> Result<(), edifact_rs::EdifactError> {
     use edifact_rs::{
-        ValidationContext, ValidationLayer, ValidationRuleContext, Validator, ValidationReport, Segment, validate_each,
-        from_bytes,
+        Segment, ValidationContext, ValidationLayer, ValidationReport, ValidationRuleContext,
+        Validator, from_bytes, validate_each,
     };
 
     /// Simple demo validator
     struct DemoValidator;
 
     impl Validator for DemoValidator {
-        fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
+        fn validate_batch(
+            &self,
+            segments: &[Segment<'_>],
+            report: &mut ValidationReport,
+            _context: &ValidationRuleContext<'_>,
+        ) {
             validate_each(segments, report, |segment| {
                 // Example validation: check for invalid code value
                 if segment.tag == "BGM" {

@@ -312,7 +312,10 @@ mod tests {
         // f32::MAX too
         let mut emitter2 = VecEmitter::default();
         f32::MAX.edifact_serialize(&mut emitter2).unwrap();
-        assert!(matches!(&emitter2.events[0], OwnedEdifactEvent::Element { .. }));
+        assert!(matches!(
+            &emitter2.events[0],
+            OwnedEdifactEvent::Element { .. }
+        ));
     }
 
     #[test]
