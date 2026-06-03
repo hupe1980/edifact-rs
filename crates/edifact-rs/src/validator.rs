@@ -412,10 +412,7 @@ impl ProfileRulePack {
     ///     .extend_from(&base)?
     ///     .with_stateless_rule_fn(/* 11001-specific rules */);
     /// ```
-    pub fn extend_from(
-        mut self,
-        base: &ProfileRulePack,
-    ) -> Result<Self, crate::error::EdifactError> {
+    pub fn extend_from(mut self, base: &ProfileRulePack) -> Result<Self, EdifactError> {
         let mut combined = base.rules.clone();
         combined.append(&mut self.rules);
         self.rules = combined;
@@ -438,7 +435,7 @@ impl ProfileRulePack {
     /// different release scopes.  Use
     /// [`merge_unchecked`][Self::merge_unchecked] in code-generated or
     /// build-verified contexts where compatibility is guaranteed.
-    pub fn merge(mut self, mut other: Self) -> Result<Self, crate::error::EdifactError> {
+    pub fn merge(mut self, mut other: Self) -> Result<Self, EdifactError> {
         self.message_types.append(&mut other.message_types);
         self.release = merge_release_scopes(self.release.take(), other.release.take())?;
         self.rules.append(&mut other.rules);
@@ -495,10 +492,7 @@ impl ProfileRulePack {
     /// let result = base.merge_with_override(delta)?;
     /// assert_eq!(result.rule_count(), 1);
     /// ```
-    pub fn merge_with_override(
-        mut self,
-        mut other: Self,
-    ) -> Result<Self, crate::error::EdifactError> {
+    pub fn merge_with_override(mut self, mut other: Self) -> Result<Self, EdifactError> {
         // Build an id→index map for self.rules to avoid O(n*m) behavior.
         let mut id_to_index: std::collections::HashMap<Arc<str>, usize> = Default::default();
         for (idx, rule) in self.rules.iter().enumerate() {
@@ -542,14 +536,12 @@ impl ProfileRulePack {
 fn merge_release_scopes(
     current: Option<String>,
     incoming: Option<String>,
-) -> Result<Option<String>, crate::error::EdifactError> {
+) -> Result<Option<String>, EdifactError> {
     match (current, incoming) {
-        (Some(x), Some(y)) if x != y => {
-            Err(crate::error::EdifactError::IncompatibleReleaseScopes {
-                current: x,
-                incoming: y,
-            })
-        }
+        (Some(x), Some(y)) if x != y => Err(EdifactError::IncompatibleReleaseScopes {
+            current: x,
+            incoming: y,
+        }),
         (Some(x), Some(_)) => Ok(Some(x)),
         (Some(x), None) => Ok(Some(x)),
         (None, incoming) => Ok(incoming),

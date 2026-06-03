@@ -171,8 +171,11 @@ pub fn validate_envelope(
 ///
 /// Because checks build on each other (e.g., count checks require a valid UNB
 /// and UNZ), some secondary errors may be silenced when a prerequisite check
-/// already failed.  All *independent* checks (UNG presence, control-reference
-/// match, message/segment counts) are always run.
+/// already failed.  Most *independent* checks (control-reference match,
+/// message/segment counts) are run even after the first failure.  However,
+/// if a functional group segment (`UNG`/`UNE`) is detected, the function
+/// returns immediately with only that error — the remaining structure is
+/// ambiguous and running further checks would produce misleading results.
 pub fn validate_envelope_lenient(segments: &[Segment<'_>]) -> Vec<EdifactError> {
     let mut errors: Vec<EdifactError> = Vec::new();
 
