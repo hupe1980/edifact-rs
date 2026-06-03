@@ -223,7 +223,7 @@ let segments: Vec<_> =
 
 let document_pack = ProfileRulePack::new("ORDERS-DOC")
     .for_message_type("ORDERS")
-    .with_rule_fn(|segments, issues| {
+    .with_stateless_rule_fn(|segments, issues| {
         if let Some(bgm) = segments.iter().find(|s| s.tag == "BGM") {
             if let Some(code) = bgm.get_element(0).and_then(|e| e.get_component(0)) {
                 if code == "220" {

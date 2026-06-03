@@ -159,7 +159,7 @@ pub(crate) struct RawSegment {
 /// limit, which is sufficient for all well-formed EDIFACT interchanges and guards
 /// against adversarially crafted inputs that omit segment terminators.
 /// Use [`Tokenizer::with_limit`] to raise or lower this threshold, or
-/// [`Tokenizer::unlimited`] to remove it entirely (untrusted input only).
+/// [`Tokenizer::unlimited`] to remove it entirely (trusted / pre-validated input only).
 pub struct Tokenizer<'a> {
     input: &'a [u8],
     pos: usize,

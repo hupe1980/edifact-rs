@@ -602,7 +602,14 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
             self.bytes_consumed = self.stream_offset;
 
             raw.bytes.push(self.ssa.segment_term);
-            let tok = Tokenizer::new(raw.bytes.as_slice(), self.ssa);
+            // Use `with_limit` so the configured max_segment_bytes is honoured on the
+            // slow path as well; `Tokenizer::new` would impose a hard 64 KiB cap that
+            // could reject segments the caller explicitly permitted via ReaderConfig.
+            let tok = Tokenizer::with_limit(
+                raw.bytes.as_slice(),
+                self.ssa,
+                self.config.max_segment_bytes,
+            );
             let mut parser_iter = Parser::new(tok);
             match parser_iter.next() {
                 Some(Ok(s)) => {
