@@ -115,12 +115,15 @@ let partner_pack = ProfileRulePack::new("ACME-PARTNER")
 
 // Merge all three into one combined pack:
 let combined = document_pack
-    .merge(reference_pack)
-    .merge(partner_pack);
+    .merge(reference_pack)?
+    .merge(partner_pack)?;
 ```
 
-> **Note**: `.merge(other)` consumes both packs and returns a new one. The combined
-> pack applies rules from all merged packs in order.
+> **Note**: `.merge(other)` consumes both packs and returns `Result<ProfileRulePack, EdifactError>`.
+> It fails with `EdifactError::IncompatibleReleaseScopes` if both packs carry different
+> release values.  Use `.merge_unchecked(other)` (infallible, incoming release wins) when
+> compatibility is guaranteed at build time.  The combined pack applies rules from all
+> merged packs in order.
 
 ---
 

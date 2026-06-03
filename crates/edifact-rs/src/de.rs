@@ -394,7 +394,7 @@ where
 /// Prefix matching without an explicit `*` was deliberately removed: `"M"` matches only `"M"`,
 /// not `"MS"` or `"MR"`.  Use `"M*"` for prefix semantics.
 ///
-/// Patterns with more than 8 wildcard segments (i.e. 9 or more `*` characters) are rejected
+/// Patterns with more than 3 wildcard segments (i.e. 4 or more `*` characters) are rejected
 /// immediately with `false` to guard against pathological O(n·m) matching.
 pub fn qualifier_matches_pattern(value: &str, pattern: &str) -> bool {
     if pattern.is_empty() {

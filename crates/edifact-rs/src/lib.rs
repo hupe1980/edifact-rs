@@ -232,30 +232,30 @@ pub use de::message_windows_bytes as from_bytes_windows;
 ///
 /// - [`find_segment`] — locate the first segment with a given tag.
 /// - [`find_qualified_segment`] — locate a segment by tag *and* qualifier (element 0).
-/// - [`find_qualified_segment_owned`] — owned-segment variant.
-/// - [`find_segment_owned`] — owned-segment variant of `find_segment`.
-/// - [`find_segment_typed`] — find a segment matching an `EdifactSegmentTag` implementor.
-/// - [`find_segments_typed`] — iterate all segments matching a tag type.
-/// - [`find_segments_iter`] — iterate all segments matching a tag string.
+/// - [`helpers::find_qualified_segment_owned`] — owned-segment variant.
+/// - [`helpers::find_segment_owned`] — owned-segment variant of `find_segment`.
+/// - [`helpers::find_segment_typed`] — find a segment matching an `EdifactSegmentTag` implementor.
+/// - [`helpers::find_segments_typed`] — iterate all segments matching a tag type.
+/// - [`helpers::find_segments_iter`] — iterate all segments matching a tag string.
 ///
 /// ## Element and component access
 ///
 /// - [`element_str`] — extract the raw string value of an element.
 /// - [`required_element`] — extract a mandatory element, returning an error when absent.
 /// - [`optional_element`] — extract an optional element as `Option<&str>`.
-/// - [`required_component`] — extract a mandatory component within a composite element.
-/// - [`optional_component`] — extract an optional component within a composite element.
-/// - [`get_components_iter`] — iterate over the components of a composite element.
-/// - [`composite_element`] — retrieve a composite element as a [`crate::CompositeElement`].
+/// - [`helpers::required_component`] — extract a mandatory component within a composite element.
+/// - [`helpers::optional_component`] — extract an optional component within a composite element.
+/// - [`helpers::get_components_iter`] — iterate over the components of a composite element.
+/// - [`helpers::composite_element`] — retrieve a composite element as a [`crate::CompositeElement`].
 ///
 /// ## Pattern matching
 ///
-/// - [`qualifier_matches_pattern`] — test whether a qualifier value matches a
+/// - [`helpers::qualifier_matches_pattern`] — test whether a qualifier value matches a
 ///   wildcard pattern (e.g. `"E01*"` matches `"E010"`, `"E011"`, …).
 ///
 /// ## Groups
 ///
-/// - [`contiguous_groups_by_qualifier`] — collect contiguous groups of segments
+/// - [`helpers::contiguous_groups_by_qualifier`] — collect contiguous groups of segments
 ///   sharing the same qualifier value into a `Vec<Vec<…>>`.
 ///
 /// # Example

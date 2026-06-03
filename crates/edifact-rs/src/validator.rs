@@ -446,11 +446,12 @@ impl ProfileRulePack {
     /// Merge two packs without checking release-scope compatibility.
     ///
     /// Identical to [`merge`][Self::merge] except that incompatible release
-    /// scopes do **not** panic — `other`'s release takes precedence when both
-    /// packs specify different values.
+    /// scopes do **not** return `Err` — `other`'s release takes precedence when
+    /// both packs specify different values.
     ///
     /// Use this in code-generated profiles where compatibility is guaranteed at
-    /// build time and the `panic`-on-mismatch guard would only add noise.
+    /// build time and the fallible `Result` return of [`merge`][Self::merge]
+    /// would only add noise.
     pub fn merge_unchecked(mut self, mut other: Self) -> Self {
         self.message_types.append(&mut other.message_types);
         // Let the incoming release win; `None` defers to whichever side has a value.

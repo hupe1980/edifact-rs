@@ -221,7 +221,7 @@ let segments: Vec<_> =
     from_bytes(b"UNH+1+ORDERS:D:96A:UN'BGM+220+PO123+9'UNT+3+1'")
         .collect::<Result<_, _>>()?;
 
-let document_pack = ProfileRulePack::builder("ORDERS-DOC")
+let document_pack = ProfileRulePack::new("ORDERS-DOC")
     .for_message_type("ORDERS")
     .with_rule_fn(|segments, issues| {
         if let Some(bgm) = segments.iter().find(|s| s.tag == "BGM") {

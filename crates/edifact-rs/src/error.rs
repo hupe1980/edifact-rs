@@ -459,7 +459,7 @@ impl EdifactError {
             Self::MissingSegment { .. } => "E015",
             Self::QualifierMismatch { .. } => "E016",
             Self::ConditionalRequirementNotMet { .. } => "E017",
-            // E018 is permanently retired (was ValidationFailed, removed in 0.9.0)
+            // E018 is permanently retired (was ValidationFailed, removed in 0.8.0)
             Self::InvalidReleaseSequence { .. } => "E019",
             Self::SegmentTooLong { .. } => "E020",
             Self::MissingRequiredComponent { .. } => "E021",

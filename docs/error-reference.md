@@ -464,10 +464,28 @@ ASCII letters) and that no data or component separators appear before it.
 
 ---
 
+### E029 — `FunctionalGroupNotSupported`
+
+```
+functional group segments (UNG/UNE) at byte offset {offset} are not supported; strip them before calling validate_envelope
+```
+
+**When**: `validate_envelope` (or `EnvelopeValidator`) found a `UNG` or `UNE`
+segment.  Functional groups are a legacy EDIFACT envelope layer that this
+library does not process.
+
+**Fields**: `offset: usize`.
+
+**Fix**: Strip the `UNG`/`UNE` wrapper segments before calling
+`validate_envelope`, or pre-process the interchange to remove functional-group
+nesting.
+
+---
+
 ### E030 — `ValidationErrors`
 
 ```
-validation failed with {error_count} issue(s)
+validation failed with {error_count} error(s)
 ```
 
 **When**: Emitted by `validate_strict` (as the `Err` arm of

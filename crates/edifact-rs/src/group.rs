@@ -333,17 +333,14 @@ pub fn group_segments_indexed<'a>(
         segment_range: 0..0,
         children: Vec::new(),
     };
-    // We track a list of (start, end) direct-segment runs for the root.
-    // The root's segment_range becomes a single range covering all direct
-    // segments (non-contiguous portions are intentionally excluded by design —
-    // direct segments of the root that appear between child groups are stored
-    // in `additional_ranges` to remain fully accurate, but `segment_range`
-    // captures the first contiguous span for backwards-compatible access).
+    // We track the extent of direct segments belonging to `parent`.  Seed
+    // from any pre-existing non-empty range so trigger segments that were
+    // placed into `parent.segment_range` before calling this function are
+    // not lost when the parent has no additional direct segments.
     //
-    // For simplicity we use a single range from the first direct segment to
-    // the last direct segment index + 1.  Non-contiguous direct segments are
-    // uncommon in practice (they only appear in the root when a schema group
-    // appears mid-message with non-grouped segments around it).
+    // For simplicity `segment_range` is a single contiguous span from the
+    // first direct segment to the last + 1.  Non-contiguous direct segments
+    // (uncommon in practice) are covered by the span without gaps.
     group_recursive_indexed(segments, &mut root, schema, &[], 0);
     root
 }
@@ -366,9 +363,13 @@ fn group_recursive_indexed<'a>(
         v
     };
 
-    // Track start/end of the direct segments belonging to `parent`.
-    let mut direct_start: Option<usize> = None;
-    let mut direct_end: usize = offset;
+    // Seed from any trigger segment already placed in the parent's range.
+    let mut direct_start: Option<usize> = if !parent.segment_range.is_empty() {
+        Some(parent.segment_range.start)
+    } else {
+        None
+    };
+    let mut direct_end: usize = direct_start.map_or(offset, |s| s + 1);
 
     let mut i = 0;
     while i < segments.len() {
