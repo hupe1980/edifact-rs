@@ -72,18 +72,17 @@ impl ServiceStringAdvice {
         Ok(ssa)
     }
 
-    /// Return `true` if all five active service characters are mutually distinct,
-    /// all are printable ASCII (`0x21–0x7E`, i.e. not control characters, not
-    /// high-bytes, and not whitespace), and none is ASCII whitespace (`CR`, `LF`,
-    /// space, tab).
+    /// Return `true` if all five active service characters are mutually distinct
+    /// and all fall in the printable ASCII range `0x21–0x7E` (excl. space `0x20`,
+    /// control characters `0x00–0x1F`, and `DEL 0x7F`).
     ///
     /// The five characters are `element_sep`, `component_sep`, `decimal_mark`,
     /// `release_char`, and `segment_term`.  All 10 pairwise combinations are
     /// checked.
     ///
-    /// Non-ASCII bytes (`>= 0x80`) are rejected because the tokenizer and
-    /// escaping logic treat every byte as single-character; a multi-byte UTF-8
-    /// sequence in a service character would cause incorrect tokenization.
+    /// Bytes outside `0x21–0x7E` are rejected: high-bytes (`>= 0x80`) would cause
+    /// incorrect single-byte tokenization of multi-byte UTF-8 sequences, and DEL
+    /// (`0x7F`) is a non-printable control character.
     pub fn is_valid(&self) -> bool {
         let [e, c, d, r, t] = [
             self.element_sep,
@@ -92,10 +91,9 @@ impl ServiceStringAdvice {
             self.release_char,
             self.segment_term,
         ];
-        // All five must be printable ASCII (excludes high-bytes AND control chars)
-        // and mutually distinct (10 pairwise checks).
-        let printable_ascii =
-            |b: u8| b.is_ascii() && !matches!(b, b' ' | b'\t' | b'\r' | b'\n') && b >= 0x21;
+        // All five must be printable ASCII 0x21–0x7E (excludes high-bytes, control chars,
+        // whitespace, and DEL 0x7F) and mutually distinct (10 pairwise checks).
+        let printable_ascii = |b: u8| b >= 0x21 && b <= 0x7E;
         printable_ascii(e)
             && printable_ascii(c)
             && printable_ascii(d)

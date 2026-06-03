@@ -452,7 +452,7 @@ composing.
 ### E027 — `InvalidFieldValue`
 
 ```
-segment {tag} element {element_index} has invalid value '{value}'
+segment {tag} element {element_index}: invalid field value "{value}"
 ```
 
 **When**: The typed deserializer found a qualifier element that was present but
@@ -468,7 +468,7 @@ held an empty or otherwise invalid value.
 ### E028 — `UnexpectedDataToken`
 
 ```
-data element at byte offset {offset} appeared before any segment tag
+unexpected data token at byte offset {offset}: data element before segment tag
 ```
 
 **When**: The parser encountered a data-element or component-element token
@@ -485,7 +485,7 @@ ASCII letters) and that no data or component separators appear before it.
 ### E029 — `FunctionalGroupNotSupported`
 
 ```
-functional group (UNG/UNE) at byte offset {offset} is not supported
+functional group segments (UNG/UNE) at byte offset {offset} are not supported; strip them before calling validate_envelope
 ```
 
 **When**: `validate_envelope` (or `EnvelopeValidator`) found a `UNG` or `UNE`

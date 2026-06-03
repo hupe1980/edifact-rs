@@ -152,7 +152,7 @@ let report = ctx.validate_lenient(&segs);
 | Method | On first error | Returns |
 |---|---|---|
 | `validate_lenient(&segs)` | Continues collecting all issues | `ValidationReport` |
-| `validate_strict(&segs)` | Stops at first `Error` or `Critical` | `Result<ValidationReport, ValidationReport>` |
+| `validate_strict(&segs)` | Runs all validators, returns `Err(report)` if any `Error`/`Critical` found | `Result<ValidationReport, ValidationReport>` |
 
 ```rust
 # use edifact_rs::{ValidationContext, from_bytes};

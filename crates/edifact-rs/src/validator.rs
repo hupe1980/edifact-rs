@@ -377,7 +377,7 @@ impl ProfileRulePack {
     /// Release scoping follows the same compatibility rule as
     /// [`extend_from`][Self::extend_from].
     pub fn merge(mut self, mut other: Self) -> Result<Self, EdifactError> {
-        self.message_types.extend(other.message_types);
+        self.message_types.append(&mut other.message_types);
         self.release = merge_release_scopes(self.release.take(), other.release.take())?;
         self.rules.append(&mut other.rules);
         Ok(self)
@@ -445,9 +445,7 @@ impl ProfileRulePack {
         // Append new rules.
         self.rules.append(&mut to_append);
 
-        for message_type in other.message_types {
-            self.message_types.insert(message_type);
-        }
+        self.message_types.append(&mut other.message_types);
         self.release = merge_release_scopes(self.release.take(), other.release.take())?;
         Ok(self)
     }
