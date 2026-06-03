@@ -539,15 +539,23 @@ where
 
 /// Serialize a slice of [`OwnedSegment`]s to an owned `Vec<u8>`.
 ///
-/// Convenience wrapper around [`segments_to_bytes`] that accepts owned
-/// segments directly, avoiding a manual `.as_borrowed()` conversion.
+/// Convenience wrapper around [`to_writer`] that accepts owned segments
+/// directly.  Each segment is converted to its borrowed form on the fly
+/// and written immediately — no intermediate `Vec<Segment<'_>>` is
+/// allocated, so peak memory stays proportional to one segment at a time
+/// rather than the full slice.
 ///
 /// # Errors
 ///
 /// Returns an error if serialization fails.
 pub fn segments_to_bytes_owned(segments: &[OwnedSegment]) -> Result<Vec<u8>, EdifactError> {
-    let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
-    segments_to_bytes(borrowed.iter())
+    let mut buf = Vec::new();
+    let mut wr = writer::Writer::new(&mut buf);
+    for seg in segments {
+        wr.write_segment(&seg.as_borrowed())?;
+    }
+    wr.finish()?;
+    Ok(buf)
 }
 
 /// Validate the envelope structure of an owned-segment slice.
