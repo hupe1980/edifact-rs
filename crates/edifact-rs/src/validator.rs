@@ -34,8 +34,10 @@ pub struct ValidationRuleContext<'a> {
     metadata: Option<&'a (dyn Any + Send + Sync)>,
     /// Message reference (`UNH` element 0) for this validation call.
     ///
-    /// Set via [`ValidationContextBuilder::with_message_ref`] or via
-    /// [`ValidationContext::validate_lenient_with`].  `None` when no reference was configured.
+    /// Set at build time via [`ValidationContextBuilder::with_message_ref`].  The reference
+    /// is forwarded automatically into every [`ValidationRuleContext`] constructed by
+    /// [`ValidationContext::validate_lenient`] and related methods.  `None` when no
+    /// reference was configured.
     pub message_ref: Option<&'a str>,
 }
 

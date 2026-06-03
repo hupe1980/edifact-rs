@@ -448,9 +448,14 @@ fn fuzz_serialization_no_panic() {
         });
 }
 
-/// Checks that `Writer::escape_value` never leaves unescaped delimiter bytes
-/// in its output, and that the escaped value can be round-tripped back through
-/// the parser to recover the original string.
+/// Checks that `Writer::escape_value` never leaves unescaped structural delimiter
+/// bytes (element separator, component separator, segment terminator) in its output,
+/// and that the escaped value can be round-tripped back through the parser to recover
+/// the original string.
+///
+/// The release character itself is intentionally **not** forbidden from appearing in
+/// the output; it is a legitimate payload byte and is only required to be present
+/// *before* each structural delimiter that was escaped.
 ///
 /// We construct a `ServiceStringAdvice` with printable-ASCII delimiters and
 /// a valid release character, then run arbitrary UTF-8 values through the
@@ -504,7 +509,9 @@ fn fuzz_escape_value_no_unescaped_delimiters() {
             // Escape the value — must not panic.
             let escaped = writer.escape_value(value);
 
-            // Property: the escaped string must not contain any unescaped delimiter bytes.
+            // Property: structural delimiters (element/component separator, segment terminator)
+            // must each be preceded by the release character when they appear in the output.
+            // The release character itself may appear freely as a payload byte.
             let elem_ch    = elem_sep as char;
             let comp_ch    = comp_sep as char;
             let release_ch = release  as char;

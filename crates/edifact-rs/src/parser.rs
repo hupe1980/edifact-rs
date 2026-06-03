@@ -796,7 +796,10 @@ fn read_next_byte<R: BufRead>(
 
     let byte = buf[0];
     reader.consume(1);
-    *stream_offset += 1;
+    // Saturating add: on 32-bit targets `stream_offset` is a `usize` clamped from a
+    // `u64` field.  Plain `+= 1` would wrap to 0 once the counter reaches `usize::MAX`
+    // and corrupt subsequent span diagnostics / `bytes_consumed` accounting.
+    *stream_offset = stream_offset.saturating_add(1);
     Ok(Some(byte))
 }
 
