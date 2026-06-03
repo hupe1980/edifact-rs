@@ -17,7 +17,7 @@ other runtimes (`async-std`, `smol`) with minor API substitutions.
 
 ```toml
 [dependencies]
-edifact-rs = "0.4"
+edifact-rs = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync"] }
 ```
 

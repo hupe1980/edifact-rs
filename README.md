@@ -28,13 +28,13 @@
 
 ```toml
 [dependencies]
-edifact-rs = "0.6"
+edifact-rs = "0.7"
 
 # Optional: derive macros (included by default)
-# edifact-rs = { version = "0.6", features = ["derive"] }
+# edifact-rs = { version = "0.7", features = ["derive"] }
 
 # Optional: rich miette diagnostics
-# edifact-rs = { version = "0.6", features = ["diagnostics"] }
+# edifact-rs = { version = "0.7", features = ["diagnostics"] }
 ```
 
 ### Feature flags
@@ -275,7 +275,7 @@ let context = ValidationContext::builder()
 Enable the `diagnostics` feature for human-readable, span-annotated error output powered by [`miette`](https://docs.rs/miette):
 
 ```toml
-edifact-rs = { version = "0.6", features = ["diagnostics"] }
+edifact-rs = { version = "0.7", features = ["diagnostics"] }
 ```
 
 ```

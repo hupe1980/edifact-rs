@@ -105,6 +105,46 @@ let ctx = ValidationContext::builder()
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
+### Built-in envelope validation
+
+The `EnvelopeValidator` checks `UNB`/`UNH`/`UNT`/`UNZ` segment presence, message
+counts, and segment counts.  Enable it with `with_envelope_validation()`:
+
+```rust
+use edifact_rs::{ValidationContext, from_bytes};
+
+# let segs: Vec<_> = from_bytes(b"UNB+UNOA:1+SENDER:1+RECEIVER:1+200101:1000+1'UNH+1+ORDERS:D:96A:UN'BGM+220+PO-1'UNT+3+1'UNZ+1+1'").collect::<Result<_,_>>()?;
+let ctx = ValidationContext::builder()
+    .with_envelope_validation()  // adds UNB/UNH/UNT/UNZ structure checks
+    .build();
+let report = ctx.validate_lenient(&segs);
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+`UNG`/`UNE` functional-group segments are rejected with `E029`
+(`FunctionalGroupNotSupported`) since this library does not process legacy
+functional groups.
+
+### Per-message reference stamping
+
+When validating individual messages extracted from a multi-message interchange,
+use `with_message_ref` to stamp every emitted `ValidationIssue` with the `UNH`
+reference (DE 0062).  This makes it easy to map issues back to the originating
+message:
+
+```rust
+use edifact_rs::{ValidationContext, from_bytes};
+
+# let segs: Vec<_> = from_bytes(b"UNH+MSG-42+ORDERS:D:96A:UN'BGM+220+PO-1'UNT+3+MSG-42'").collect::<Result<_,_>>()?;
+let ctx = ValidationContext::builder()
+    .with_message_type("ORDERS")
+    .with_message_ref("MSG-42")  // DE 0062 from the UNH segment
+    .build();
+let report = ctx.validate_lenient(&segs);
+// Every issue in `report` will have `issue.message_ref == Some("MSG-42")`
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
 ---
 
 ## `validate_lenient` vs `validate_strict`
@@ -112,7 +152,7 @@ let ctx = ValidationContext::builder()
 | Method | On first error | Returns |
 |---|---|---|
 | `validate_lenient(&segs)` | Continues collecting all issues | `ValidationReport` |
-| `validate_strict(&segs)` | Stops at first `Error` or `Critical` | `Result<ValidationReport, EdifactError>` |
+| `validate_strict(&segs)` | Stops at first `Error` or `Critical` | `Result<ValidationReport, ValidationReport>` |
 
 ```rust
 # use edifact_rs::{ValidationContext, from_bytes};
@@ -199,6 +239,8 @@ let issue = ValidationIssue::new(
 | `.with_error_code(code)` | `&str` | Stable error code string (e.g. `"E007"`) |
 | `.with_suggestion(text)` | `&str` | Human-friendly remediation hint |
 | `.with_offset(n)` | `usize` | Byte offset of the issue in the input |
+| `.with_segment_occurrence(n)` | `u16` | Zero-based occurrence among segments with the same tag |
+| `.with_message_ref(r)` | `impl Into<String>` | `UNH` reference (DE 0062) — usually set automatically via `ValidationContextBuilder::with_message_ref` |
 
 ---
 

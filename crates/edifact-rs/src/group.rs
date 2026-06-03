@@ -68,8 +68,13 @@ pub struct GroupDef {
 /// Each segment is cloned (shallow copy) from the input slice: the `Vec` of
 /// elements is heap-allocated per segment, but the string data inside each
 /// element still borrows from the original input buffer via the `'a` lifetime.
-/// For read-heavy workloads consider keeping the original segment slice and
-/// using group indices rather than cloned values.
+///
+/// # Memory note
+///
+/// `group_segments` clones each [`Segment`] into the tree.  For large messages
+/// or deeply nested schemas where minimal allocation is critical, consider
+/// working with the original flat segment slice and deriving group boundaries
+/// yourself based on the schema's trigger tags.
 #[derive(Debug)]
 pub struct SegmentGroup<'a> {
     /// Group name from the schema, e.g. `"SG2"`, or `"ROOT"` for the envelope.
@@ -223,6 +228,19 @@ fn group_recursive_inner<'a>(
     schema: &'static [GroupDef],
     stop_triggers: &[&'static str],
 ) -> usize {
+    // Pre-compute the combined stop set for all children of this schema level.
+    // This is computed once per schema level, not once per segment, so the
+    // SmallVec is allocated at most O(depth) times rather than O(depth × n).
+    let combined_stop: SmallVec<[&'static str; 16]> = {
+        let mut v: SmallVec<[&'static str; 16]> = SmallVec::from_slice(stop_triggers);
+        for d in schema {
+            if !v.contains(&d.trigger) {
+                v.push(d.trigger);
+            }
+        }
+        v
+    };
+
     let mut i = 0;
     while i < segments.len() {
         let tag = segments[i].tag;
@@ -243,17 +261,7 @@ fn group_recursive_inner<'a>(
             child.segments.push(segments[i].clone());
             i += 1;
 
-            // Build the combined stop triggers: parent stops + current schema triggers.
-            // Use SmallVec to avoid heap allocation for typical schema sizes.
-            let mut combined_stop: SmallVec<[&'static str; 16]> =
-                SmallVec::from_slice(stop_triggers);
-            for d in schema {
-                if !combined_stop.contains(&d.trigger) {
-                    combined_stop.push(d.trigger);
-                }
-            }
-
-            // Recurse into children of this group — pass rest of segments
+            // Recurse into children of this group — pass the pre-computed stop set.
             let consumed =
                 group_recursive_inner(&segments[i..], &mut child, def.children, &combined_stop);
             i += consumed;

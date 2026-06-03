@@ -301,42 +301,21 @@ impl<'a> SegmentDefRef<'a> {
     }
 
     fn mandatory_positions(&self) -> impl Iterator<Item = (usize, &str)> {
-        enum E<A, B> {
-            A(A),
-            B(B),
-        }
-        impl<A, B, I> Iterator for E<A, B>
-        where
-            A: Iterator<Item = I>,
-            B: Iterator<Item = I>,
-        {
-            type Item = I;
-            fn next(&mut self) -> Option<I> {
-                match self {
-                    E::A(a) => a.next(),
-                    E::B(b) => b.next(),
-                }
-            }
-        }
         match self {
-            Self::Static(d) => E::A(
-                d.elements
-                    .iter()
-                    .filter(|e| e.status == Status::Mandatory)
-                    .map(|e| ((e.position as usize).saturating_sub(1), e.data_element)),
-            ),
-            Self::Owned(d) => E::B(
-                d.elements
-                    .iter()
-                    .filter(|e| e.status == Status::Mandatory)
-                    .map(|e| {
-                        (
-                            (e.position as usize).saturating_sub(1),
-                            e.data_element.as_str(),
-                        )
-                    }),
-            ),
+            Self::Static(d) => d
+                .elements
+                .iter()
+                .filter(|e| e.status == Status::Mandatory)
+                .map(|e| ((e.position as usize).saturating_sub(1), e.data_element))
+                .collect::<Vec<_>>(),
+            Self::Owned(d) => d
+                .elements
+                .iter()
+                .filter(|e| e.status == Status::Mandatory)
+                .map(|e| ((e.position as usize).saturating_sub(1), e.data_element.as_str()))
+                .collect::<Vec<_>>(),
         }
+        .into_iter()
     }
 }
 
@@ -460,9 +439,12 @@ impl DirectoryValidator {
     ///     .with_code_list_rules(my_code_list_rules);
     /// ```
     pub fn from_definitions(definitions: &'static [SegmentDefinition]) -> Self {
+        let lookup_map: std::collections::HashMap<&'static str, &'static SegmentDefinition> =
+            definitions.iter().map(|d| (d.tag, d)).collect();
+        let lookup_map = Arc::new(lookup_map);
         Self {
             directory_id: "custom".to_owned(),
-            segment_lookup: Arc::new(move |tag: &str| definitions.iter().find(|d| d.tag == tag)),
+            segment_lookup: Arc::new(move |tag: &str| lookup_map.get(tag).copied()),
             owned_defs: None,
             is_code_valid: Arc::new(|_de: &str, _code: &str| true),
             suggest_code: Arc::new(|_de: &str, _code: &str| None),

@@ -7,6 +7,12 @@ use thiserror::Error;
 pub struct IoError(pub std::io::Error);
 
 impl PartialEq for IoError {
+    /// Equality is determined by [`std::io::ErrorKind`] only.
+    ///
+    /// Two `IoError` values with the same kind but different OS-level error codes
+    /// (or different messages) will compare as equal.  This is a deliberate
+    /// limitation: `std::io::Error` is not `PartialEq`, so kind-based comparison
+    /// is the only practical option that lets `EdifactError` derive `PartialEq`.
     fn eq(&self, other: &Self) -> bool {
         self.0.kind() == other.0.kind()
     }
@@ -357,6 +363,49 @@ pub enum EdifactError {
         /// Release scope of the pack being composed in.
         incoming: String,
     },
+
+    /// A field value failed semantic validation (e.g. wrong format, out-of-range).
+    ///
+    /// Distinct from [`InvalidCodeValue`][Self::InvalidCodeValue] which is for
+    /// code-list membership checks.  Use this variant when a free-text or numeric
+    /// field contains a value that is structurally invalid for its purpose.
+    #[error("segment {tag} element {element_index}: invalid field value {value:?}")]
+    InvalidFieldValue {
+        /// Segment tag that contains the invalid field.
+        tag: String,
+        /// Zero-based element index of the invalid field.
+        element_index: usize,
+        /// The invalid value that was observed.
+        value: String,
+    },
+
+    /// A data or component element token appeared before the first segment tag.
+    ///
+    /// EDIFACT syntax requires that every data element follows a segment tag.
+    /// A data element token encountered before any tag (e.g. after a stray
+    /// separator at the start of the stream) is a protocol violation.
+    ///
+    /// Unlike stray segment terminators (which are tolerated as blank lines),
+    /// stray data tokens indicate encoding corruption or a partial write.
+    #[error("unexpected data token at byte offset {offset}: data element before segment tag")]
+    UnexpectedDataToken {
+        /// Byte offset of the stray token.
+        offset: usize,
+    },
+
+    /// The input contains EDIFACT functional group segments (`UNG`/`UNE`).
+    ///
+    /// Functional groups are defined in ISO 9735 but are rarely used in practice
+    /// and are not supported by this library.  Strip `UNG`/`UNE` wrappers before
+    /// calling `validate_envelope`, or process the interchange as raw segments.
+    #[error(
+        "functional group segments (UNG/UNE) are not supported; \
+         strip them before calling validate_envelope"
+    )]
+    FunctionalGroupNotSupported {
+        /// Byte offset of the first `UNG` or `UNE` segment found.
+        offset: usize,
+    },
 }
 
 impl From<std::io::Error> for EdifactError {
@@ -396,6 +445,9 @@ impl EdifactError {
             Self::InvalidEventSequence { .. } => "E024",
             Self::InvalidElementPosition => "E025",
             Self::IncompatibleReleaseScopes { .. } => "E026",
+            Self::InvalidFieldValue { .. } => "E027",
+            Self::UnexpectedDataToken { .. } => "E028",
+            Self::FunctionalGroupNotSupported { .. } => "E029",
         }
     }
 
@@ -459,6 +511,15 @@ impl EdifactError {
             Self::IncompatibleReleaseScopes { .. } => Some(
                 "Only compose ProfileRulePack values that share the same release scope, or where at most one has a release scope set",
             ),
+            Self::InvalidFieldValue { .. } => {
+                Some("Correct the field value to match the expected format or range for this element")
+            }
+            Self::UnexpectedDataToken { .. } => {
+                Some("A data element appeared before any segment tag; check for partial writes or encoding corruption")
+            }
+            Self::FunctionalGroupNotSupported { .. } => {
+                Some("Strip UNG/UNE segments before calling validate_envelope, or process the interchange as raw segments")
+            }
             Self::ValidationFailed { .. }
             | Self::MessageCountMismatch { .. }
             | Self::SegmentCountMismatch { .. }
@@ -631,6 +692,22 @@ impl miette::Diagnostic for EdifactError {
                  Only compose ProfileRulePack values that share the same release scope, \
                  or where at most one carries a release scope",
             ))),
+            Self::InvalidFieldValue {
+                tag,
+                element_index,
+                value,
+            } => Some(Box::new(format!(
+                "Segment {tag} element {element_index} has invalid value '{value}'. \
+                 Check the expected format or range for this field",
+            ))),
+            Self::UnexpectedDataToken { offset } => Some(Box::new(format!(
+                "Data element at offset {offset} appeared before any segment tag. \
+                 Check for partial writes or encoding corruption",
+            ))),
+            Self::FunctionalGroupNotSupported { offset } => Some(Box::new(format!(
+                "Functional group segment (UNG/UNE) found at offset {offset}. \
+                 Strip UNG/UNE wrappers before calling validate_envelope",
+            ))),
         }
     }
 }
@@ -690,6 +767,19 @@ pub struct ValidationIssue {
     /// `u8` is sufficient: composite data elements have at most 99 components
     /// per the UN/EDIFACT standard.
     pub component_index: Option<u8>,
+    /// Zero-based occurrence index among segments with the same tag in the message.
+    ///
+    /// When multiple segments share the same tag (e.g. repeated `DTM` lines),
+    /// this field indicates which occurrence (0 = first) was the source of
+    /// this issue.  `None` when occurrence tracking is not available for this rule.
+    pub segment_occurrence: Option<u16>,
+    /// Message reference (`UNH` element 0, DE 0062) that this issue belongs to.
+    ///
+    /// Populated automatically when the [`ValidationContext`] was built with
+    /// `with_message_ref`.  Useful in batch processing where many messages are
+    /// validated and issues from different messages must be correlated back to
+    /// the originating `UNH`/`UNT` envelope.
+    pub message_ref: Option<String>,
     /// Suggested remediation (if available).
     pub suggestion: Option<String>,
 }
@@ -706,6 +796,8 @@ impl ValidationIssue {
             rule_id: None,
             element_index: None,
             component_index: None,
+            segment_occurrence: None,
+            message_ref: None,
             suggestion: None,
         }
     }
@@ -749,6 +841,24 @@ impl ValidationIssue {
     /// Set a suggestion for resolving this issue.
     pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
         self.suggestion = Some(suggestion.into());
+        self
+    }
+
+    /// Set the zero-based occurrence index for this issue.
+    ///
+    /// Use this when the same segment tag appears multiple times in a message
+    /// and you want to identify which occurrence is affected.
+    pub fn with_segment_occurrence(mut self, occurrence: u16) -> Self {
+        self.segment_occurrence = Some(occurrence);
+        self
+    }
+
+    /// Set the message reference (`UNH` element 0) for this issue.
+    ///
+    /// Use this to correlate an issue back to a specific message in a
+    /// multi-message interchange.
+    pub fn with_message_ref(mut self, message_ref: impl Into<String>) -> Self {
+        self.message_ref = Some(message_ref.into());
         self
     }
 
@@ -870,6 +980,16 @@ impl ValidationReport {
     /// Return `true` if the report contains any issues (errors, warnings, or infos).
     pub fn has_any_issues(&self) -> bool {
         !self.errors().is_empty() || !self.warnings().is_empty() || !self.infos().is_empty()
+    }
+
+    /// Drain all issues from `other` into `self`.
+    ///
+    /// Issues are appended in severity order: errors, warnings, infos.
+    /// `other` is left empty after this call.
+    pub fn merge(&mut self, mut other: ValidationReport) {
+        self.errors.append(&mut other.errors);
+        self.warnings.append(&mut other.warnings);
+        self.infos.append(&mut other.infos);
     }
 
     /// Iterate over all issues matching an exact profile/MIG rule identifier.

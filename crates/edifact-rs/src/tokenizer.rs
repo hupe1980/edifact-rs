@@ -58,8 +58,8 @@ impl ServiceStringAdvice {
         }
     }
 
-    /// Parse a UNA header and validate that the four active service characters
-    /// (`element_sep`, `component_sep`, `release_char`, `segment_term`) are all
+    /// Parse a UNA header and validate that the five active service characters
+    /// (`element_sep`, `component_sep`, `decimal_mark`, `release_char`, `segment_term`) are all
     /// mutually distinct and are not ASCII whitespace (`CR`, `LF`, space, tab).
     ///
     /// Returns [`EdifactError::InvalidUna`] if the invariant is violated.
@@ -72,26 +72,26 @@ impl ServiceStringAdvice {
         Ok(ssa)
     }
 
-    /// Return `true` if the four active service characters are mutually distinct
+    /// Return `true` if all five active service characters are mutually distinct
     /// and none is ASCII whitespace (`CR`, `LF`, space, tab).
+    ///
+    /// The five characters are `element_sep`, `component_sep`, `decimal_mark`,
+    /// `release_char`, and `segment_term`.  All 10 pairwise combinations are
+    /// checked.
     pub fn is_valid(&self) -> bool {
-        let [e, c, r, t] = [
+        let [e, c, d, r, t] = [
             self.element_sep,
             self.component_sep,
+            self.decimal_mark,
             self.release_char,
             self.segment_term,
         ];
         let no_ws = |b: u8| !matches!(b, b' ' | b'\t' | b'\r' | b'\n');
-        // All must be non-whitespace and mutually distinct (6 pairwise checks).
-        no_ws(e)
-            && no_ws(c)
-            && no_ws(r)
-            && no_ws(t)
-            && e != c
-            && e != r
-            && e != t
-            && c != r
-            && c != t
+        // All five must be non-whitespace and mutually distinct (10 pairwise checks).
+        no_ws(e) && no_ws(c) && no_ws(d) && no_ws(r) && no_ws(t)
+            && e != c && e != d && e != r && e != t
+            && c != d && c != r && c != t
+            && d != r && d != t
             && r != t
     }
 }

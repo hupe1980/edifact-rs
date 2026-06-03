@@ -98,8 +98,12 @@ impl<'a> Iterator for Parser<'a> {
             };
             match tok {
                 Ok(Token::SegmentTag { value, span }) => break (value, span),
-                Ok(Token::SegmentTerminator { .. }) => continue, // stray terminator — skip
-                Ok(_) => continue,                               // stray value — skip
+                Ok(Token::SegmentTerminator { .. }) => continue, // stray terminator — tolerated (blank line)
+                Ok(Token::DataElement { span, .. }) | Ok(Token::ComponentElement { span, .. }) => {
+                    return Some(Err(EdifactError::UnexpectedDataToken {
+                        offset: span.start,
+                    }));
+                }
                 Err(e) => return Some(Err(e)),
             }
         };
@@ -251,12 +255,31 @@ pub struct ReaderConfig {
     /// Default: 65 536 bytes (64 KiB).  Real-world EDIFACT segments are almost
     /// always below 4 KiB; consider using a tighter limit for untrusted inputs.
     pub max_segment_bytes: usize,
+    /// Maximum number of segments to yield before the stream stops.
+    ///
+    /// Once this many segments have been produced [`OwnedSegmentStream`] returns
+    /// `None`, effectively truncating the message.  Useful for preventing
+    /// resource exhaustion when the total segment count in a message is expected
+    /// to be bounded.
+    ///
+    /// Default: `None` (unlimited).
+    pub max_segments: Option<usize>,
+    /// Maximum total input bytes to consume before the stream stops.
+    ///
+    /// If the cumulative bytes read from the inner reader exceeds this threshold,
+    /// the stream stops yielding segments.  Use in combination with
+    /// `max_segment_bytes` for defence-in-depth against maliciously large inputs.
+    ///
+    /// Default: `None` (unlimited).
+    pub max_input_bytes: Option<u64>,
 }
 
 impl Default for ReaderConfig {
     fn default() -> Self {
         Self {
             max_segment_bytes: 65_536,
+            max_segments: None,
+            max_input_bytes: None,
         }
     }
 }
@@ -266,6 +289,20 @@ impl ReaderConfig {
     #[must_use]
     pub fn max_segment_bytes(mut self, limit: usize) -> Self {
         self.max_segment_bytes = limit;
+        self
+    }
+
+    /// Set the maximum number of segments to yield and return `self`.
+    #[must_use]
+    pub fn max_segments(mut self, limit: usize) -> Self {
+        self.max_segments = Some(limit);
+        self
+    }
+
+    /// Set the maximum total input bytes to consume and return `self`.
+    #[must_use]
+    pub fn max_input_bytes(mut self, limit: u64) -> Self {
+        self.max_input_bytes = Some(limit);
         self
     }
 }
@@ -304,6 +341,10 @@ pub struct OwnedSegmentStream<R: BufRead> {
     state: StreamState,
     stream_offset: usize,
     config: ReaderConfig,
+    /// Number of segments successfully yielded so far.
+    segments_yielded: usize,
+    /// Total bytes consumed from the reader (UNA header + segment data).
+    bytes_consumed: u64,
 }
 
 impl<R: BufRead> OwnedSegmentStream<R> {
@@ -318,6 +359,8 @@ impl<R: BufRead> OwnedSegmentStream<R> {
             state: StreamState::Init,
             stream_offset: 0,
             config,
+            segments_yielded: 0,
+            bytes_consumed: 0,
         }
     }
 }
@@ -413,12 +456,11 @@ fn try_fast_segment<R: BufRead>(
     // Include the terminator byte so the parser sees a `SegmentTerminator`
     // token and records a span that is consistent with the `from_bytes` path.
     let tok = Tokenizer::new(&buf[..pos + 1], ssa);
-    match Parser::new(tok).collect::<Result<Vec<Segment<'_>>, _>>() {
-        Err(e) => FastSegment::Err(e),
-        Ok(segs) => match segs.into_iter().next() {
-            None => FastSegment::Skip(pos + 1),
-            Some(s) => FastSegment::Parsed(OwnedSegment::from(s).offset(seg_start), pos + 1),
-        },
+    let mut parser_iter = Parser::new(tok);
+    match parser_iter.next() {
+        None => FastSegment::Skip(pos + 1),
+        Some(Err(e)) => FastSegment::Err(e),
+        Some(Ok(s)) => FastSegment::Parsed(OwnedSegment::from(s).offset(seg_start), pos + 1),
     }
     // `buf` borrow released here — `reader.consume()` is safe to call in the caller.
 }
@@ -431,6 +473,22 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
     fn next(&mut self) -> Option<Self::Item> {
         if self.state == StreamState::Done {
             return None;
+        }
+
+        // Check segment count limit before attempting to read the next segment.
+        if let Some(max) = self.config.max_segments {
+            if self.segments_yielded >= max {
+                self.state = StreamState::Done;
+                return None;
+            }
+        }
+
+        // Check byte budget before attempting to read the next segment.
+        if let Some(max) = self.config.max_input_bytes {
+            if self.bytes_consumed >= max {
+                self.state = StreamState::Done;
+                return None;
+            }
         }
 
         loop {
@@ -446,11 +504,14 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
                     FastSegment::Parsed(seg, n) => {
                         self.reader.consume(n);
                         self.stream_offset += n;
+                        self.bytes_consumed = self.stream_offset as u64;
+                        self.segments_yielded += 1;
                         return Some(Ok(seg));
                     }
                     FastSegment::Skip(n) => {
                         self.reader.consume(n);
                         self.stream_offset += n;
+                        self.bytes_consumed = self.stream_offset as u64;
                         continue;
                     }
                     FastSegment::Eof => return None,
@@ -483,20 +544,21 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
             if scanned {
                 self.state = StreamState::Running;
             }
+            self.bytes_consumed = self.stream_offset as u64;
 
             raw.bytes.push(self.ssa.segment_term);
             let tok = Tokenizer::new(raw.bytes.as_slice(), self.ssa);
-            match Parser::new(tok).collect::<Result<Vec<Segment<'_>>, _>>() {
-                Ok(segs) => {
-                    if let Some(s) = segs.into_iter().next() {
-                        return Some(Ok(OwnedSegment::from(s).offset(raw.start_offset)));
-                    }
-                    // Empty segment — loop back.
+            let mut parser_iter = Parser::new(tok);
+            match parser_iter.next() {
+                Some(Ok(s)) => {
+                    self.segments_yielded += 1;
+                    return Some(Ok(OwnedSegment::from(s).offset(raw.start_offset)));
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     self.state = StreamState::Done;
                     return Some(Err(e));
                 }
+                None => {} // Empty segment — loop back.
             }
         }
     }

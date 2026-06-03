@@ -8,6 +8,7 @@ pub use support::edifact_rs::{
 };
 
 extern crate self as edifact_rs;
+pub use support::edifact_rs::__private;
 
 use edifact_rs_derive::{
     EdifactDeserialize as DeriveEdifactDeserialize,

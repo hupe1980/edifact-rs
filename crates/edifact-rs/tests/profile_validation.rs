@@ -59,6 +59,7 @@ fn custom_profile_pack_strict_mode_fails_for_error_level_issues() {
 
     let result = ctx.validate_strict(&segments);
     assert!(result.is_err(), "strict profile validation should fail");
+    assert!(result.unwrap_err().has_errors());
 }
 
 // TEST 7.1: with_message_type call-order independence

@@ -28,7 +28,13 @@ impl Span {
 
     /// Length of the span in bytes.
     #[inline]
-    pub const fn len(self) -> usize {
+    pub fn len(self) -> usize {
+        debug_assert!(
+            self.start <= self.end,
+            "Span::len: start ({}) > end ({})",
+            self.start,
+            self.end
+        );
         self.end - self.start
     }
 

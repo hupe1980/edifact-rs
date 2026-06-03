@@ -9,8 +9,8 @@
 # fails so you see the full picture in one pass.
 #
 # Steps mirrored from .github/workflows/ci.yml:
-#   1.  cargo check --workspace                          (msrv-check / feature-matrix)
-#   2.  cargo test --workspace                           (feature-matrix)
+#   1.  cargo check --workspace --all-targets              (msrv-check / feature-matrix)
+#   2.  cargo test --workspace --all-targets               (feature-matrix)
 #   3.  cargo test -p edifact-rs --no-default-features  (feature-matrix)
 #   4.  cargo test -p edifact-rs --all-features         (feature-matrix)
 #   5.  cargo test -p edifact-rs --all-features --examples
@@ -19,8 +19,9 @@
 #   8.  cargo publish --dry-run -p edifact-rs-derive     (release-check)
 #   9.  cargo publish --dry-run -p edifact-rs            (release-check)
 #   10. Crate versions match across workspace            (release-check)
-#   11. cargo bench bench_core                           (smoke, skipped with --no-bench)
-#   12. cargo bench bench_criterion smoke                (skipped with --no-bench)
+#   11. cargo deny check                                 (security/license audit)
+#   12. cargo bench bench_core                           (smoke, skipped with --no-bench)
+#   13. cargo bench bench_criterion smoke                (skipped with --no-bench)
 
 set -euo pipefail
 
@@ -61,12 +62,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
 # ── 1. Workspace check ─────────────────────────────────────────────────────────
-step "cargo check --workspace" \
-  cargo check --workspace
+step "cargo check --workspace --all-targets" \
+  cargo check --workspace --all-targets
 
 # ── 2. Workspace tests ─────────────────────────────────────────────────────────
-step "cargo test --workspace" \
-  cargo test --workspace
+step "cargo test --workspace --all-targets" \
+  cargo test --workspace --all-targets
 
 # ── 3. No-default-features test ────────────────────────────────────────────────
 step "cargo test -p edifact-rs --no-default-features" \
@@ -109,6 +110,15 @@ step "Crate versions match across workspace" bash -c '
     exit 1
   fi
 '
+
+# ── 10. cargo deny ─────────────────────────────────────────────────────────────
+# Skip silently if cargo-deny is not installed (it's an optional tool).
+if command -v cargo-deny &>/dev/null || cargo deny --version &>/dev/null 2>&1; then
+  step "cargo deny check" \
+    cargo deny check
+else
+  echo -e "\n${YELLOW}⏭  cargo deny skipped (cargo-deny not installed)${RESET}"
+fi
 
 # ── 11-12. Benchmarks ────────────────────────────────────────────────────────
 # Always verify benches compile; only execute them unless --no-bench is passed.

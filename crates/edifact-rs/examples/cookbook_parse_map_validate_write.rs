@@ -12,9 +12,9 @@
 //! cargo run -p edifact-rs --example cookbook_parse_map_validate_write
 //! ```
 
-use edifact_rs::{
+use edifact_rs::{__private::find_qualified_segment, from_bytes, segments_to_bytes, validate_each,
     Segment, ValidationContext, ValidationLayer, ValidationReport, ValidationRuleContext,
-    Validator, find_qualified_segment, from_bytes, segments_to_bytes, validate_each,
+    Validator,
 };
 
 /// A simple custom validator that checks for known segment tags
@@ -61,8 +61,8 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 
     // ── 3. Validate ───────────────────────────────────────────────────────────
     // `validate_lenient` collects all issues into a report rather than failing
-    // on the first error.  Switch to `validate_strict` to get a typed
-    // `EdifactError` containing the first failure.
+    // on the first error.  Switch to `validate_strict` to get the full report
+    // back as `Err(ValidationReport)` on the first Error/Critical.
     let validation_context = ValidationContext::builder()
         .with_message_type("ORDERS")
         .with_validator(ValidationLayer::Structure, SimpleValidator)

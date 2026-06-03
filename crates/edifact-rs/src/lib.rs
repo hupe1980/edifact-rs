@@ -186,8 +186,8 @@ pub use parser::{
 };
 pub use tokenizer::{ServiceStringAdvice, Tokenizer};
 pub use validator::{
-    ProfileRule, ProfileRulePack, ValidationContext, ValidationContextBuilder, ValidationLayer,
-    ValidationRuleContext, Validator, validate_each,
+    EnvelopeValidator, ProfileRule, ProfileRulePack, ValidationContext, ValidationContextBuilder,
+    ValidationLayer, ValidationRuleContext, Validator, validate_each,
 };
 pub use writer::Writer;
 
@@ -203,15 +203,34 @@ pub use de::{
     groups_are_contiguous_by_qualifier, message_windows_bytes, message_windows_from_reader,
 };
 
+/// Alias for [`message_windows_bytes`] — a more discoverable entry-point for
+/// window-based message parsing.
+///
+/// Splits a byte slice into [`MessageWindow`] views, one per UNH/UNT envelope,
+/// enabling parallel or lazy per-message processing without copying data.
+///
+/// # Example
+/// ```rust,ignore
+/// use edifact_rs::from_bytes_windows;
+/// let windows: Vec<_> = from_bytes_windows(input).collect();
+/// ```
+pub use de::message_windows_bytes as from_bytes_windows;
+
 // ── Proc-macro support ─────────────────────────────────────────────────────────
-// Re-export helpers at root with doc(hidden) for macro-generated code compatibility.
+/// Private implementation helpers used by code generated from `#[derive(EdifactDeserialize)]`.
+///
+/// **This module is not part of the public API.**  Names, signatures, and
+/// existence of items inside `__private` may change in any release without a
+/// semver bump.  Do not depend on this module directly.
 #[doc(hidden)]
-pub use de::{
-    composite_element, contiguous_groups_by_qualifier, element_str, find_qualified_segment,
-    find_qualified_segment_owned, find_segment, find_segment_owned, find_segment_typed,
-    find_segments_iter, find_segments_typed, get_components_iter, optional_component,
-    optional_element, qualifier_matches_pattern, required_component, required_element,
-};
+pub mod __private {
+    pub use super::de::{
+        composite_element, contiguous_groups_by_qualifier, element_str, find_qualified_segment,
+        find_qualified_segment_owned, find_segment, find_segment_owned, find_segment_typed,
+        find_segments_iter, find_segments_typed, get_components_iter, optional_component,
+        optional_element, qualifier_matches_pattern, required_component, required_element,
+    };
+}
 pub use directory_validator::{
     DirectoryValidator, DirectoryValidatorBuilder, ElementRef, OwnedElementRef, OwnedSegmentDef,
     SegmentDefinition, Status,
@@ -220,7 +239,7 @@ pub use directory_validator::{
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use edifact_rs_derive::{EdifactDeserialize, EdifactSerialize};
 pub use event::{EdifactEvent, EventEmitter, OwnedEdifactEvent, VecEmitter, WriterEmitter};
-pub use ser::{EdifactCompositeSerialize, EdifactSerialize, to_bytes, to_edifact_string};
+pub use ser::{DecimalFloat, DecimalFloatDisplay, EdifactCompositeSerialize, EdifactSerialize, to_bytes, to_edifact_string};
 
 // ── core free functions ───────────────────────────────────────────────────────
 
@@ -310,6 +329,25 @@ pub fn from_bytes_with_config<'a>(
 /// invalid UTF-8 segment text, dangling release sequences, or underlying I/O failures.
 pub fn from_reader<R: Read>(reader: R) -> Result<Vec<OwnedSegment>, EdifactError> {
     parser::from_reader(reader)
+}
+
+/// Parse `input` bytes eagerly into an iterator of [`OwnedSegment`]s.
+///
+/// Unlike [`from_bytes`] (which yields borrowed [`Segment`]s tied to the input
+/// lifetime), every segment returned here is fully owned.  This is convenient
+/// when you need to store or return segments without retaining a reference to
+/// the original byte slice.
+///
+/// # Example
+///
+/// ```
+/// let segs: Vec<edifact_rs::OwnedSegment> = edifact_rs::from_bytes_owned(b"BGM+220+1+9'")
+///     .collect::<Result<_, _>>()
+///     .unwrap();
+/// assert_eq!(segs[0].tag, "BGM");
+/// ```
+pub fn from_bytes_owned(input: &[u8]) -> impl Iterator<Item = Result<OwnedSegment, EdifactError>> + '_ {
+    from_bytes(input).map(|r| r.map(OwnedSegment::from))
 }
 
 /// Parse a reader into owned segments as a streaming iterator.

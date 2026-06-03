@@ -3,3 +3,13 @@ error: EdifactSerialize/EdifactDeserialize only support structs
    |
 15 | enum Message {
    | ^^^^
+
+warning: unused imports: `composite_element`, `find_qualified_segment_owned`, `find_qualified_segment`, `find_segment_owned`, `find_segment`, and `find_segments_typed`
+ --> tests/ui/support.rs
+  |
+  |             composite_element, find_qualified_segment, find_qualified_segment_owned,
+  |             ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |             find_segment, find_segment_owned, find_segments_typed,
+  |             ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

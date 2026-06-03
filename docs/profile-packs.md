@@ -319,7 +319,7 @@ let pack = ProfileRulePack::builder("MY-PACK")
 
 println!("name:        {}", pack.name());           // "MY-PACK"
 println!("rule count:  {}", pack.rule_count());     // 2
-println!("types:       {:?}", pack.message_types()); // ["ORDERS"]
+println!("types:       {:?}", pack.message_types().collect::<Vec<_>>()); // ["ORDERS"]
 ```
 
 ---
