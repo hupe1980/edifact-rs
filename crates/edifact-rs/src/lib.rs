@@ -254,7 +254,7 @@ pub struct FromBytesIter<'a> {
     pending_error: Option<EdifactError>,
     /// Remaining segment allowance (`None` = unlimited).
     segments_remaining: Option<usize>,
-    /// Remaining byte allowance (`None` = unlimited).
+    /// Maximum byte budget (`None` = unlimited).
     bytes_remaining: Option<u64>,
     /// Byte offset of the start of the current parse position (approximated
     /// as the sum of previously yielded segment spans — the borrowed tokenizer
