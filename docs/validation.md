@@ -159,21 +159,25 @@ let report = ctx.validate_lenient(&segs);
 # let segs: Vec<_> = from_bytes(b"BGM+220+PO-4711+9'").collect::<Result<_,_>>()?;
 # let ctx = ValidationContext::builder().build();
 
-// Lenient: get all issues
+// Lenient: collect all issues even when errors are present
 let report = ctx.validate_lenient(&segs);
 if !report.is_valid() {
-    for issue in &report.errors {
+    for issue in report.errors() {
         eprintln!("error [{}]: {}", issue.error_code.unwrap_or("?"), issue.message);
     }
-    for warn in &report.warnings {
+    for warn in report.warnings() {
         eprintln!("warn:  {}", warn.message);
     }
 }
 
-// Strict: fail fast
+// Strict: run all validators; get Err(report) when any Error/Critical found
 match ctx.validate_strict(&segs) {
-    Ok(report) => println!("valid, {} warnings", report.warnings.len()),
-    Err(e) => eprintln!("invalid: {e}"),
+    Ok(report) => println!("valid, {} warnings", report.warnings().len()),
+    Err(report) => {
+        for issue in report.errors() {
+            eprintln!("error [{}]: {}", issue.error_code.unwrap_or("?"), issue.message);
+        }
+    }
 }
 # Ok::<(), edifact_rs::EdifactError>(())
 ```

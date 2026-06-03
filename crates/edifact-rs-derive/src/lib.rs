@@ -709,15 +709,21 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         } else if let Some(idx) = struct_attrs.qualifier_from {
             quote! {
-                let __qual_val = __seg.element_str(#idx as usize).unwrap_or("");
-                if __qual_val.is_empty() {
-                    return ::core::result::Result::Err(
+                match __seg.element_str(#idx as usize) {
+                    None => return ::core::result::Result::Err(
+                        ::edifact_rs::EdifactError::MissingRequiredElement {
+                            tag: #seg_tag.to_owned(),
+                            element_index: #idx as usize,
+                        }
+                    ),
+                    Some("") => return ::core::result::Result::Err(
                         ::edifact_rs::EdifactError::InvalidFieldValue {
                             tag: #seg_tag.to_owned(),
                             element_index: #idx as usize,
                             value: ::std::string::String::new(),
                         }
-                    );
+                    ),
+                    Some(__qual_val) => { let _ = __qual_val; }
                 }
             }
         } else {
