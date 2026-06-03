@@ -127,3 +127,86 @@ fn unrequired_option_still_returns_none_when_absent() {
     assert_eq!(tst.optional_second, None);
     assert_eq!(tst.mandatory_opt, Some("C".to_owned()));
 }
+
+// ── #[edifact(required)] combined with #[edifact(component = N)] ─────────────
+
+/// Segment where a specific component within a composite element is required.
+/// Absence must surface as `MissingRequiredComponent` (E021), not the
+/// coarser `MissingRequiredElement` (E008).
+#[derive(Debug, EdifactDeserialize)]
+#[edifact(segment = "PIA")]
+struct PiaSegment {
+    #[edifact(element = 0)]
+    item_number_type: String,
+    /// Component 0 of element 1 is mandatory; generates `MissingRequiredComponent`.
+    #[edifact(element = 1, component = 0, required)]
+    item_identifier: Option<String>,
+    /// Component 1 of element 1 is optional; generates `None` when absent.
+    #[edifact(element = 1, component = 1)]
+    item_scheme: Option<String>,
+}
+
+#[test]
+fn required_component_succeeds_when_component_present() {
+    // PIA+1+ITEM1:IN'  → element 0 = "1", element 1 component 0 = "ITEM1", component 1 = "IN"
+    let input = b"PIA+1+ITEM1:IN'";
+    let segments: Vec<_> = from_bytes(input).collect::<Result<_, _>>().unwrap();
+
+    let pia = PiaSegment::edifact_deserialize(&segments).unwrap();
+    assert_eq!(pia.item_number_type, "1");
+    assert_eq!(pia.item_identifier, Some("ITEM1".to_owned()));
+    assert_eq!(pia.item_scheme, Some("IN".to_owned()));
+}
+
+#[test]
+fn required_component_fails_with_missing_required_component_when_element_absent() {
+    // Element 1 entirely absent — component 0 of element 1 is required.
+    let input = b"PIA+1'";
+    let segments: Vec<_> = from_bytes(input).collect::<Result<_, _>>().unwrap();
+
+    let err = PiaSegment::edifact_deserialize(&segments)
+        .expect_err("expected Err when required component element is absent");
+    assert!(
+        matches!(
+            err,
+            EdifactError::MissingRequiredComponent {
+                ref tag,
+                element_index: 1,
+                component_index: 0,
+            } if tag == "PIA"
+        ),
+        "expected MissingRequiredComponent, got: {err:?}"
+    );
+}
+
+#[test]
+fn required_component_fails_with_missing_required_component_when_component_empty() {
+    // Element 1 present but component 0 is empty: PIA+1+:IN'
+    let input = b"PIA+1+:IN'";
+    let segments: Vec<_> = from_bytes(input).collect::<Result<_, _>>().unwrap();
+
+    let err = PiaSegment::edifact_deserialize(&segments)
+        .expect_err("expected Err when required component is empty string");
+    assert!(
+        matches!(
+            err,
+            EdifactError::MissingRequiredComponent {
+                ref tag,
+                element_index: 1,
+                component_index: 0,
+            } if tag == "PIA"
+        ),
+        "expected MissingRequiredComponent, got: {err:?}"
+    );
+}
+
+#[test]
+fn optional_component_returns_none_when_absent() {
+    // Component 1 absent — item_scheme should be None.
+    let input = b"PIA+1+ITEM1'";
+    let segments: Vec<_> = from_bytes(input).collect::<Result<_, _>>().unwrap();
+
+    let pia = PiaSegment::edifact_deserialize(&segments).unwrap();
+    assert_eq!(pia.item_identifier, Some("ITEM1".to_owned()));
+    assert_eq!(pia.item_scheme, None);
+}

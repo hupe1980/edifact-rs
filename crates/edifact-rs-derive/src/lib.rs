@@ -841,28 +841,45 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         )?;
                     });
                 }
-                let value_expr = if let Some(comp) = attrs.component {
-                    let comp = comp as usize;
+                let component_idx: Option<usize> = attrs.component.map(|c| c as usize);
+                let value_expr = if let Some(comp) = component_idx {
                     quote! {
                         __seg.get_element(#idx).and_then(|__e| __e.get_component(#comp))
                     }
                 } else {
                     quote! { __seg.element_str(#idx) }
                 };
+                // Build the correct "missing required" error depending on whether the
+                // field targets a component within an element or a whole element.
+                let missing_required_err = if let Some(comp) = component_idx {
+                    quote! {
+                        ::edifact_rs::EdifactError::MissingRequiredComponent {
+                            tag: #seg_tag.to_owned(),
+                            element_index: #idx as usize,
+                            component_index: #comp as usize,
+                        }
+                    }
+                } else {
+                    quote! {
+                        ::edifact_rs::EdifactError::MissingRequiredElement {
+                            tag: #seg_tag.to_owned(),
+                            element_index: #idx as usize,
+                        }
+                    }
+                };
                 Ok(if is_option_type(ty) {
                     let inner_ty = option_inner_type(ty);
                     let inner_is_str = inner_ty.is_some_and(is_str_like);
                     if attrs.required {
                         // #[edifact(required)] on Option<T>: treat absence as an error.
+                        // Emits MissingRequiredComponent when combined with component = N,
+                        // MissingRequiredElement otherwise.
                         if inner_is_str {
                             quote! {
                                 let #ident = ::core::option::Option::Some(
                                     #value_expr
                                         .filter(|__s| !__s.is_empty())
-                                        .ok_or_else(|| ::edifact_rs::EdifactError::MissingRequiredElement {
-                                            tag: #seg_tag.to_owned(),
-                                            element_index: #idx as usize,
-                                        })?
+                                        .ok_or_else(|| #missing_required_err)?
                                         .to_owned()
                                 );
                             }
@@ -873,10 +890,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                                 let #ident = ::core::option::Option::Some(
                                     #value_expr
                                         .filter(|__s| !__s.is_empty())
-                                        .ok_or_else(|| ::edifact_rs::EdifactError::MissingRequiredElement {
-                                            tag: #seg_tag.to_owned(),
-                                            element_index: #idx as usize,
-                                        })?
+                                        .ok_or_else(|| #missing_required_err)?
                                         .parse::<#inner_ty>()
                                         .map_err(|_| ::edifact_rs::EdifactError::InvalidText { offset: __seg.span.start })?
                                 );
@@ -1015,15 +1029,56 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         };
                     });
                 }
-                let value_expr_owned = if let Some(comp) = attrs.component {
-                    let comp = comp as usize;
+                let component_idx_owned: Option<usize> = attrs.component.map(|c| c as usize);
+                let value_expr_owned = if let Some(comp) = component_idx_owned {
                     quote! { __seg.component_str(#idx, #comp) }
                 } else {
                     quote! { __seg.element_str(#idx) }
                 };
+                // Build the correct "missing required" error for the owned path.
+                let missing_required_err_owned = if let Some(comp) = component_idx_owned {
+                    quote! {
+                        ::edifact_rs::EdifactError::MissingRequiredComponent {
+                            tag: #seg_tag.to_owned(),
+                            element_index: #idx as usize,
+                            component_index: #comp as usize,
+                        }
+                    }
+                } else {
+                    quote! {
+                        ::edifact_rs::EdifactError::MissingRequiredElement {
+                            tag: #seg_tag.to_owned(),
+                            element_index: #idx as usize,
+                        }
+                    }
+                };
                 Ok(if is_option_type(ty) {
                     if let Some(inner_ty) = option_inner_type(ty) {
-                        if is_str_like(inner_ty) {
+                        if attrs.required {
+                            // #[edifact(required)] on Option<T>: absence is an error.
+                            // Emits MissingRequiredComponent when combined with component = N,
+                            // MissingRequiredElement otherwise.
+                            if is_str_like(inner_ty) {
+                                quote! {
+                                    let #ident = ::core::option::Option::Some(
+                                        #value_expr_owned
+                                            .filter(|__s| !__s.is_empty())
+                                            .ok_or_else(|| #missing_required_err_owned)?
+                                            .to_owned()
+                                    );
+                                }
+                            } else {
+                                quote! {
+                                    let #ident = ::core::option::Option::Some(
+                                        #value_expr_owned
+                                            .filter(|__s| !__s.is_empty())
+                                            .ok_or_else(|| #missing_required_err_owned)?
+                                            .parse::<#inner_ty>()
+                                            .map_err(|_| ::edifact_rs::EdifactError::InvalidText { offset: __seg.span.start })?
+                                    );
+                                }
+                            }
+                        } else if is_str_like(inner_ty) {
                             quote! {
                                 let #ident = #value_expr_owned
                                     .filter(|__s| !__s.is_empty())

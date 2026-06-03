@@ -2,6 +2,7 @@ pub mod edifact_rs {
     #[derive(Debug)]
     pub enum EdifactError {
         MissingRequiredElement { tag: String, element_index: usize },
+        MissingRequiredComponent { tag: String, element_index: usize, component_index: usize },
         MissingSegment { tag: String, expected_position: String },
         InvalidFieldValue { tag: String, element_index: usize, value: String },
     }
