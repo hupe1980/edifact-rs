@@ -266,9 +266,13 @@ pub struct ReaderConfig {
     pub max_segments: Option<usize>,
     /// Maximum total input bytes to consume before the stream stops.
     ///
-    /// If the cumulative bytes read from the inner reader exceeds this threshold,
-    /// the stream stops yielding segments.  Use in combination with
-    /// `max_segment_bytes` for defence-in-depth against maliciously large inputs.
+    /// The budget is checked **before** each segment is read.  If
+    /// `bytes_consumed >= max_input_bytes` at that point the stream stops
+    /// immediately without reading any further data.  A segment whose bytes
+    /// push `bytes_consumed` above the threshold is still yielded (parsing
+    /// cannot be abandoned mid-segment), but no subsequent segment will be
+    /// started.  Use in combination with `max_segment_bytes` for
+    /// defence-in-depth against maliciously large inputs.
     ///
     /// Default: `None` (unlimited).
     pub max_input_bytes: Option<u64>,
@@ -506,6 +510,14 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
                         self.stream_offset += n;
                         self.bytes_consumed = self.stream_offset as u64;
                         self.segments_yielded += 1;
+                        // Eagerly mark Done if the byte budget was exhausted by
+                        // this segment so the next next() call returns None
+                        // without a redundant read attempt.
+                        if let Some(max) = self.config.max_input_bytes {
+                            if self.bytes_consumed >= max {
+                                self.state = StreamState::Done;
+                            }
+                        }
                         return Some(Ok(seg));
                     }
                     FastSegment::Skip(n) => {

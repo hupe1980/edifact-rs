@@ -10,18 +10,18 @@
 #
 # Steps mirrored from .github/workflows/ci.yml:
 #   1.  cargo check --workspace --all-targets              (msrv-check / feature-matrix)
-#   2.  cargo test --workspace --all-targets               (feature-matrix)
-#   3.  cargo test -p edifact-rs --no-default-features  (feature-matrix)
-#   4.  cargo test -p edifact-rs --all-features         (feature-matrix)
-#   5.  cargo test -p edifact-rs --all-features --examples
-#   6.  cargo clippy --all-targets --all-features -- -D warnings
-#   7.  cargo doc -p edifact-rs --all-features --no-deps (docsrs-check, stable proxy)
-#   8.  cargo publish --dry-run -p edifact-rs-derive     (release-check)
-#   9.  cargo publish --dry-run -p edifact-rs            (release-check)
-#   10. Crate versions match across workspace            (release-check)
-#   11. cargo deny check                                 (security/license audit)
-#   12. cargo bench bench_core                           (smoke, skipped with --no-bench)
-#   13. cargo bench bench_criterion smoke                (skipped with --no-bench)
+#   2.  cargo test --workspace --all-targets               (workspace tests)
+#   3.  cargo test -p edifact-rs --no-default-features     (feature-matrix)
+#   4.  cargo test -p edifact-rs --all-features            (feature-matrix)
+#   5.  cargo test -p edifact-rs --all-features --examples (feature-matrix)
+#   6.  cargo clippy --all-targets --all-features          (lint gate)
+#   7.  cargo doc (RUSTDOCFLAGS=-D warnings)               (docsrs-check proxy)
+#   8.  cargo publish --dry-run -p edifact-rs-derive       (release-check)
+#   9.  Crate versions match across workspace              (release-check)
+#   10. cargo deny check                                   (security/license audit)
+#   11. cargo test --benches --no-run                      (bench compile smoke)
+#   12. cargo bench bench_core                             (divan, skipped with --no-bench)
+#   13. cargo bench bench_criterion smoke                  (criterion, skipped with --no-bench)
 
 set -euo pipefail
 

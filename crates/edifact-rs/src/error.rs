@@ -399,7 +399,7 @@ pub enum EdifactError {
     /// and are not supported by this library.  Strip `UNG`/`UNE` wrappers before
     /// calling `validate_envelope`, or process the interchange as raw segments.
     #[error(
-        "functional group segments (UNG/UNE) are not supported; \
+        "functional group segments (UNG/UNE) at byte offset {offset} are not supported; \
          strip them before calling validate_envelope"
     )]
     FunctionalGroupNotSupported {

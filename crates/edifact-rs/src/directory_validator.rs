@@ -300,27 +300,31 @@ impl<'a> SegmentDefRef<'a> {
         }
     }
 
-    fn mandatory_positions(&self) -> impl Iterator<Item = (usize, &str)> {
+    /// Iterate over mandatory element positions without heap allocation.
+    ///
+    /// Calls `f(zero_based_index, data_element_id)` for each element whose
+    /// status is [`Status::Mandatory`].  Returns `Err` immediately if `f`
+    /// returns `Err`, short-circuiting the remaining elements.
+    fn for_each_mandatory_position<E, F>(&self, mut f: F) -> Result<(), E>
+    where
+        F: FnMut(usize, &str) -> Result<(), E>,
+    {
         match self {
-            Self::Static(d) => d
-                .elements
-                .iter()
-                .filter(|e| e.status == Status::Mandatory)
-                .map(|e| ((e.position as usize).saturating_sub(1), e.data_element))
-                .collect::<Vec<_>>(),
-            Self::Owned(d) => d
-                .elements
-                .iter()
-                .filter(|e| e.status == Status::Mandatory)
-                .map(|e| {
-                    (
+            Self::Static(d) => {
+                for e in d.elements.iter().filter(|e| e.status == Status::Mandatory) {
+                    f((e.position as usize).saturating_sub(1), e.data_element)?;
+                }
+            }
+            Self::Owned(d) => {
+                for e in d.elements.iter().filter(|e| e.status == Status::Mandatory) {
+                    f(
                         (e.position as usize).saturating_sub(1),
                         e.data_element.as_str(),
-                    )
-                })
-                .collect::<Vec<_>>(),
+                    )?;
+                }
+            }
         }
-        .into_iter()
+        Ok(())
     }
 }
 
@@ -696,7 +700,7 @@ impl DirectoryValidator {
         }
 
         if self.structure_checks {
-            for (idx, _de) in def.mandatory_positions() {
+            def.for_each_mandatory_position(|idx, _de| {
                 let is_present = seg
                     .elements
                     .get(idx)
@@ -707,7 +711,8 @@ impl DirectoryValidator {
                         element_index: idx,
                     });
                 }
-            }
+                Ok(())
+            })?;
             self.validate_component_counts(seg)?;
 
             if let Some(rule) = &self.additional_structure_rule {
