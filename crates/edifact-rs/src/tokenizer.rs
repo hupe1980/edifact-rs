@@ -58,9 +58,9 @@ impl ServiceStringAdvice {
         }
     }
 
-    /// Parse a UNA header and validate that the four active service characters
-    /// (`element_sep`, `component_sep`, `release_char`, `segment_term`) are all
-    /// mutually distinct and are not ASCII whitespace (`CR`, `LF`, space, tab).
+    /// Parse a UNA header and validate that the five active service characters
+    /// (`element_sep`, `component_sep`, `decimal_mark`, `release_char`, `segment_term`) are all
+    /// mutually distinct and in the printable ASCII range `0x21–0x7E`.
     ///
     /// Returns [`EdifactError::InvalidUna`] if the invariant is violated.
     /// Falls back to [`ServiceStringAdvice::default`] when no UNA is present.
@@ -72,26 +72,42 @@ impl ServiceStringAdvice {
         Ok(ssa)
     }
 
-    /// Return `true` if the four active service characters are mutually distinct
-    /// and none is ASCII whitespace (`CR`, `LF`, space, tab).
+    /// Return `true` if all five active service characters are mutually distinct
+    /// and all fall in the printable ASCII range `0x21–0x7E` (excl. space `0x20`,
+    /// control characters `0x00–0x1F`, and `DEL 0x7F`).
+    ///
+    /// The five characters are `element_sep`, `component_sep`, `decimal_mark`,
+    /// `release_char`, and `segment_term`.  All 10 pairwise combinations are
+    /// checked.
+    ///
+    /// Bytes outside `0x21–0x7E` are rejected: high-bytes (`>= 0x80`) would cause
+    /// incorrect single-byte tokenization of multi-byte UTF-8 sequences, and DEL
+    /// (`0x7F`) is a non-printable control character.
     pub fn is_valid(&self) -> bool {
-        let [e, c, r, t] = [
+        let [e, c, d, r, t] = [
             self.element_sep,
             self.component_sep,
+            self.decimal_mark,
             self.release_char,
             self.segment_term,
         ];
-        let no_ws = |b: u8| !matches!(b, b' ' | b'\t' | b'\r' | b'\n');
-        // All must be non-whitespace and mutually distinct (6 pairwise checks).
-        no_ws(e)
-            && no_ws(c)
-            && no_ws(r)
-            && no_ws(t)
+        // All five must be printable ASCII 0x21–0x7E (excludes high-bytes, control chars,
+        // whitespace, and DEL 0x7F) and mutually distinct (10 pairwise checks).
+        let printable_ascii = |b: u8| b >= 0x21 && b <= 0x7E;
+        printable_ascii(e)
+            && printable_ascii(c)
+            && printable_ascii(d)
+            && printable_ascii(r)
+            && printable_ascii(t)
             && e != c
+            && e != d
             && e != r
             && e != t
+            && c != d
             && c != r
             && c != t
+            && d != r
+            && d != t
             && r != t
     }
 }

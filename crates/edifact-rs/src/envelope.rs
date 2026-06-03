@@ -105,19 +105,28 @@ pub fn parse_unh<'a>(unh: &'a Segment<'a>) -> Result<MessageIdentifier<'a>, Edif
 /// - `UNZ` message count matches the number of `UNH`/`UNT` pairs found
 ///
 /// Returns `Ok((interchange_env, message_envs))` on success,
-/// or `Err(EdifactError::MessageCountMismatch)` / `Err(EdifactError::SegmentCountMismatch)` on
-/// count discrepancies.
+/// or an [`EdifactError`] on any structural violation.
 ///
-/// # Limitations
+/// # Errors
 ///
-/// Functional group segments (`UNG`/`UNE`) are **not supported**.  If the
-/// input contains `UNG` or `UNE` segments they will be treated as regular
-/// message segments and may cause an [`EdifactError::InvalidSegmentForMessage`]
-/// error or incorrect segment counting.  Strip functional-group wrappers
-/// before calling this function.
+/// Returns [`EdifactError::FunctionalGroupNotSupported`] if the input contains
+/// `UNG`/`UNE` functional group segments.  Strip them before calling this
+/// function if functional groups are not relevant to your use case.
+///
+/// Returns [`EdifactError::MessageCountMismatch`] or
+/// [`EdifactError::SegmentCountMismatch`] on count discrepancies.
 pub fn validate_envelope(
     segments: &[Segment<'_>],
 ) -> Result<(InterchangeEnvelope, Vec<MessageEnvelope>), EdifactError> {
+    // Functional group segments are not supported.  Detect them early so the
+    // caller gets a clear diagnostic rather than a misleading segment-count
+    // mismatch or `InvalidSegmentForMessage` buried deep in the parse.
+    if let Some(ung_or_une) = segments.iter().find(|s| s.tag == "UNG" || s.tag == "UNE") {
+        return Err(EdifactError::FunctionalGroupNotSupported {
+            offset: ung_or_une.span.start,
+        });
+    }
+
     let mut interchange_env = extract_interchange(segments)?;
     let message_envs = extract_messages(segments)?;
     interchange_env.actual_message_count =
@@ -282,7 +291,8 @@ fn extract_messages(segments: &[Segment<'_>]) -> Result<Vec<MessageEnvelope>, Ed
                 // actual count = segments from UNH (inclusive) to UNT (inclusive)
                 let actual_segment_count = u32::try_from(i - msg_start_idx + 1).map_err(|_| {
                     EdifactError::InterchangeTooLarge {
-                        // SAFETY: usize ≤ u64::MAX on all supported targets
+                        // INVARIANT: usize ≤ u64::MAX on all supported targets; unwrap_or is
+                        // unreachable but prevents a panic on hypothetical exotic platforms.
                         count: u64::try_from(i - msg_start_idx + 1).unwrap_or(u64::MAX),
                     }
                 })?;
@@ -519,11 +529,14 @@ mod tests {
             result.is_err(),
             "UNG/UNE is documented as unsupported; must return an error, not silently produce wrong counts"
         );
-        // The error must identify the offending segment (UNG or UNE), not some
-        // unrelated internal failure.
+        // The error must be the dedicated FunctionalGroupNotSupported variant,
+        // not some unrelated internal failure.
         assert!(
-            matches!(result, Err(EdifactError::InvalidSegmentForMessage { ref tag, .. }) if tag == "UNG" || tag == "UNE"),
-            "expected InvalidSegmentForMessage for UNG or UNE, got {result:?}"
+            matches!(
+                result,
+                Err(EdifactError::FunctionalGroupNotSupported { .. })
+            ),
+            "expected FunctionalGroupNotSupported, got {result:?}"
         );
     }
 }

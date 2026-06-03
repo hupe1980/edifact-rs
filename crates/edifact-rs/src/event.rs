@@ -79,6 +79,20 @@ impl<'a> EdifactEvent<'a> {
 pub trait EventEmitter {
     /// Consume one event.
     fn emit(&mut self, event: EdifactEvent<'_>) -> Result<(), EdifactError>;
+
+    /// Return the decimal-mark byte used by the interchange (`b'.'` by default).
+    ///
+    /// Serializers that format numeric values (e.g. [`crate::ser::DecimalFloat`])
+    /// call this to discover whether to emit `12.5` or `12,5`.
+    ///
+    /// The default implementation returns `b'.'`, which is correct for standard
+    /// EDIFACT interchanges that do not declare a UNA service string or that use
+    /// the ISO 9735 default.  Override this in emitters backed by a
+    /// [`crate::Writer`] with a custom [`crate::tokenizer::ServiceStringAdvice`].
+    #[inline]
+    fn decimal_mark(&self) -> u8 {
+        b'.'
+    }
 }
 
 // ── VecEmitter ────────────────────────────────────────────────────────────────
@@ -141,6 +155,21 @@ impl<W: Write> WriterEmitter<W> {
         }
     }
 
+    /// Create a new `WriterEmitter` with custom delimiters, writing a UNA header first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError::InvalidUna`] when `ssa.is_valid()` is false.
+    pub fn with_una(
+        inner: W,
+        ssa: crate::tokenizer::ServiceStringAdvice,
+    ) -> Result<Self, crate::EdifactError> {
+        Ok(Self {
+            writer: crate::Writer::with_una(inner, ssa)?,
+            state: EmitterState::Idle,
+        })
+    }
+
     /// Flush and consume the emitter, returning the underlying writer.
     pub fn finish(self) -> Result<W, EdifactError> {
         self.writer.finish()
@@ -150,9 +179,22 @@ impl<W: Write> WriterEmitter<W> {
     pub fn segment_count(&self) -> u64 {
         self.writer.segment_count()
     }
+
+    /// Return the active [`ServiceStringAdvice`][crate::tokenizer::ServiceStringAdvice].
+    ///
+    /// Callers can use this to format values (e.g., floats) using the correct
+    /// decimal-mark character configured in the UNA header.
+    pub fn service_string_advice(&self) -> crate::tokenizer::ServiceStringAdvice {
+        self.writer.service_string_advice()
+    }
 }
 
 impl<W: Write> EventEmitter for WriterEmitter<W> {
+    #[inline]
+    fn decimal_mark(&self) -> u8 {
+        self.writer.service_string_advice().decimal_mark
+    }
+
     fn emit(&mut self, event: EdifactEvent<'_>) -> Result<(), EdifactError> {
         match event {
             EdifactEvent::StartSegment { tag } => {

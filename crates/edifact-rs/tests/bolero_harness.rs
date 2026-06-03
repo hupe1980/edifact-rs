@@ -132,7 +132,7 @@ fn fuzz_validation_layers_no_panic() {
 
 #[test]
 fn fuzz_qualifier_matches_pattern_no_panic() {
-    use edifact_rs::qualifier_matches_pattern;
+    use edifact_rs::__private::qualifier_matches_pattern;
     // For any two arbitrary strings the function must never panic.
     check!().with_type::<(String, String)>().cloned().for_each(
         |(value, pattern): (String, String)| {
@@ -143,7 +143,7 @@ fn fuzz_qualifier_matches_pattern_no_panic() {
 
 #[test]
 fn fuzz_qualifier_pattern_invariants() {
-    use edifact_rs::qualifier_matches_pattern;
+    use edifact_rs::__private::qualifier_matches_pattern;
     // Invariant 1: a literal pattern (no '*') is always an exact match.
     // Invariant 2: pattern "*" matches every value (wildcard-only).
     // Invariant 3: empty pattern matches only empty value.
@@ -282,6 +282,61 @@ fn fuzz_reader_no_panic_and_equivalence() {
                 );
                 for (r, s) in reader_segs.iter().zip(slice_segs.iter()) {
                     assert_eq!(r.tag, s.tag, "tag mismatch between reader and slice paths");
+                }
+            }
+        });
+}
+
+#[test]
+fn fuzz_from_bytes_strict_no_panic() {
+    // `ServiceStringAdvice::from_bytes_strict` must not panic or unwind for any
+    // arbitrary byte input.  It may return errors or valid SSAs.
+    use edifact_rs::ServiceStringAdvice;
+
+    check!()
+        .with_type::<Vec<u8>>()
+        .cloned()
+        .for_each(|input: Vec<u8>| {
+            // May succeed or return an error — must never panic.
+            let _ = ServiceStringAdvice::from_bytes_strict(&input);
+        });
+}
+
+#[test]
+fn fuzz_tokenizer_with_limit_no_panic() {
+    // The tokenizer with a size limit and custom SSA must never panic for any byte input.
+    use edifact_rs::{
+        Parser, ReaderConfig, ServiceStringAdvice, Tokenizer, from_bytes_with_config,
+    };
+
+    check!()
+        .with_type::<Vec<u8>>()
+        .cloned()
+        .for_each(|input: Vec<u8>| {
+            // Default path: exercises UNA detection + default 64 KiB limit.
+            for result in edifact_rs::from_bytes(&input) {
+                // Results may be Ok or Err; we only require no panic.
+                let _ = result;
+            }
+
+            // Reduced-limit path: exercises max_segment_bytes enforcement.
+            let small_limit = ReaderConfig::default().max_segment_bytes(64);
+            for result in from_bytes_with_config(&input, small_limit) {
+                let _ = result;
+            }
+
+            // Custom-SSA path: derive a non-default SSA from the first 9 bytes and
+            // parse with it — exercises alternative delimiter paths via the public
+            // Tokenizer + Parser API.
+            if input.len() >= 9 {
+                let ssa = ServiceStringAdvice::from_bytes(&input[..9]);
+                // Ensure is_valid does not panic.
+                let _ = ssa.is_valid();
+                // Parse using the derived SSA with a 64 KiB per-segment limit.
+                let t = Tokenizer::with_limit(&input, ssa, 65_536);
+                let mut p = Parser::new(t);
+                while let Some(result) = p.next() {
+                    let _ = result;
                 }
             }
         });

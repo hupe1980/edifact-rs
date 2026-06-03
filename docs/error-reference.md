@@ -28,7 +28,7 @@ be added without breaking existing match arms.
 | E015 | `MissingSegment` | Directory validator | — |
 | E016 | `QualifierMismatch` | Typed deserializer | `offset` |
 | E017 | `ConditionalRequirementNotMet` | Profile validator | `offset` |
-| E018 | `ValidationFailed` | Strict validation | — |
+| E018 | `ValidationFailed` | Manual construction | — |
 | E019 | `InvalidReleaseSequence` | Parser | `offset` |
 | E020 | `SegmentTooLong` | Reader parser | `offset` |
 | E021 | `MissingRequiredComponent` | Deserializer | — |
@@ -37,6 +37,9 @@ be added without breaking existing match arms.
 | E024 | `InvalidEventSequence` | Event emitter | — |
 | E025 | `InvalidElementPosition` | Directory builder | — |
 | E026 | `IncompatibleReleaseScopes` | Profile pack composer | — |
+| E027 | `InvalidFieldValue` | Typed deserializer | — |
+| E028 | `UnexpectedDataToken` | Parser | `offset` |
+| E029 | `FunctionalGroupNotSupported` | Envelope validator | `offset` |
 
 ---
 
@@ -299,13 +302,15 @@ triggered the condition.
 validation failed with {error_count} issue(s); first issue: {first_message}
 ```
 
-**When**: `validate_strict` was called and the `ValidationReport` contained at least
-one error. This wraps the entire report as a single `EdifactError`.
+**When**: Constructed manually to surface a `ValidationReport` failure as an
+`EdifactError` — for example when a library boundary requires `Result<T, EdifactError>`.
+This variant is **not** emitted by `validate_strict`, which returns
+`Result<ValidationReport, ValidationReport>` directly.
 
 **Fields**: `error_count: usize`, `first_message: String`.
 
-**Fix**: Switch to `validate_lenient` and inspect the full `ValidationReport`, or
-fix all issues before calling `validate_strict`.
+**Fix**: Inspect the full `ValidationReport` from `validate_lenient`, or call
+`validate_strict` and handle the `Err(ValidationReport)` variant directly.
 
 ---
 
@@ -441,6 +446,57 @@ either share the same release scope or at most one may carry a scope.
 **Fix**: Ensure both packs target the same release with
 `ProfileRulePack::for_release`, or remove the scope from one pack before
 composing.
+
+---
+
+### E027 — `InvalidFieldValue`
+
+```
+segment {tag} element {element_index}: invalid field value "{value}"
+```
+
+**When**: The typed deserializer found a qualifier element that was present but
+held an empty or otherwise invalid value.
+
+**Fields**: `tag: String`, `element_index: usize`, `value: String`.
+
+**Fix**: Check that the qualifier element in segment `tag` at position
+`element_index` contains a recognised non-empty value.
+
+---
+
+### E028 — `UnexpectedDataToken`
+
+```
+unexpected data token at byte offset {offset}: data element before segment tag
+```
+
+**When**: The parser encountered a data-element or component-element token
+before reading the first segment tag.  This usually indicates a partial write,
+a missing segment tag, or encoding corruption.
+
+**Fields**: `offset: usize`.
+
+**Fix**: Verify the input starts with a valid segment tag (three uppercase
+ASCII letters) and that no data or component separators appear before it.
+
+---
+
+### E029 — `FunctionalGroupNotSupported`
+
+```
+functional group segments (UNG/UNE) at byte offset {offset} are not supported; strip them before calling validate_envelope
+```
+
+**When**: `validate_envelope` (or `EnvelopeValidator`) found a `UNG` or `UNE`
+segment.  Functional groups are a legacy EDIFACT envelope layer that this
+library does not process.
+
+**Fields**: `offset: usize`.
+
+**Fix**: Strip the `UNG`/`UNE` wrapper segments before calling
+`validate_envelope`, or pre-process the interchange to remove functional-group
+nesting.
 
 ---
 

@@ -27,18 +27,9 @@ impl<W: Write> Writer<W> {
 
     /// Create a writer with custom delimiters and write a UNA segment first.
     pub fn with_una(mut inner: W, ssa: ServiceStringAdvice) -> Result<Self, EdifactError> {
-        // EDIFACT syntax requires all delimiter bytes to be ASCII (0x00–0x7F).
-        // Non-ASCII bytes would bisect multi-byte UTF-8 sequences in data values.
-        if [
-            ssa.component_sep,
-            ssa.element_sep,
-            ssa.decimal_mark,
-            ssa.release_char,
-            ssa.segment_term,
-        ]
-        .iter()
-        .any(|&b| b > 0x7F)
-        {
+        // All five active service characters must be mutually distinct, non-whitespace,
+        // and within the ASCII range so they never bisect multi-byte UTF-8 sequences.
+        if !ssa.is_valid() {
             return Err(EdifactError::InvalidUna);
         }
         // UNA: component_sep, element_sep, decimal_mark, release_char, space, segment_term
@@ -113,8 +104,8 @@ impl<W: Write> Writer<W> {
             // Byte-level split: EDIFACT delimiters are always single bytes.
             let mut parts = el.as_bytes().split(|&b| b == comp_sep);
             if let Some(first) = parts.next() {
-                // SAFETY: input is valid UTF-8 and we split on a single-byte delimiter,
-                // so each part remains a valid UTF-8 slice.
+                // INVARIANT: input is valid UTF-8 and we split on a single-byte ASCII
+                // delimiter, so each part remains a valid UTF-8 slice.
                 self.write_escaped(
                     std::str::from_utf8(first).map_err(|_| EdifactError::InvalidUtf8)?,
                 )?;
@@ -163,11 +154,33 @@ impl<W: Write> Writer<W> {
         Ok(self.inner)
     }
 
+    /// Write the `UNT` segment and return the inner writer.
+    ///
+    /// The segment count written into `UNT` element 1 (DE 0074) is the number of
+    /// segments already written **plus one** for the `UNT` segment itself, which
+    /// EDIFACT requires to be included in the count alongside `UNH`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing fails.  Do **not** call [`write_raw`][Self::write_raw] or
+    /// [`write_segment`][Self::write_segment] after `finish_unt` — the writer is consumed.
+    pub fn finish_unt(mut self, message_ref: &str) -> Result<W, EdifactError> {
+        // DE 0074: count includes UNH and UNT themselves.
+        let count = self.segment_count + 1;
+        let count_str = count.to_string();
+        self.write_raw("UNT", &[count_str.as_str(), message_ref])?;
+        self.finish()
+    }
+
     /// Returns the total number of segments written so far.
     pub fn segment_count(&self) -> u64 {
         self.segment_count
     }
 
+    /// Returns the active [`ServiceStringAdvice`] (delimiter configuration).
+    pub fn service_string_advice(&self) -> ServiceStringAdvice {
+        self.ssa
+    }
     /// Write only the segment tag bytes — no element separator or terminator.
     ///
     /// Used by [`crate::WriterEmitter`] for eager, zero-allocation event writing.
@@ -208,24 +221,29 @@ impl<W: Write> Writer<W> {
             self.ssa.segment_term,
         );
         let bytes = value.as_bytes();
+        let mut last = 0;
         let mut pos = 0;
         while pos < bytes.len() {
-            // Find next byte that needs escaping
-            let end = bytes[pos..]
-                .iter()
-                .position(|&b| b == elem || b == comp || b == release || b == term)
-                .map(|r| pos + r)
-                .unwrap_or(bytes.len());
-            if end > pos {
-                self.inner.write_all(&bytes[pos..end])?;
+            // Use memchr3 for three delimiters + memchr for the fourth to avoid
+            // a manual byte-by-byte scan.
+            let remaining = &bytes[pos..];
+            let hit_ecr = memchr::memchr3(elem, comp, release, remaining);
+            let hit_t = memchr::memchr(term, remaining);
+            let hit = match (hit_ecr, hit_t) {
+                (None, None) => break,
+                (Some(a), None) => a,
+                (None, Some(b)) => b,
+                (Some(a), Some(b)) => a.min(b),
+            };
+            let abs = pos + hit;
+            if abs > last {
+                self.inner.write_all(&bytes[last..abs])?;
             }
-            if end < bytes.len() {
-                self.inner.write_all(&[release, bytes[end]])?;
-                pos = end + 1;
-            } else {
-                break;
-            }
+            self.inner.write_all(&[release, bytes[abs]])?;
+            last = abs + 1;
+            pos = abs + 1;
         }
+        self.inner.write_all(&bytes[last..])?;
         Ok(())
     }
 }

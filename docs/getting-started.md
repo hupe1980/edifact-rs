@@ -22,7 +22,7 @@ rustup update      # upgrade to latest stable
 
 ```toml
 [dependencies]
-edifact-rs = "0.4"
+edifact-rs = "0.7"
 ```
 
 The `derive` feature is enabled by default, which re-exports
@@ -39,14 +39,14 @@ Enable diagnostics:
 
 ```toml
 [dependencies]
-edifact-rs = { version = "0.4", features = ["diagnostics"] }
+edifact-rs = { version = "0.7", features = ["diagnostics"] }
 ```
 
 Disable derive macros (core parsing only):
 
 ```toml
 [dependencies]
-edifact-rs = { version = "0.4", default-features = false }
+edifact-rs = { version = "0.7", default-features = false }
 ```
 
 ---

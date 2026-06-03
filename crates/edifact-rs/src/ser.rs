@@ -163,7 +163,97 @@ macro_rules! impl_serialize_float {
 
 impl_serialize_float!(f32, f64);
 
-// ── public API ────────────────────────────────────────────────────────────────
+// ── decimal-mark-aware float wrapper ─────────────────────────────────────────
+
+/// A float value that serializes using the interchange's configured decimal mark.
+///
+/// Rust's [`Display`][std::fmt::Display] for `f32`/`f64` always uses `.` as the
+/// decimal separator.  EDIFACT interchanges can declare a different decimal mark
+/// in the UNA service string — most commonly `,` in German EDI@Energy messages.
+/// Bare `f32`/`f64` [`EdifactSerialize`] impls are correct for standard (`.`) interchanges
+/// but produce **silent data corruption** for `,` interchanges.
+///
+/// Wrap a float in `DecimalFloat` when the interchange may use a non-`.` decimal mark:
+///
+/// ```
+/// use edifact_rs::ser::DecimalFloat;
+/// use edifact_rs::{EdifactSerialize, VecEmitter, OwnedEdifactEvent};
+///
+/// let mut emitter = VecEmitter::default();
+/// DecimalFloat(12.5_f64).edifact_serialize(&mut emitter).unwrap();
+/// assert!(matches!(&emitter.events[0], OwnedEdifactEvent::Element { value } if value == "12.5"));
+/// ```
+///
+/// When the emitter's [`EventEmitter::decimal_mark`] is `b','`, the output will be `"12,5"`.
+///
+/// # Supported inner types
+///
+/// `DecimalFloat<f32>`, `DecimalFloat<f64>`. For any type that implements
+/// [`std::fmt::Display`], use [`DecimalFloatDisplay`] instead.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DecimalFloat<T>(pub T);
+
+/// Decimal-mark-aware serializer for any [`std::fmt::Display`] value.
+///
+/// Like [`DecimalFloat`] but works with any type whose `Display` uses `.` as a
+/// decimal point (e.g., `rust_decimal::Decimal`, `bigdecimal::BigDecimal`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DecimalFloatDisplay<T: std::fmt::Display>(pub T);
+
+fn serialize_with_decimal_mark<E: EventEmitter>(
+    display: &dyn std::fmt::Display,
+    emitter: &mut E,
+) -> Result<(), EdifactError> {
+    use std::io::Write as _;
+    let mark = emitter.decimal_mark();
+
+    // Fast path: standard interchange — avoid any string manipulation.
+    if mark == b'.' {
+        let mut buf = [0u8; 320];
+        let mut w: &mut [u8] = &mut buf;
+        if write!(w, "{display}").is_ok() {
+            let written = 320 - w.len();
+            // INVARIANT: float Display output is ASCII-only.
+            let s = std::str::from_utf8(&buf[..written]).map_err(|_| EdifactError::InvalidUtf8)?;
+            return emitter.emit(EdifactEvent::Element { value: s });
+        }
+        // Buffer overflow fallback (extraordinarily large exponent).
+        let s = format!("{display}");
+        return emitter.emit(EdifactEvent::Element { value: &s });
+    }
+
+    // Non-standard decimal mark: format as string then replace '.'.
+    // INVARIANT: `mark` is ASCII (validated by ServiceStringAdvice::is_valid()).
+    let s = format!("{display}");
+    let mark_char = mark as char;
+    if s.contains('.') {
+        let replaced = s.replace('.', &mark_char.to_string());
+        emitter.emit(EdifactEvent::Element { value: &replaced })
+    } else {
+        emitter.emit(EdifactEvent::Element { value: &s })
+    }
+}
+
+impl EdifactSerialize for DecimalFloat<f32> {
+    #[inline]
+    fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
+        serialize_with_decimal_mark(&self.0, emitter)
+    }
+}
+
+impl EdifactSerialize for DecimalFloat<f64> {
+    #[inline]
+    fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
+        serialize_with_decimal_mark(&self.0, emitter)
+    }
+}
+
+impl<T: std::fmt::Display> EdifactSerialize for DecimalFloatDisplay<T> {
+    #[inline]
+    fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
+        serialize_with_decimal_mark(&self.0, emitter)
+    }
+}
 
 /// Serialize `value` to the given [`Write`] implementation.
 pub fn to_writer<T, W>(inner: W, value: &T) -> Result<(), EdifactError>

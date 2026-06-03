@@ -27,8 +27,21 @@ impl Span {
     }
 
     /// Length of the span in bytes.
+    ///
+    /// # Note on constness
+    ///
+    /// This method is intentionally **not** `const fn` (changed in 0.7.0) so that
+    /// the `debug_assert!` overflow guard is included in debug builds.  If you need
+    /// span arithmetic in a `const` context use `span.end - span.start` directly
+    /// (both fields are `pub`).
     #[inline]
-    pub const fn len(self) -> usize {
+    pub fn len(self) -> usize {
+        debug_assert!(
+            self.start <= self.end,
+            "Span::len: start ({}) > end ({})",
+            self.start,
+            self.end
+        );
         self.end - self.start
     }
 
@@ -340,7 +353,7 @@ impl OwnedSegment {
     /// Get the first component of element `n`, or `None` if absent.
     ///
     /// This is the zero-allocation equivalent of `as_borrowed().element_str(n)`.
-    /// Used internally by [`crate::find_segment_owned`] and the derived
+    /// Used internally by [`crate::__private::find_segment_owned`] and the derived
     /// [`crate::EdifactDeserialize::edifact_deserialize_owned`] implementations.
     #[inline]
     pub fn element_str(&self, n: usize) -> Option<&str> {

@@ -3,6 +3,7 @@ pub mod edifact_rs {
     pub enum EdifactError {
         MissingRequiredElement { tag: String, element_index: usize },
         MissingSegment { tag: String, expected_position: String },
+        InvalidFieldValue { tag: String, element_index: usize, value: String },
     }
 
     #[derive(Debug, Clone, Copy)]
@@ -15,6 +16,7 @@ pub mod edifact_rs {
 
     pub trait EventEmitter {
         fn emit(&mut self, _event: EdifactEvent<'_>) -> Result<(), EdifactError>;
+        fn decimal_mark(&self) -> u8 { b'.' }
     }
 
     pub trait EdifactSerialize {
@@ -177,5 +179,12 @@ pub mod edifact_rs {
         T: EdifactSegmentTag,
     {
         segments.iter().filter(|s| T::matches_segment(s))
+    }
+
+    pub mod __private {
+        pub use super::{
+            composite_element, find_qualified_segment, find_qualified_segment_owned,
+            find_segment, find_segment_owned, find_segments_typed,
+        };
     }
 }

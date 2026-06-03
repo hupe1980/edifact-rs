@@ -13,8 +13,9 @@
 //! ```
 
 use edifact_rs::{
-    Segment, ValidationContext, ValidationLayer, ValidationReport, ValidationRuleContext,
-    Validator, find_qualified_segment, from_bytes, segments_to_bytes, validate_each,
+    __private::find_qualified_segment, Segment, ValidationContext, ValidationLayer,
+    ValidationReport, ValidationRuleContext, Validator, from_bytes, segments_to_bytes,
+    validate_each,
 };
 
 /// A simple custom validator that checks for known segment tags
@@ -61,8 +62,8 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 
     // ── 3. Validate ───────────────────────────────────────────────────────────
     // `validate_lenient` collects all issues into a report rather than failing
-    // on the first error.  Switch to `validate_strict` to get a typed
-    // `EdifactError` containing the first failure.
+    // on the first error.  Switch to `validate_strict` to run all validators
+    // and then return `Err(ValidationReport)` if any Error/Critical issues were found.
     let validation_context = ValidationContext::builder()
         .with_message_type("ORDERS")
         .with_validator(ValidationLayer::Structure, SimpleValidator)

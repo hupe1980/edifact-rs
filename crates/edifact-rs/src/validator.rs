@@ -1,6 +1,8 @@
 //! Validation pipeline for structural and semantic EDIFACT checks.
 
-use crate::{EdifactError, Segment, ValidationIssue, ValidationReport, ValidationSeverity};
+use crate::{
+    EdifactError, OwnedSegment, Segment, ValidationIssue, ValidationReport, ValidationSeverity,
+};
 use std::any::Any;
 use std::sync::Arc;
 
@@ -138,7 +140,13 @@ impl Clone for NamedRule {
 /// A profile/MIG rule pack that can be plugged into `ValidationContext`.
 pub struct ProfileRulePack {
     name: String,
-    message_types: Vec<String>,
+    /// Set of EDIFACT message types this pack is scoped to (e.g. `"ORDERS"`, `"INVOIC"`).
+    ///
+    /// `BTreeSet` provides O(log n) membership tests and deterministic iteration order
+    /// without requiring the `hashbrown` dependency.  Profile packs rarely contain more
+    /// than a handful of types, so the difference over a `Vec` is negligible in practice,
+    /// but the semantics (no duplicates, sorted iteration) are more correct.
+    message_types: std::collections::BTreeSet<String>,
     /// Association-assigned code (DE 0057) this pack is bound to, e.g. `"5.5.3a"`.
     ///
     /// `None` means the pack applies universally regardless of association code.
@@ -152,7 +160,7 @@ impl ProfileRulePack {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            message_types: Vec::new(),
+            message_types: std::collections::BTreeSet::new(),
             release: None,
             rules: Vec::new(),
             bail_on_first_error: false,
@@ -165,13 +173,20 @@ impl ProfileRulePack {
     }
 
     /// Return the message types this pack is scoped to.
-    pub fn message_types(&self) -> &[String] {
-        &self.message_types
+    pub fn message_types(&self) -> impl Iterator<Item = &str> {
+        self.message_types.iter().map(|s| s.as_str())
     }
 
     /// Return the number of rules in this pack.
     pub fn rule_count(&self) -> usize {
         self.rules.len()
+    }
+
+    /// Iterate over the stable identifiers of all **named** rules in this pack.
+    ///
+    /// Anonymous rules (added without an id) are skipped.
+    pub fn rule_ids(&self) -> impl Iterator<Item = &str> {
+        self.rules.iter().filter_map(|r| r.id.as_deref())
     }
 
     /// Return the association-assigned release code this pack is bound to, if any.
@@ -197,10 +212,7 @@ impl ProfileRulePack {
     /// If you need a hard failure on a missing `UNH`, add a dedicated [`ProfileRule`] that
     /// checks for the segment's presence before other rules run.
     pub fn for_message_type(mut self, message_type: impl Into<String>) -> Self {
-        let message_type = message_type.into();
-        if !self.message_types.contains(&message_type) {
-            self.message_types.push(message_type);
-        }
+        self.message_types.insert(message_type.into());
         self
     }
 
@@ -351,9 +363,7 @@ impl ProfileRulePack {
         combined.append(&mut self.rules);
         self.rules = combined;
         for mt in &base.message_types {
-            if !self.message_types.contains(mt) {
-                self.message_types.push(mt.clone());
-            }
+            self.message_types.insert(mt.clone());
         }
         self.release = merge_release_scopes(self.release.take(), base.release.clone())?;
         Ok(self)
@@ -367,11 +377,7 @@ impl ProfileRulePack {
     /// Release scoping follows the same compatibility rule as
     /// [`extend_from`][Self::extend_from].
     pub fn merge(mut self, mut other: Self) -> Result<Self, EdifactError> {
-        for message_type in other.message_types.drain(..) {
-            if !self.message_types.contains(&message_type) {
-                self.message_types.push(message_type);
-            }
-        }
+        self.message_types.append(&mut other.message_types);
         self.release = merge_release_scopes(self.release.take(), other.release.take())?;
         self.rules.append(&mut other.rules);
         Ok(self)
@@ -439,11 +445,7 @@ impl ProfileRulePack {
         // Append new rules.
         self.rules.append(&mut to_append);
 
-        for message_type in other.message_types.drain(..) {
-            if !self.message_types.contains(&message_type) {
-                self.message_types.push(message_type);
-            }
-        }
+        self.message_types.append(&mut other.message_types);
         self.release = merge_release_scopes(self.release.take(), other.release.take())?;
         Ok(self)
     }
@@ -480,7 +482,7 @@ impl Validator for ProfileRulePack {
             .and_then(|s| s.get_element(1))
             .and_then(|e| e.get_component(0));
         if !self.message_types.is_empty()
-            && !message_type.is_some_and(|mt| self.message_types.iter().any(|t| t == mt))
+            && !message_type.is_some_and(|mt| self.message_types.contains(mt))
         {
             return;
         }
@@ -536,6 +538,8 @@ impl std::fmt::Debug for ProfileRulePack {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ValidationLayer {
+    /// Interchange / message envelope checks (`UNB`/`UNH`/`UNT`/`UNZ` counts).
+    Envelope,
     /// Directory structure checks (segment presence/order/arity).
     Structure,
     /// Directory code-list checks.
@@ -552,10 +556,13 @@ struct LayeredValidator {
 /// Runtime validation context for progressive layered validation.
 pub struct ValidationContext {
     validators: Vec<LayeredValidator>,
+    envelope_enabled: bool,
     structure_enabled: bool,
     code_list_enabled: bool,
     profile_enabled: bool,
     message_type: Option<String>,
+    /// Injected into every emitted `ValidationIssue` when set.
+    message_ref: Option<String>,
     metadata: Option<Arc<dyn Any + Send + Sync>>,
 }
 
@@ -578,10 +585,12 @@ impl ValidationContextBuilder {
         Self {
             inner: ValidationContext {
                 validators: Vec::new(),
+                envelope_enabled: false,
                 structure_enabled: true,
                 code_list_enabled: true,
                 profile_enabled: true,
                 message_type: None,
+                message_ref: None,
                 metadata: None,
             },
         }
@@ -597,6 +606,17 @@ impl ValidationContextBuilder {
     /// [`ValidationContext::validate_lenient_with`] instead.
     pub fn with_metadata<T: Any + Send + Sync + 'static>(mut self, value: T) -> Self {
         self.inner.metadata = Some(Arc::new(value));
+        self
+    }
+
+    /// Stamp every issue produced by this context with the given message reference.
+    ///
+    /// The message reference corresponds to DE 0062 from the `UNH` segment.
+    /// Use this when validating individual messages from a multi-message
+    /// interchange so that issues in the resulting [`ValidationReport`] can be
+    /// correlated back to the originating `UNH`/`UNT` envelope.
+    pub fn with_message_ref(mut self, message_ref: impl Into<String>) -> Self {
+        self.inner.message_ref = Some(message_ref.into());
         self
     }
 
@@ -625,6 +645,40 @@ impl ValidationContextBuilder {
     /// Enable/disable profile validators.
     pub fn profile(mut self, enabled: bool) -> Self {
         self.inner.profile_enabled = enabled;
+        self
+    }
+
+    /// Enable/disable envelope layer validators.
+    ///
+    /// Off by default.  Call [`with_envelope_validation`][Self::with_envelope_validation]
+    /// to add the built-in [`EnvelopeValidator`] and enable the layer in one step.
+    pub fn envelope(mut self, enabled: bool) -> Self {
+        self.inner.envelope_enabled = enabled;
+        self
+    }
+
+    /// Add the built-in [`EnvelopeValidator`] and enable the envelope layer.
+    ///
+    /// The built-in validator mirrors [`crate::validate_envelope`] but
+    /// translates each structural error into a [`ValidationIssue`] so all
+    /// issues land in the unified [`ValidationReport`] alongside profile and
+    /// directory findings.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let report = ValidationContext::builder()
+    ///     .with_envelope_validation()
+    ///     .with_message_type("ORDERS")
+    ///     .build()
+    ///     .validate_lenient(&all_segments);
+    /// ```
+    pub fn with_envelope_validation(mut self) -> Self {
+        self.inner.envelope_enabled = true;
+        self.inner.validators.push(LayeredValidator {
+            layer: ValidationLayer::Envelope,
+            validator: Box::new(EnvelopeValidator),
+        });
         self
     }
 
@@ -697,16 +751,18 @@ impl ValidationContext {
 
     /// Execute validators in strict mode for enabled layers.
     ///
-    /// Returns `Ok(report)` when validation produces no errors.  The returned
-    /// report may still contain warnings and infos — warnings do **not** cause
-    /// this method to return `Err`.  Call [`validate_lenient`][Self::validate_lenient]
-    /// if you want to inspect warnings without failing on errors.
+    /// Returns `Ok(report)` when validation produces no errors.  The `Err` variant
+    /// **also contains the full report** (errors, warnings, and infos) so that
+    /// callers can inspect all issues even on failure.
+    ///
+    /// Warnings do **not** cause this method to return `Err`.  Call
+    /// [`validate_lenient`][Self::validate_lenient] if you want to inspect warnings
+    /// without failing on errors.
     pub fn validate_strict(
         &self,
         segments: &[Segment<'_>],
-    ) -> Result<ValidationReport, EdifactError> {
-        let report = self.validate_lenient(segments);
-        Self::strict_check(report)
+    ) -> Result<ValidationReport, ValidationReport> {
+        self.validate_lenient(segments).result()
     }
 
     /// Execute validators in strict mode with per-call typed metadata.
@@ -717,9 +773,29 @@ impl ValidationContext {
         &self,
         segments: &[Segment<'_>],
         value: &T,
-    ) -> Result<ValidationReport, EdifactError> {
-        let report = self.validate_lenient_with(segments, value);
-        Self::strict_check(report)
+    ) -> Result<ValidationReport, ValidationReport> {
+        self.validate_lenient_with(segments, value).result()
+    }
+
+    /// Execute validators in lenient mode against an owned-segment slice.
+    ///
+    /// Converts owned segments to borrowed segments on-the-fly and delegates to
+    /// [`validate_lenient`][Self::validate_lenient].
+    pub fn validate_lenient_owned(&self, segments: &[OwnedSegment]) -> ValidationReport {
+        let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
+        self.validate_lenient(&borrowed)
+    }
+
+    /// Execute validators in strict mode against an owned-segment slice.
+    ///
+    /// Equivalent to [`validate_strict`][Self::validate_strict] but accepts
+    /// `&[OwnedSegment]` directly, avoiding a manual `.as_borrowed()` conversion
+    /// at the call site.
+    pub fn validate_strict_owned(
+        &self,
+        segments: &[OwnedSegment],
+    ) -> Result<ValidationReport, ValidationReport> {
+        self.validate_lenient_owned(segments).result()
     }
 
     fn validate_with_context(
@@ -733,22 +809,20 @@ impl ValidationContext {
                 lv.validator.validate_batch(segments, &mut report, context);
             }
         }
-        report
-    }
-
-    fn strict_check(report: ValidationReport) -> Result<ValidationReport, EdifactError> {
-        if report.has_errors() {
-            let first_message = report
-                .errors()
-                .first()
-                .map(|e| e.message.clone())
-                .unwrap_or_else(|| "unknown validation failure".to_owned());
-            return Err(EdifactError::ValidationFailed {
-                error_count: report.errors().len(),
-                first_message,
-            });
+        // Stamp every issue with the message reference if one was configured.
+        if let Some(ref msg_ref) = self.message_ref {
+            for issue in report
+                .errors
+                .iter_mut()
+                .chain(report.warnings.iter_mut())
+                .chain(report.infos.iter_mut())
+            {
+                if issue.message_ref.is_none() {
+                    issue.message_ref = Some(msg_ref.clone());
+                }
+            }
         }
-        Ok(report)
+        report
     }
 
     /// Message type metadata associated with this context, if provided.
@@ -756,8 +830,14 @@ impl ValidationContext {
         self.message_type.as_deref()
     }
 
+    /// Message reference (`UNH` element 0) associated with this context, if provided.
+    pub fn message_ref(&self) -> Option<&str> {
+        self.message_ref.as_deref()
+    }
+
     fn layer_enabled(&self, layer: ValidationLayer) -> bool {
         match layer {
+            ValidationLayer::Envelope => self.envelope_enabled,
             ValidationLayer::Structure => self.structure_enabled,
             ValidationLayer::CodeList => self.code_list_enabled,
             ValidationLayer::Profile => self.profile_enabled,
@@ -829,6 +909,33 @@ pub(crate) fn report_error(report: &mut ValidationReport, err: EdifactError) {
         ValidationSeverity::Critical | ValidationSeverity::Error => report.add_error(issue),
         ValidationSeverity::Warning => report.add_warning(issue),
         ValidationSeverity::Info => report.add_info(issue),
+    }
+}
+
+// ── EnvelopeValidator ─────────────────────────────────────────────────────────
+
+/// Built-in validator for EDIFACT interchange envelope structure.
+///
+/// Checks `UNB`/`UNH`/`UNT`/`UNZ` segment presence, message counts, and
+/// segment counts.  Registered by
+/// [`ValidationContextBuilder::with_envelope_validation`].
+///
+/// The validator translates each [`EdifactError`] from
+/// [`crate::validate_envelope`] into a [`ValidationIssue`] so that envelope
+/// findings appear in the unified [`ValidationReport`] alongside structure and
+/// profile results.
+pub struct EnvelopeValidator;
+
+impl Validator for EnvelopeValidator {
+    fn validate_batch(
+        &self,
+        segments: &[Segment<'_>],
+        report: &mut ValidationReport,
+        _ctx: &ValidationRuleContext<'_>,
+    ) {
+        if let Err(e) = crate::envelope::validate_envelope(segments) {
+            report_error(report, e);
+        }
     }
 }
 
@@ -912,7 +1019,9 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
         EdifactError::InvalidReleaseSequence { offset }
         | EdifactError::InvalidDelimiter { offset, .. }
         | EdifactError::InvalidText { offset }
-        | EdifactError::UnexpectedEof { offset } => {
+        | EdifactError::UnexpectedEof { offset }
+        | EdifactError::UnexpectedDataToken { offset }
+        | EdifactError::FunctionalGroupNotSupported { offset } => {
             issue = issue.with_offset(offset);
         }
         _ => {}
@@ -1072,7 +1181,8 @@ mod tests {
 
         assert_eq!(ctx.message_type(), Some("ORDERS"));
         let result = ctx.validate_strict(&segments);
-        assert!(matches!(result, Err(EdifactError::ValidationFailed { .. })));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().has_errors());
     }
 
     #[test]
@@ -1152,6 +1262,7 @@ mod tests {
             .with_profile_pack(demo_orders_profile_pack())
             .build();
         let result = ctx.validate_strict(&segments);
-        assert!(matches!(result, Err(EdifactError::ValidationFailed { .. })));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().has_errors());
     }
 }

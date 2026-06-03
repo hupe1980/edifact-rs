@@ -28,7 +28,7 @@ fn externally_authored_pack_can_validate_a_message_type() {
         });
 
     assert_eq!(pack.name(), "ORDERS-DEMO");
-    assert_eq!(pack.message_types(), ["ORDERS".to_owned()]);
+    assert_eq!(pack.message_types().collect::<Vec<_>>(), ["ORDERS"]);
 
     let report = ValidationContext::builder()
         .with_profile_pack(pack)
@@ -122,8 +122,8 @@ fn builder_can_merge_existing_packs() {
     assert_eq!(pack.name(), "COMBINED");
     assert_eq!(pack.rule_count(), 2);
     assert_eq!(
-        pack.message_types(),
-        ["ORDERS".to_owned(), "INVOIC".to_owned()]
+        pack.message_types().collect::<Vec<_>>(),
+        ["INVOIC", "ORDERS"]
     );
 }
 

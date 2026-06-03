@@ -300,43 +300,31 @@ impl<'a> SegmentDefRef<'a> {
         }
     }
 
-    fn mandatory_positions(&self) -> impl Iterator<Item = (usize, &str)> {
-        enum E<A, B> {
-            A(A),
-            B(B),
-        }
-        impl<A, B, I> Iterator for E<A, B>
-        where
-            A: Iterator<Item = I>,
-            B: Iterator<Item = I>,
-        {
-            type Item = I;
-            fn next(&mut self) -> Option<I> {
-                match self {
-                    E::A(a) => a.next(),
-                    E::B(b) => b.next(),
+    /// Iterate over mandatory element positions without heap allocation.
+    ///
+    /// Calls `f(zero_based_index, data_element_id)` for each element whose
+    /// status is [`Status::Mandatory`].  Returns `Err` immediately if `f`
+    /// returns `Err`, short-circuiting the remaining elements.
+    fn for_each_mandatory_position<E, F>(&self, mut f: F) -> Result<(), E>
+    where
+        F: FnMut(usize, &str) -> Result<(), E>,
+    {
+        match self {
+            Self::Static(d) => {
+                for e in d.elements.iter().filter(|e| e.status == Status::Mandatory) {
+                    f((e.position as usize).saturating_sub(1), e.data_element)?;
+                }
+            }
+            Self::Owned(d) => {
+                for e in d.elements.iter().filter(|e| e.status == Status::Mandatory) {
+                    f(
+                        (e.position as usize).saturating_sub(1),
+                        e.data_element.as_str(),
+                    )?;
                 }
             }
         }
-        match self {
-            Self::Static(d) => E::A(
-                d.elements
-                    .iter()
-                    .filter(|e| e.status == Status::Mandatory)
-                    .map(|e| ((e.position as usize).saturating_sub(1), e.data_element)),
-            ),
-            Self::Owned(d) => E::B(
-                d.elements
-                    .iter()
-                    .filter(|e| e.status == Status::Mandatory)
-                    .map(|e| {
-                        (
-                            (e.position as usize).saturating_sub(1),
-                            e.data_element.as_str(),
-                        )
-                    }),
-            ),
-        }
+        Ok(())
     }
 }
 
@@ -460,9 +448,12 @@ impl DirectoryValidator {
     ///     .with_code_list_rules(my_code_list_rules);
     /// ```
     pub fn from_definitions(definitions: &'static [SegmentDefinition]) -> Self {
+        let lookup_map: std::collections::HashMap<&'static str, &'static SegmentDefinition> =
+            definitions.iter().map(|d| (d.tag, d)).collect();
+        let lookup_map = Arc::new(lookup_map);
         Self {
             directory_id: "custom".to_owned(),
-            segment_lookup: Arc::new(move |tag: &str| definitions.iter().find(|d| d.tag == tag)),
+            segment_lookup: Arc::new(move |tag: &str| lookup_map.get(tag).copied()),
             owned_defs: None,
             is_code_valid: Arc::new(|_de: &str, _code: &str| true),
             suggest_code: Arc::new(|_de: &str, _code: &str| None),
@@ -709,7 +700,7 @@ impl DirectoryValidator {
         }
 
         if self.structure_checks {
-            for (idx, _de) in def.mandatory_positions() {
+            def.for_each_mandatory_position(|idx, _de| {
                 let is_present = seg
                     .elements
                     .get(idx)
@@ -720,7 +711,8 @@ impl DirectoryValidator {
                         element_index: idx,
                     });
                 }
-            }
+                Ok(())
+            })?;
             self.validate_component_counts(seg)?;
 
             if let Some(rule) = &self.additional_structure_rule {
