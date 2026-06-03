@@ -27,6 +27,13 @@ impl Span {
     }
 
     /// Length of the span in bytes.
+    ///
+    /// # Note on constness
+    ///
+    /// This method is intentionally **not** `const fn` (changed in 0.7.0) so that
+    /// the `debug_assert!` overflow guard is included in debug builds.  If you need
+    /// span arithmetic in a `const` context use `span.end - span.start` directly
+    /// (both fields are `pub`).
     #[inline]
     pub fn len(self) -> usize {
         debug_assert!(

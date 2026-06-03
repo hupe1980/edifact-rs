@@ -252,6 +252,14 @@ use std::io::{Read, Write};
 pub struct FromBytesIter<'a> {
     parser: Option<parser::Parser<'a>>,
     pending_error: Option<EdifactError>,
+    /// Remaining segment allowance (`None` = unlimited).
+    segments_remaining: Option<usize>,
+    /// Remaining byte allowance (`None` = unlimited).
+    bytes_remaining: Option<u64>,
+    /// Byte offset of the start of the current parse position (approximated
+    /// as the sum of previously yielded segment spans — the borrowed tokenizer
+    /// does not expose a byte counter, so we track it from `Segment::span`).
+    bytes_consumed: u64,
 }
 
 /// Iterator returned by [`from_reader_iter`].
@@ -274,7 +282,35 @@ impl<'a> Iterator for FromBytesIter<'a> {
         if let Some(err) = self.pending_error.take() {
             return Some(Err(err));
         }
-        self.parser.as_mut()?.next()
+        // max_segments guard
+        if let Some(ref mut remaining) = self.segments_remaining {
+            if *remaining == 0 {
+                self.parser = None;
+                return None;
+            }
+        }
+        // max_input_bytes guard
+        if let Some(max) = self.bytes_remaining {
+            if self.bytes_consumed >= max {
+                self.parser = None;
+                return None;
+            }
+        }
+        let item = self.parser.as_mut()?.next();
+        if let Some(Ok(ref seg)) = item {
+            // Decrement segment allowance
+            if let Some(ref mut remaining) = self.segments_remaining {
+                *remaining = remaining.saturating_sub(1);
+            }
+            // Update byte counter from segment span and eagerly stop if exhausted
+            self.bytes_consumed = self.bytes_consumed.saturating_add(seg.span.len() as u64);
+            if let Some(max) = self.bytes_remaining {
+                if self.bytes_consumed >= max {
+                    self.parser = None;
+                }
+            }
+        }
+        item
     }
 }
 
@@ -292,9 +328,16 @@ pub fn from_bytes(input: &[u8]) -> FromBytesIter<'_> {
 
 /// Parse `input` bytes into an iterator of [`Segment`]s with explicit configuration.
 ///
-/// The `config.max_segment_bytes` limit is enforced by the tokenizer, returning
-/// [`EdifactError::SegmentTooLong`] if a single segment exceeds the threshold.
-/// Pass `ReaderConfig::default().max_segment_bytes(usize::MAX)` to disable the limit.
+/// All three [`ReaderConfig`] limits are enforced:
+/// - `max_segment_bytes`: returns [`EdifactError::SegmentTooLong`] if a single segment
+///   exceeds the threshold.
+/// - `max_segments`: stops the iterator after this many segments have been yielded.
+/// - `max_input_bytes`: stops the iterator once this many bytes have been consumed
+///   (byte count is approximated from segment spans; the last segment that pushes
+///   consumption over the threshold is still returned).
+///
+/// Pass `ReaderConfig::default()` to use the default 64 KiB per-segment limit with
+/// no segment-count or byte-budget cap.
 ///
 /// # Example
 ///
@@ -309,17 +352,25 @@ pub fn from_bytes_with_config<'a>(
     input: &'a [u8],
     config: parser::ReaderConfig,
 ) -> FromBytesIter<'a> {
+    let segments_remaining = config.max_segments;
+    let bytes_remaining = config.max_input_bytes;
     match tokenizer::ServiceStringAdvice::from_bytes_strict(input) {
         Ok(ssa) => {
             let t = tokenizer::Tokenizer::with_limit(input, ssa, config.max_segment_bytes);
             FromBytesIter {
                 parser: Some(parser::Parser::new(t)),
                 pending_error: None,
+                segments_remaining,
+                bytes_remaining,
+                bytes_consumed: 0,
             }
         }
         Err(error) => FromBytesIter {
             parser: None,
             pending_error: Some(error),
+            segments_remaining,
+            bytes_remaining,
+            bytes_consumed: 0,
         },
     }
 }

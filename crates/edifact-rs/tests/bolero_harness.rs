@@ -304,30 +304,40 @@ fn fuzz_from_bytes_strict_no_panic() {
 
 #[test]
 fn fuzz_tokenizer_with_limit_no_panic() {
-    // The tokenizer with a size limit must never panic for any byte input.
-    use edifact_rs::{ServiceStringAdvice, from_bytes};
+    // The tokenizer with a size limit and custom SSA must never panic for any byte input.
+    use edifact_rs::{
+        Parser, ReaderConfig, ServiceStringAdvice, Tokenizer, from_bytes_with_config,
+    };
 
     check!()
         .with_type::<Vec<u8>>()
         .cloned()
         .for_each(|input: Vec<u8>| {
-            // Consume via the high-level `from_bytes` (which internally uses the
-            // tokenizer).  This exercises the UNA detection path and ensures the
-            // parser correctly handles all byte sequences.
-            for result in from_bytes(&input) {
+            // Default path: exercises UNA detection + default 64 KiB limit.
+            for result in edifact_rs::from_bytes(&input) {
                 // Results may be Ok or Err; we only require no panic.
                 let _ = result;
             }
 
-            // Also test with a custom SSA derived from the first 9 bytes.
+            // Reduced-limit path: exercises max_segment_bytes enforcement.
+            let small_limit = ReaderConfig::default().max_segment_bytes(64);
+            for result in from_bytes_with_config(&input, small_limit) {
+                let _ = result;
+            }
+
+            // Custom-SSA path: derive a non-default SSA from the first 9 bytes and
+            // parse with it — exercises alternative delimiter paths via the public
+            // Tokenizer + Parser API.
             if input.len() >= 9 {
                 let ssa = ServiceStringAdvice::from_bytes(&input[..9]);
-                // Parse with the custom SSA (exercises alternative delimiter paths).
-                for result in from_bytes(&input) {
-                    let _ = result;
-                }
                 // Ensure is_valid does not panic.
                 let _ = ssa.is_valid();
+                // Parse using the derived SSA with a 64 KiB per-segment limit.
+                let t = Tokenizer::with_limit(&input, ssa, 65_536);
+                let mut p = Parser::new(t);
+                while let Some(result) = p.next() {
+                    let _ = result;
+                }
             }
         });
 }
