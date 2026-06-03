@@ -71,15 +71,15 @@
 //! reader-based parsing (`from_reader`).
 //!
 //! ```
-//! use edifact_rs::from_reader;
+//! use edifact_rs::from_reader_collect;
 //! use std::io::Cursor;
 //!
 //! let input = b"UNA:;.? 'BGM;220;test?;value'";
-//! let segments = from_reader(Cursor::new(&input[..])).unwrap();
+//! let segments = from_reader_collect(Cursor::new(&input[..])).unwrap();
 //! assert_eq!(segments.len(), 1);
 //! assert_eq!(segments[0].tag, "BGM");
-//! assert_eq!(segments[0].elements[0].components[0], "220");
-//! assert_eq!(segments[0].elements[1].components[0], "test;value");
+//! assert_eq!(segments[0].element_str(0), Some("220"));
+//! assert_eq!(segments[0].element_str(1), Some("test;value"));
 //! ```
 //!
 //! # Validation Quick Start
@@ -107,18 +107,22 @@
 //!
 //! let pack = ProfileRulePack::new("ORDERS-DEMO")
 //!     .for_message_type("ORDERS")
-//!     .with_stateless_rule_fn(|segments| {
-//!         let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
-//!         let document_code = bgm.get_element(0)?.get_component(0)?;
-//!         (document_code == "220").then(|| {
-//!             ValidationIssue::new(
-//!                 ValidationSeverity::Warning,
-//!                 "demo pack rejects BGM 220 for illustration",
-//!             )
-//!             .with_rule_id("DEMO-P001")
-//!             .with_segment("BGM")
-//!             .with_element_index(0)
-//!         })
+//!     .with_stateless_rule_fn(|segments, issues| {
+//!         if let Some(bgm) = segments.iter().find(|segment| segment.tag == "BGM") {
+//!             if let Some(code) = bgm.get_element(0).and_then(|e| e.get_component(0)) {
+//!                 if code == "220" {
+//!                     issues.push(
+//!                         ValidationIssue::new(
+//!                             ValidationSeverity::Warning,
+//!                             "demo pack rejects BGM 220 for illustration",
+//!                         )
+//!                         .with_rule_id("DEMO-P001")
+//!                         .with_segment("BGM")
+//!                         .with_element_index(0),
+//!                     );
+//!                 }
+//!             }
+//!         }
 //!     });
 //!
 //! let report = ValidationContext::builder()
@@ -174,9 +178,12 @@ pub mod ser;
 // ── flat re-exports: core ─────────────────────────────────────────────────────
 pub use envelope::{
     InterchangeEnvelope, MessageEnvelope, MessageIdentifier, parse_unh, validate_envelope,
+    validate_envelope_lenient,
 };
 pub use error::{EdifactError, IoError, ValidationIssue, ValidationReport, ValidationSeverity};
-pub use group::{GroupDef, SegmentGroup, group_segments};
+pub use group::{
+    GroupDef, SegmentGroup, SegmentGroupIndexed, group_segments, group_segments_indexed,
+};
 pub use model::{
     BorrowedElement, BorrowedSegment, Element, OwnedElement, OwnedSegment, Segment, Span,
 };
@@ -199,14 +206,12 @@ pub use de::{
     EdifactSegmentTag, MessageDispatch, MessageWindow, MessageWindowsIter, MessageWindowsSliceIter,
     OwnedMessageWindow, SegmentAccessor, deserialize, deserialize_all_from_reader,
     deserialize_all_streaming, deserialize_first_from_reader, deserialize_first_streaming,
-    deserialize_messages_bytes, deserialize_messages_from_reader, deserialize_str,
-    groups_are_contiguous_by_qualifier, message_windows_bytes, message_windows_from_reader,
+    deserialize_messages_bytes, deserialize_messages_from_reader, deserialize_str, element_str,
+    find_qualified_segment, find_segment, groups_are_contiguous_by_qualifier,
+    message_windows_from_reader, optional_element, required_element,
 };
 
-/// Alias for [`message_windows_bytes`] — a more discoverable entry-point for
-/// window-based message parsing.
-///
-/// Splits a byte slice into [`MessageWindow`] views, one per UNH/UNT envelope,
+/// Splits a byte slice into [`MessageWindow`] views, one per `UNH`/`UNT` envelope,
 /// enabling parallel or lazy per-message processing without copying data.
 ///
 /// # Example
@@ -217,14 +222,52 @@ pub use de::{
 pub use de::message_windows_bytes as from_bytes_windows;
 
 // ── Proc-macro support ─────────────────────────────────────────────────────────
-/// Private implementation helpers used by code generated from `#[derive(EdifactDeserialize)]`.
+
+/// Segment-navigation helpers for working with parsed EDIFACT segments.
 ///
-/// **This module is not part of the public API.**  Names, signatures, and
-/// existence of items inside `__private` may change in any release without a
-/// semver bump.  Do not depend on this module directly.
-#[doc(hidden)]
-pub mod __private {
-    pub use super::de::{
+/// These functions cover the most common patterns when extracting data from
+/// a parsed `&[Segment<'_>]` or `&[OwnedSegment]` slice.
+///
+/// ## Segment lookup
+///
+/// - [`find_segment`] — locate the first segment with a given tag.
+/// - [`find_qualified_segment`] — locate a segment by tag *and* qualifier (element 0).
+/// - [`find_qualified_segment_owned`] — owned-segment variant.
+/// - [`find_segment_owned`] — owned-segment variant of `find_segment`.
+/// - [`find_segment_typed`] — find a segment matching an `EdifactSegmentTag` implementor.
+/// - [`find_segments_typed`] — iterate all segments matching a tag type.
+/// - [`find_segments_iter`] — iterate all segments matching a tag string.
+///
+/// ## Element and component access
+///
+/// - [`element_str`] — extract the raw string value of an element.
+/// - [`required_element`] — extract a mandatory element, returning an error when absent.
+/// - [`optional_element`] — extract an optional element as `Option<&str>`.
+/// - [`required_component`] — extract a mandatory component within a composite element.
+/// - [`optional_component`] — extract an optional component within a composite element.
+/// - [`get_components_iter`] — iterate over the components of a composite element.
+/// - [`composite_element`] — retrieve a composite element as a [`crate::CompositeElement`].
+///
+/// ## Pattern matching
+///
+/// - [`qualifier_matches_pattern`] — test whether a qualifier value matches a
+///   wildcard pattern (e.g. `"E01*"` matches `"E010"`, `"E011"`, …).
+///
+/// ## Groups
+///
+/// - [`contiguous_groups_by_qualifier`] — collect contiguous groups of segments
+///   sharing the same qualifier value into a `Vec<Vec<…>>`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use edifact_rs::helpers::{find_segment, required_element};
+///
+/// let bgm = find_segment(segments, "BGM").ok_or(/* … */)?;
+/// let doc_code = required_element(bgm, 0)?;
+/// ```
+pub mod helpers {
+    pub use crate::de::{
         composite_element, contiguous_groups_by_qualifier, element_str, find_qualified_segment,
         find_qualified_segment_owned, find_segment, find_segment_owned, find_segment_typed,
         find_segments_iter, find_segments_typed, get_components_iter, optional_component,
@@ -375,13 +418,31 @@ pub fn from_bytes_with_config<'a>(
     }
 }
 
-/// Parse a reader into owned segments.
+/// Parse a reader into a lazy iterator of [`OwnedSegment`]s.
+///
+/// Returns a [`FromReaderIter`] that parses and yields segments on demand,
+/// keeping memory bounded. Use [`from_reader_collect`] to eagerly materialise
+/// all segments into a `Vec`.
+///
+/// # Errors
+///
+/// Each `next()` call returns `None` on success (end of stream), or
+/// `Some(Err(EdifactError))` on parse or I/O failure.
+pub fn from_reader<R: Read>(reader: R) -> FromReaderIter<R> {
+    from_reader_iter(reader)
+}
+
+/// Parse a reader into an owned `Vec` of all segments.
+///
+/// Eagerly collects the full interchange into memory. If you only need a
+/// subset of segments, prefer [`from_reader`] (lazy iterator) to avoid
+/// unnecessary allocations.
 ///
 /// # Errors
 ///
 /// Returns an error if the input contains malformed EDIFACT syntax,
 /// invalid UTF-8 segment text, dangling release sequences, or underlying I/O failures.
-pub fn from_reader<R: Read>(reader: R) -> Result<Vec<OwnedSegment>, EdifactError> {
+pub fn from_reader_collect<R: Read>(reader: R) -> Result<Vec<OwnedSegment>, EdifactError> {
     parser::from_reader(reader)
 }
 
@@ -404,6 +465,32 @@ pub fn from_bytes_owned(
     input: &[u8],
 ) -> impl Iterator<Item = Result<OwnedSegment, EdifactError>> + '_ {
     from_bytes(input).map(|r| r.map(OwnedSegment::from))
+}
+
+/// Parse `input` bytes eagerly into an iterator of [`OwnedSegment`]s with a
+/// custom [`ReaderConfig`].
+///
+/// Identical to [`from_bytes_owned`] but applies the limits and settings from
+/// `config` (e.g. `max_segment_bytes`, `max_segments`, `max_input_bytes`).
+///
+/// # Example
+///
+/// ```
+/// use edifact_rs::ReaderConfig;
+/// let config = ReaderConfig::default().max_segments(10);
+/// let segs: Vec<edifact_rs::OwnedSegment> = edifact_rs::from_bytes_owned_with_config(
+///     b"BGM+220+1+9'",
+///     config,
+/// )
+/// .collect::<Result<_, _>>()
+/// .unwrap();
+/// assert_eq!(segs[0].tag, "BGM");
+/// ```
+pub fn from_bytes_owned_with_config(
+    input: &[u8],
+    config: ReaderConfig,
+) -> impl Iterator<Item = Result<OwnedSegment, EdifactError>> + '_ {
+    from_bytes_with_config(input, config).map(|r| r.map(OwnedSegment::from))
 }
 
 /// Parse a reader into owned segments as a streaming iterator.
@@ -447,6 +534,41 @@ where
     let mut buf = Vec::new();
     to_writer(&mut buf, segments)?;
     Ok(buf)
+}
+
+/// Serialize a slice of [`OwnedSegment`]s to an owned `Vec<u8>`.
+///
+/// Convenience wrapper around [`segments_to_bytes`] that accepts owned
+/// segments directly, avoiding a manual `.as_borrowed()` conversion.
+///
+/// # Errors
+///
+/// Returns an error if serialization fails.
+pub fn segments_to_bytes_owned(segments: &[OwnedSegment]) -> Result<Vec<u8>, EdifactError> {
+    let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
+    segments_to_bytes(borrowed.iter())
+}
+
+/// Validate the envelope structure of an owned-segment slice.
+///
+/// Convenience wrapper around [`validate_envelope`] that accepts
+/// `&[OwnedSegment]` directly, avoiding a manual `.as_borrowed()` conversion.
+///
+/// # Errors
+///
+/// Returns an error if the envelope is structurally invalid.
+pub fn validate_envelope_owned(segments: &[OwnedSegment]) -> Result<(), EdifactError> {
+    let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
+    envelope::validate_envelope(&borrowed).map(|_| ())
+}
+
+/// Lenient envelope validation over owned segments — collects all errors.
+///
+/// Convenience wrapper around [`validate_envelope_lenient`] that accepts
+/// `&[OwnedSegment]` directly.  Returns an empty `Vec` when the envelope is valid.
+pub fn validate_envelope_lenient_owned(segments: &[OwnedSegment]) -> Vec<EdifactError> {
+    let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
+    envelope::validate_envelope_lenient(&borrowed)
 }
 
 #[cfg(test)]

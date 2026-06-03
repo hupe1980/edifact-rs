@@ -13,9 +13,8 @@
 //! ```
 
 use edifact_rs::{
-    __private::find_qualified_segment, Segment, ValidationContext, ValidationLayer,
-    ValidationReport, ValidationRuleContext, Validator, from_bytes, segments_to_bytes,
-    validate_each,
+    Segment, ValidationContext, ValidationLayer, ValidationReport, ValidationRuleContext,
+    Validator, find_qualified_segment, from_bytes, segments_to_bytes, validate_each,
 };
 
 /// A simple custom validator that checks for known segment tags
@@ -71,15 +70,9 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 
     let report = validation_context.validate_lenient(&segments);
     if !report.is_valid() {
-        // Promote the first validation error into an `EdifactError` so callers
-        // receive a typed error rather than having to inspect the report.
-        return Err(edifact_rs::EdifactError::ValidationFailed {
+        return Err(edifact_rs::EdifactError::ValidationErrors {
             error_count: report.errors().len(),
-            first_message: report
-                .errors()
-                .first()
-                .map(|issue| issue.message.clone())
-                .unwrap_or_else(|| "unknown validation issue".to_owned()),
+            report: Box::new(report),
         });
     }
 

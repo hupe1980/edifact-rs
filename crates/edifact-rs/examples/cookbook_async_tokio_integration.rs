@@ -61,9 +61,11 @@ async fn pattern_b_spawn_blocking(
     })
     .await
     // JoinError from spawn_blocking (panic in the worker thread)
-    .map_err(|e| EdifactError::ValidationFailed {
-        error_count: 1,
-        first_message: format!("spawn_blocking panicked: {e}"),
+    .map_err(|e| {
+        EdifactError::Io(edifact_rs::IoError::from(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("spawn_blocking panicked: {e}"),
+        )))
     })?
 }
 

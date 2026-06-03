@@ -329,11 +329,15 @@ impl<'a> SegmentDefRef<'a> {
 }
 
 /// Default required-segments mapping used when no custom function is provided.
-fn default_required_segments(message_type: &str) -> &'static [&'static str] {
-    match message_type {
-        "UTILMD" | "ORDERS" | "INVOIC" => &["UNH", "BGM", "UNT"],
-        _ => &["UNH", "UNT"],
-    }
+///
+/// Returns the universal minimum: every EDIFACT message must begin with `UNH`
+/// and end with `UNT`.  Message-type-specific mandatory segments (such as
+/// `BGM` for ORDERS/INVOIC) must be enforced by a
+/// [`ProfileRulePack`][crate::ProfileRulePack] or a custom
+/// [`DirectoryValidatorBuilder::with_required_segments`] function to avoid
+/// false positives for message types that do not require `BGM`.
+fn default_required_segments(_message_type: &str) -> &'static [&'static str] {
+    &["UNH", "UNT"]
 }
 
 /// Code-list validation rules common to all UN/EDIFACT directory releases.
@@ -605,7 +609,7 @@ impl DirectoryValidator {
     fn effective_component_count(seg: &Segment<'_>, element_idx: usize) -> Option<u8> {
         let elem = seg.elements.get(element_idx)?;
         let mut count = elem.components.len();
-        while count > 0 && elem.components[count - 1].as_ref().is_empty() {
+        while count > 0 && elem.components[count - 1].0.as_ref().is_empty() {
             count -= 1;
         }
         u8::try_from(count).ok()
@@ -701,10 +705,9 @@ impl DirectoryValidator {
 
         if self.structure_checks {
             def.for_each_mandatory_position(|idx, _de| {
-                let is_present = seg
-                    .elements
-                    .get(idx)
-                    .is_some_and(|elem| elem.components.iter().any(|c| !c.as_ref().is_empty()));
+                let is_present = seg.elements.get(idx).is_some_and(|elem| {
+                    elem.components.iter().any(|(c, _)| !c.as_ref().is_empty())
+                });
                 if !is_present {
                     return Err(EdifactError::MissingRequiredElement {
                         tag: seg.tag.to_owned(),
@@ -925,7 +928,7 @@ mod tests {
     // ── effective_component_count (ISO 9735-1 §3.3 trailing-empty-component trim) ──
 
     fn parse_single(input: &[u8]) -> crate::OwnedSegment {
-        crate::from_reader(std::io::Cursor::new(input))
+        crate::from_reader_collect(std::io::Cursor::new(input))
             .expect("parse should succeed")
             .into_iter()
             .next()

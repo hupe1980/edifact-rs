@@ -55,3 +55,75 @@ fn non_optional_segment_field_requires_non_empty_value() {
         }) if tag == "BGM"
     ));
 }
+
+// ── #[edifact(required)] on Option<T> ────────────────────────────────────────
+
+/// Segment where element 2 is `Option<String>` but annotated `required`.
+/// Element 1 is a plain optional without the attribute.
+#[derive(Debug, EdifactDeserialize)]
+#[edifact(segment = "TST")]
+struct TstRequired {
+    #[edifact(element = 0)]
+    first: String,
+    #[edifact(element = 1)]
+    optional_second: Option<String>,
+    #[edifact(element = 2, required)]
+    mandatory_opt: Option<String>,
+}
+
+#[test]
+fn required_option_succeeds_when_element_present() {
+    // All three elements present.
+    let input = b"TST+A+B+C'";
+    let segments: Vec<_> = from_bytes(input).collect::<Result<_, _>>().unwrap();
+
+    let tst = TstRequired::edifact_deserialize(&segments).unwrap();
+    assert_eq!(tst.first, "A");
+    assert_eq!(tst.optional_second, Some("B".to_owned()));
+    assert_eq!(tst.mandatory_opt, Some("C".to_owned()));
+}
+
+#[test]
+fn required_option_fails_when_element_absent() {
+    // Only two elements — element 2 missing.
+    let input = b"TST+A+B'";
+    let segments: Vec<_> = from_bytes(input).collect::<Result<_, _>>().unwrap();
+
+    let err = TstRequired::edifact_deserialize(&segments)
+        .expect_err("expected Err when required element is absent");
+    assert!(
+        matches!(
+            err,
+            EdifactError::MissingRequiredElement { ref tag, element_index: 2 } if tag == "TST"
+        ),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn required_option_fails_when_element_empty_string() {
+    // Element 2 is explicitly empty.
+    let input = b"TST+A+B+'";
+    let segments: Vec<_> = from_bytes(input).collect::<Result<_, _>>().unwrap();
+
+    let err = TstRequired::edifact_deserialize(&segments)
+        .expect_err("expected Err when required element is empty string");
+    assert!(
+        matches!(
+            err,
+            EdifactError::MissingRequiredElement { ref tag, element_index: 2 } if tag == "TST"
+        ),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn unrequired_option_still_returns_none_when_absent() {
+    // element 1 (optional_second) absent, element 2 present.
+    let input = b"TST+A++C'";
+    let segments: Vec<_> = from_bytes(input).collect::<Result<_, _>>().unwrap();
+
+    let tst = TstRequired::edifact_deserialize(&segments).unwrap();
+    assert_eq!(tst.optional_second, None);
+    assert_eq!(tst.mandatory_opt, Some("C".to_owned()));
+}

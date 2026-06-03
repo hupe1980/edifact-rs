@@ -131,12 +131,6 @@ impl_serialize_int!(
 // A 320-byte stack buffer covers all known finite f32/f64 Display forms;
 // if the buffer is somehow exceeded we fall back to a heap-allocated String
 // so no panic ever escapes to the caller.
-//
-// NOTE: Rust's Display always uses `.` as the decimal separator. The decimal
-// mark configured in `ServiceStringAdvice.decimal_mark` (UNA byte 5) is NOT
-// respected by these impls. If your interchange declares a different decimal
-// mark (e.g. `,`), wrap the value in a newtype whose `EdifactSerialize` impl
-// formats with the correct separator.
 macro_rules! impl_serialize_float {
     ($($t:ty),+ $(,)?) => {
         $(
@@ -163,17 +157,31 @@ macro_rules! impl_serialize_float {
 
 impl_serialize_float!(f32, f64);
 
+// ── decimal-mark-aware bare float wrappers ────────────────────────────────────
+//
+// The bare f32/f64 impls above always use `.` as the decimal separator
+// (Rust's standard Display).  They are intentionally kept as the default to
+// avoid a performance penalty on the common case.  If your interchange
+// declares a different decimal mark in UNA byte 5 (e.g. `,`), you MUST wrap
+// the value in `DecimalFloat` — the bare impls will produce **silent data
+// corruption** for non-`.` interchanges.
+//
+// See also: the `DecimalFloat` / `DecimalFloatDisplay` section below.
+
 // ── decimal-mark-aware float wrapper ─────────────────────────────────────────
 
-/// A float value that serializes using the interchange's configured decimal mark.
+/// Decimal-mark-aware wrapper for `f32` or `f64` serialization.
 ///
 /// Rust's [`Display`][std::fmt::Display] for `f32`/`f64` always uses `.` as the
 /// decimal separator.  EDIFACT interchanges can declare a different decimal mark
-/// in the UNA service string — most commonly `,` in German EDI@Energy messages.
-/// Bare `f32`/`f64` [`EdifactSerialize`] impls are correct for standard (`.`) interchanges
-/// but produce **silent data corruption** for `,` interchanges.
+/// in the UNA service string — most commonly `,` in German EDI\@Energy messages.
 ///
-/// Wrap a float in `DecimalFloat` when the interchange may use a non-`.` decimal mark:
+/// # Why you need this
+///
+/// The bare `f32`/`f64` [`EdifactSerialize`] impls are correct for standard (`.`)
+/// interchanges **but produce silent data corruption for any interchange that
+/// declares `decimal_mark != b'.'`**.  Wrap the value in `DecimalFloat` whenever
+/// the interchange may use a non-`.` decimal mark:
 ///
 /// ```
 /// use edifact_rs::ser::DecimalFloat;
@@ -225,9 +233,11 @@ fn serialize_with_decimal_mark<E: EventEmitter>(
     // Non-standard decimal mark: format as string then replace '.'.
     // INVARIANT: `mark` is ASCII (validated by ServiceStringAdvice::is_valid()).
     let s = format!("{display}");
-    let mark_char = mark as char;
     if s.contains('.') {
-        let replaced = s.replace('.', &mark_char.to_string());
+        // Encode `mark` as a 1–4 byte UTF-8 slice on the stack; no heap allocation.
+        let mut mark_buf = [0u8; 4];
+        let mark_str = (mark as char).encode_utf8(&mut mark_buf);
+        let replaced = s.replace('.', mark_str);
         emitter.emit(EdifactEvent::Element { value: &replaced })
     } else {
         emitter.emit(EdifactEvent::Element { value: &s })

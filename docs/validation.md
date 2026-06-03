@@ -25,12 +25,17 @@ structural, code-list, and profile-level checks — each pluggable independently
 Implement `Validator` to encapsulate validation logic:
 
 ```rust
-use edifact_rs::{Validator, ValidationReport, Segment, validate_each, EdifactError};
+use edifact_rs::{Validator, ValidationReport, ValidationRuleContext, Segment, validate_each, EdifactError};
 
 struct BgmCodeValidator;
 
 impl Validator for BgmCodeValidator {
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport) {
+    fn validate_batch(
+        &self,
+        segments: &[Segment<'_>],
+        report: &mut ValidationReport,
+        _context: &ValidationRuleContext<'_>,
+    ) {
         validate_each(segments, report, |seg| {
             if seg.tag == "BGM" {
                 let code = seg.element_str(0).unwrap_or("");
@@ -78,7 +83,7 @@ use edifact_rs::{
 
 # struct BgmCodeValidator;
 # impl Validator for BgmCodeValidator {
-#     fn validate_batch(&self, _: &[Segment<'_>], _: &mut ValidationReport) {}
+#     fn validate_batch(&self, _: &[Segment<'_>], _: &mut ValidationReport, _: &ValidationRuleContext<'_>) {}
 #     fn set_message_type(&mut self, _: Option<&str>) {}
 # }
 let segs: Vec<_> = from_bytes(b"UNH+1+ORDERS:D:11A:UN'BGM+220+PO-4711+9'UNT+3+1'")
@@ -254,7 +259,7 @@ For complex validation that needs shared state across segments (e.g. reference
 counting, cross-segment consistency), implement `Validator` as a struct:
 
 ```rust
-use edifact_rs::{Validator, ValidationReport, ValidationIssue, ValidationSeverity, Segment};
+use edifact_rs::{Validator, ValidationReport, ValidationRuleContext, ValidationIssue, ValidationSeverity, Segment};
 
 struct ReferenceConsistencyValidator {
     message_type: Option<String>,
@@ -265,7 +270,12 @@ impl Validator for ReferenceConsistencyValidator {
         self.message_type = mt.map(str::to_owned);
     }
 
-    fn validate_batch(&self, segments: &[Segment<'_>], report: &mut ValidationReport) {
+    fn validate_batch(
+        &self,
+        segments: &[Segment<'_>],
+        report: &mut ValidationReport,
+        _context: &ValidationRuleContext<'_>,
+    ) {
         // Find the UNH reference
         let unh_ref = segments
             .iter()
@@ -317,13 +327,15 @@ let input = Cursor::new(b"\
 
 let ctx = ValidationContext::builder()
     .with_profile_pack(
-        ProfileRulePack::builder("ORDERS-REQUIRED")
+        ProfileRulePack::new("ORDERS-REQUIRED")
             .for_message_type("ORDERS")
-            .with_rule_fn(|segs| {
-                segs.iter().any(|s| s.tag == "BGM").then(|| ()).xor(Some(())).map(|_| {
-                    ValidationIssue::new(ValidationSeverity::Error, "BGM is required")
-                        .with_rule_id("ORDERS-REQ-BGM")
-                })
+            .with_stateless_rule_fn(|segs, issues| {
+                if !segs.iter().any(|s| s.tag == "BGM") {
+                    issues.push(
+                        ValidationIssue::new(ValidationSeverity::Error, "BGM is required")
+                            .with_rule_id("ORDERS-REQ-BGM"),
+                    );
+                }
             }),
     )
     .build();

@@ -4,7 +4,14 @@ use thiserror::Error;
 ///
 /// This allows `EdifactError` to derive `PartialEq` without requiring `std::io::Error: PartialEq`.
 #[derive(Debug)]
-pub struct IoError(pub std::io::Error);
+pub struct IoError(pub(crate) std::io::Error);
+
+impl IoError {
+    /// Returns a reference to the underlying [`std::io::Error`].
+    pub fn inner(&self) -> &std::io::Error {
+        &self.0
+    }
+}
 
 impl PartialEq for IoError {
     /// Equality is determined by [`std::io::ErrorKind`] only.
@@ -281,13 +288,29 @@ pub enum EdifactError {
         offset: usize,
     },
 
-    /// Aggregate validation failure from strict validation mode.
-    #[error("validation failed with {error_count} issue(s); first issue: {first_message}")]
-    ValidationFailed {
-        /// Number of collected validation issues.
+    /// Validation failed and the full [`ValidationReport`] is preserved.
+    ///
+    /// Returned by validation helpers when errors are found.  Provides programmatic
+    /// access to all issues, warnings, and infos.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// match my_fn() {
+    ///     Err(EdifactError::ValidationErrors { report, .. }) => {
+    ///         for issue in report.errors() {
+    ///             eprintln!("{}", issue);
+    ///         }
+    ///     }
+    ///     other => { /* ... */ }
+    /// }
+    /// ```
+    #[error("validation failed with {error_count} error(s)")]
+    ValidationErrors {
+        /// Number of error-severity issues in the report.
         error_count: usize,
-        /// First issue message for quick context.
-        first_message: String,
+        /// Full report with all errors, warnings, and infos.
+        report: Box<ValidationReport>,
     },
 
     /// Segment exceeded the configured maximum byte length.
@@ -436,7 +459,7 @@ impl EdifactError {
             Self::MissingSegment { .. } => "E015",
             Self::QualifierMismatch { .. } => "E016",
             Self::ConditionalRequirementNotMet { .. } => "E017",
-            Self::ValidationFailed { .. } => "E018",
+            // E018 is permanently retired (was ValidationFailed, removed in 0.9.0)
             Self::InvalidReleaseSequence { .. } => "E019",
             Self::SegmentTooLong { .. } => "E020",
             Self::MissingRequiredComponent { .. } => "E021",
@@ -448,6 +471,7 @@ impl EdifactError {
             Self::InvalidFieldValue { .. } => "E027",
             Self::UnexpectedDataToken { .. } => "E028",
             Self::FunctionalGroupNotSupported { .. } => "E029",
+            Self::ValidationErrors { .. } => "E030",
         }
     }
 
@@ -520,7 +544,7 @@ impl EdifactError {
             Self::FunctionalGroupNotSupported { .. } => Some(
                 "Strip UNG/UNE segments before calling validate_envelope, or process the interchange as raw segments",
             ),
-            Self::ValidationFailed { .. }
+            Self::ValidationErrors { .. }
             | Self::MessageCountMismatch { .. }
             | Self::SegmentCountMismatch { .. }
             | Self::UnexpectedMessageType { .. }
@@ -660,12 +684,6 @@ impl miette::Diagnostic for EdifactError {
                 "In segment {tag}, element {element_index} is conditionally required when: \
                      {condition}. Check if the condition is met",
             ))),
-            Self::ValidationFailed {
-                error_count,
-                first_message,
-            } => Some(Box::new(format!(
-                "Validation found {error_count} issue(s). Start by fixing: {first_message}",
-            ))),
             Self::SegmentTooLong { offset, limit } => Some(Box::new(format!(
                 "Segment starting at byte offset {offset} exceeds the {limit}-byte limit. \
                  Use ReaderConfig::max_segment_bytes to adjust the limit if needed, \
@@ -707,6 +725,9 @@ impl miette::Diagnostic for EdifactError {
             Self::FunctionalGroupNotSupported { offset } => Some(Box::new(format!(
                 "Functional group segment (UNG/UNE) found at offset {offset}. \
                  Strip UNG/UNE wrappers before calling validate_envelope",
+            ))),
+            Self::ValidationErrors { error_count, .. } => Some(Box::new(format!(
+                "Validation found {error_count} error(s). Inspect the ValidationReport for details",
             ))),
         }
     }
@@ -872,6 +893,71 @@ impl ValidationIssue {
             ValidationSeverity::Info => "INFO",
         }
     }
+
+    // ── Getters ───────────────────────────────────────────────────────────────
+
+    /// Stable error code, if available.
+    #[must_use]
+    #[inline]
+    pub fn error_code(&self) -> Option<&'static str> {
+        self.error_code
+    }
+
+    /// Byte offset in the source, if available.
+    #[must_use]
+    #[inline]
+    pub fn offset(&self) -> Option<usize> {
+        self.offset
+    }
+
+    /// Segment tag involved in this issue, if known.
+    #[must_use]
+    #[inline]
+    pub fn segment_tag(&self) -> Option<&str> {
+        self.segment_tag.as_deref()
+    }
+
+    /// Profile/MIG rule identifier, if applicable.
+    #[must_use]
+    #[inline]
+    pub fn rule_id(&self) -> Option<&str> {
+        self.rule_id.as_deref()
+    }
+
+    /// Zero-based element index, if known.
+    #[must_use]
+    #[inline]
+    pub fn element_index(&self) -> Option<u8> {
+        self.element_index
+    }
+
+    /// Zero-based component index, if known.
+    #[must_use]
+    #[inline]
+    pub fn component_index(&self) -> Option<u8> {
+        self.component_index
+    }
+
+    /// Zero-based occurrence index among same-tag segments, if known.
+    #[must_use]
+    #[inline]
+    pub fn segment_occurrence(&self) -> Option<u16> {
+        self.segment_occurrence
+    }
+
+    /// Message reference (`UNH` element 0), if set.
+    #[must_use]
+    #[inline]
+    pub fn message_ref(&self) -> Option<&str> {
+        self.message_ref.as_deref()
+    }
+
+    /// Suggested remediation, if available.
+    #[must_use]
+    #[inline]
+    pub fn suggestion(&self) -> Option<&str> {
+        self.suggestion.as_deref()
+    }
 }
 
 impl std::fmt::Display for ValidationIssue {
@@ -885,7 +971,7 @@ impl std::error::Error for ValidationIssue {}
 /// A collection of validation results: errors, warnings, and info.
 ///
 /// Enables batch validation where all issues are collected instead of failing on the first error.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ValidationReport {
     /// Critical and error-level issues.
     pub(crate) errors: Vec<ValidationIssue>,

@@ -28,13 +28,13 @@
 
 ```toml
 [dependencies]
-edifact-rs = "0.7"
+edifact-rs = "0.8"
 
 # Optional: derive macros (included by default)
-# edifact-rs = { version = "0.7", features = ["derive"] }
+# edifact-rs = { version = "0.8", features = ["derive"] }
 
 # Optional: rich miette diagnostics
-# edifact-rs = { version = "0.7", features = ["diagnostics"] }
+# edifact-rs = { version = "0.8", features = ["diagnostics"] }
 ```
 
 ### Feature flags
@@ -223,16 +223,20 @@ let segments: Vec<_> =
 
 let document_pack = ProfileRulePack::builder("ORDERS-DOC")
     .for_message_type("ORDERS")
-    .with_rule_fn(|segments| {
-        let bgm = segments.iter().find(|s| s.tag == "BGM")?;
-        let code = bgm.get_element(0)?.get_component(0)?;
-        (code == "220").then(|| {
-            ValidationIssue::new(ValidationSeverity::Warning, "code 220 requires special handling")
-                .with_rule_id("ORDERS-DOC-P001")
-                .with_segment("BGM")
-                .with_element_index(0)
-                .with_suggestion("Check your trading-partner agreement")
-        })
+    .with_rule_fn(|segments, issues| {
+        if let Some(bgm) = segments.iter().find(|s| s.tag == "BGM") {
+            if let Some(code) = bgm.get_element(0).and_then(|e| e.get_component(0)) {
+                if code == "220" {
+                    issues.push(
+                        ValidationIssue::new(ValidationSeverity::Warning, "code 220 requires special handling")
+                            .with_rule_id("ORDERS-DOC-P001")
+                            .with_segment("BGM")
+                            .with_element_index(0)
+                            .with_suggestion("Check your trading-partner agreement")
+                    );
+                }
+            }
+        }
     });
 
 let report = ValidationContext::builder()
@@ -275,7 +279,7 @@ let context = ValidationContext::builder()
 Enable the `diagnostics` feature for human-readable, span-annotated error output powered by [`miette`](https://docs.rs/miette):
 
 ```toml
-edifact-rs = { version = "0.7", features = ["diagnostics"] }
+edifact-rs = { version = "0.8", features = ["diagnostics"] }
 ```
 
 ```
@@ -399,7 +403,7 @@ assert_eq!(buf, b"BGM+220+PO-4711'");
 
 ```rust,ignore
 let bytes = tokio::fs::read("message.edi").await?;
-let windows: Vec<_> = edifact_rs::message_windows_bytes(&bytes)
+let windows: Vec<_> = edifact_rs::from_bytes_windows(&bytes)
     .collect::<Result<_, _>>()?;
 ```
 

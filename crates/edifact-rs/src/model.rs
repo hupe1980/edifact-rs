@@ -19,10 +19,12 @@ impl Span {
 
     #[inline]
     /// Shift the span by `delta` bytes.
+    ///
+    /// Uses saturating addition to avoid integer overflow on malformed input.
     pub const fn offset(self, delta: usize) -> Self {
         Self {
-            start: self.start + delta,
-            end: self.end + delta,
+            start: self.start.saturating_add(delta),
+            end: self.end.saturating_add(delta),
         }
     }
 
@@ -109,33 +111,37 @@ impl<'a> Segment<'a> {
 /// original input; if the value contained a release-character sequence the
 /// resolved string is stored as an owned [`Cow::Owned`] variant instead of
 /// using `Box::leak`.
+///
+/// Each entry is a `(value, span)` pair, guaranteeing that the component
+/// string and its byte span are always in sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Element<'a> {
     /// Span covering the whole element.
     pub span: Span,
-    /// Element components in positional order.
-    pub components: SmallVec<[Cow<'a, str>; 4]>,
-    /// Byte spans for each component in [`Self::components`].
-    pub component_spans: SmallVec<[Span; 4]>,
+    /// Element components in positional order, each paired with its byte span.
+    pub components: SmallVec<[(Cow<'a, str>, Span); 4]>,
 }
 
 impl<'a> Element<'a> {
     /// Return the component at position `n` (0-indexed), if it exists.
     #[inline]
     pub fn get_component(&self, n: usize) -> Option<&str> {
-        self.components.get(n).map(|c| c.as_ref())
+        self.components.get(n).map(|(c, _)| c.as_ref())
     }
 
     /// Return the component at position `n`, or `""` if absent.
     #[inline]
     pub fn component_or_empty(&self, n: usize) -> &str {
-        self.components.get(n).map(|c| c.as_ref()).unwrap_or("")
+        self.components
+            .get(n)
+            .map(|(c, _)| c.as_ref())
+            .unwrap_or("")
     }
 
     /// Return the byte span of the component at position `n`, if it exists.
     #[inline]
     pub fn component_span(&self, n: usize) -> Option<Span> {
-        self.component_spans.get(n).copied()
+        self.components.get(n).map(|(_, s)| *s)
     }
 
     /// Convenience constructor: wraps string literals as borrowed components.
@@ -144,21 +150,25 @@ impl<'a> Element<'a> {
     pub fn of(components: &[&'a str]) -> Self {
         Self {
             span: Span::default(),
-            components: components.iter().copied().map(Cow::Borrowed).collect(),
-            component_spans: std::iter::repeat_n(Span::default(), components.len()).collect(),
+            components: components
+                .iter()
+                .copied()
+                .map(|c| (Cow::Borrowed(c), Span::default()))
+                .collect(),
         }
     }
 }
 
 /// Owned data element used by reader-based parsing APIs.
+///
+/// Each entry in `components` is a `(value, span)` pair, keeping the string
+/// and its byte span structurally in sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedElement {
     /// Span covering the whole element.
     pub span: Span,
-    /// Owned element components in positional order.
-    pub components: SmallVec<[String; 4]>,
-    /// Byte spans for each component in [`Self::components`].
-    pub component_spans: SmallVec<[Span; 4]>,
+    /// Owned element components in positional order, each paired with its byte span.
+    pub components: SmallVec<[(String, Span); 4]>,
 }
 
 impl OwnedElement {
@@ -166,7 +176,7 @@ impl OwnedElement {
     /// Shift all stored spans by `delta` bytes.
     pub fn offset(mut self, delta: usize) -> Self {
         self.span = self.span.offset(delta);
-        for span in &mut self.component_spans {
+        for (_, span) in &mut self.components {
             *span = span.offset(delta);
         }
         self
@@ -180,9 +190,8 @@ impl<'a> From<Element<'a>> for OwnedElement {
             components: value
                 .components
                 .into_iter()
-                .map(|component| component.into_owned())
+                .map(|(c, s)| (c.into_owned(), s))
                 .collect(),
-            component_spans: value.component_spans,
         }
     }
 }
@@ -223,19 +232,23 @@ impl<'a> BorrowedElement<'a> {
     /// Return the component at position `n` (0-indexed), if it exists.
     #[inline]
     pub fn get_component(&self, n: usize) -> Option<&'a str> {
-        self.0.components.get(n).map(|s| s.as_str())
+        self.0.components.get(n).map(|(s, _)| s.as_str())
     }
 
     /// Return the component at position `n`, or `""` if absent.
     #[inline]
     pub fn component_or_empty(&self, n: usize) -> &'a str {
-        self.0.components.get(n).map(|s| s.as_str()).unwrap_or("")
+        self.0
+            .components
+            .get(n)
+            .map(|(s, _)| s.as_str())
+            .unwrap_or("")
     }
 
     /// Return the byte span of the component at position `n`, if it exists.
     #[inline]
     pub fn component_span(&self, n: usize) -> Option<Span> {
-        self.0.component_spans.get(n).copied()
+        self.0.components.get(n).map(|(_, s)| *s)
     }
 
     /// The byte span covering the whole element.
@@ -259,7 +272,7 @@ impl<'a> BorrowedElement<'a> {
     /// Iterate over all component strings.
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &'a str> {
-        self.0.components.iter().map(|c| c.as_str())
+        self.0.components.iter().map(|(c, _)| c.as_str())
     }
 }
 
@@ -333,7 +346,7 @@ impl<'a> BorrowedSegment<'a> {
             .get(n)?
             .components
             .first()
-            .map(|c| c.as_str())
+            .map(|(c, _)| c.as_str())
     }
 
     /// Return the byte span of the element at position `n`, if it exists.
@@ -353,11 +366,15 @@ impl OwnedSegment {
     /// Get the first component of element `n`, or `None` if absent.
     ///
     /// This is the zero-allocation equivalent of `as_borrowed().element_str(n)`.
-    /// Used internally by [`crate::__private::find_segment_owned`] and the derived
+    /// Used internally by [`crate::helpers::find_segment_owned`] and the derived
     /// [`crate::EdifactDeserialize::edifact_deserialize_owned`] implementations.
     #[inline]
     pub fn element_str(&self, n: usize) -> Option<&str> {
-        self.elements.get(n)?.components.first().map(|s| s.as_str())
+        self.elements
+            .get(n)?
+            .components
+            .first()
+            .map(|(s, _)| s.as_str())
     }
 
     /// Get component `comp` of element `elem`, or `None` if absent.
@@ -369,7 +386,7 @@ impl OwnedSegment {
             .get(elem)?
             .components
             .get(comp)
-            .map(|s| s.as_str())
+            .map(|(s, _)| s.as_str())
     }
 
     #[inline]
@@ -379,7 +396,7 @@ impl OwnedSegment {
         self.tag_span = self.tag_span.offset(delta);
         for element in &mut self.elements {
             element.span = element.span.offset(delta);
-            for span in &mut element.component_spans {
+            for (_, span) in &mut element.components {
                 *span = span.offset(delta);
             }
         }
@@ -406,9 +423,8 @@ impl OwnedSegment {
                     components: elem
                         .components
                         .iter()
-                        .map(|c| Cow::Borrowed(c.as_str()))
+                        .map(|(c, s)| (Cow::Borrowed(c.as_str()), *s))
                         .collect(),
-                    component_spans: elem.component_spans.clone(),
                 })
                 .collect(),
         }

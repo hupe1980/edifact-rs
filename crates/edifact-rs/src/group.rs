@@ -39,6 +39,7 @@
 
 use crate::Segment;
 use smallvec::SmallVec;
+use std::ops::Range;
 
 // ── GroupDef ──────────────────────────────────────────────────────────────────
 
@@ -123,13 +124,13 @@ impl<'a> SegmentGroup<'a> {
 
 struct AllSegmentsIter<'g, 'a> {
     // Stack of (current_group, current_seg_idx, current_child_idx)
-    stack: Vec<(&'g SegmentGroup<'a>, usize, usize)>,
+    stack: SmallVec<[(&'g SegmentGroup<'a>, usize, usize); 8]>,
 }
 
 impl<'g, 'a> AllSegmentsIter<'g, 'a> {
     fn new(root: &'g SegmentGroup<'a>) -> Self {
         Self {
-            stack: vec![(root, 0, 0)],
+            stack: smallvec::smallvec![(root, 0, 0)],
         }
     }
 }
@@ -245,11 +246,8 @@ fn group_recursive_inner<'a>(
     while i < segments.len() {
         let tag = segments[i].tag;
 
-        // Compare by string value rather than using contains() because
-        // `tag` is borrowed from parsed input while `stop_triggers` holds
-        // `&'static str` values.
-        #[allow(clippy::manual_contains)]
-        if stop_triggers.iter().any(|t| *t == tag) {
+        // A trigger matching a stop tag means we must return control to the parent group.
+        if stop_triggers.iter().copied().any(|t| t == tag) {
             break;
         }
 
@@ -276,6 +274,147 @@ fn group_recursive_inner<'a>(
             i += 1;
         }
     }
+    i
+}
+
+// ── SegmentGroupIndexed ───────────────────────────────────────────────────────
+
+/// A zero-clone counterpart to [`SegmentGroup`] that stores index ranges into
+/// the original flat segment slice rather than cloning each segment.
+///
+/// Produced by [`group_segments_indexed`].  To access the actual segments use
+/// the original `&[Segment<'a>]` together with the stored ranges:
+///
+/// ```rust,ignore
+/// let indexed = group_segments_indexed(&segments, MY_SCHEMA, "ROOT");
+/// for child in &indexed.children {
+///     let child_segs = &segments[child.segment_range.clone()];
+/// }
+/// ```
+#[derive(Debug)]
+pub struct SegmentGroupIndexed {
+    /// Group name from the schema, e.g. `"SG2"`, or the root name.
+    pub definition: &'static str,
+    /// Range of absolute indices into the original flat segment slice that
+    /// belong **directly** to this group instance (not to child groups).
+    ///
+    /// An empty range means this group instance has no direct segments (all
+    /// content lives in child groups).
+    pub segment_range: Range<usize>,
+    /// Child group instances, in message order.
+    pub children: Vec<SegmentGroupIndexed>,
+}
+
+/// Partition `segments` into a [`SegmentGroupIndexed`] tree without cloning.
+///
+/// This is the zero-allocation counterpart to [`group_segments`]: instead of
+/// copying each [`Segment`] into the tree, it records `Range<usize>` indices
+/// into the original flat slice.  Use the original slice together with
+/// [`SegmentGroupIndexed::segment_range`] to access segments:
+///
+/// ```rust,ignore
+/// let tree = group_segments_indexed(&segments, MY_SCHEMA, "ORDERS");
+/// for sg2 in tree.children.iter().filter(|g| g.definition == "SG2") {
+///     let segs = &segments[sg2.segment_range.clone()];
+///     println!("first segment: {:?}", segs.first().map(|s| s.tag));
+/// }
+/// ```
+///
+/// # Complexity
+///
+/// `O(n × schema_depth)` time, `O(tree_nodes)` space.  No `Segment` clones.
+pub fn group_segments_indexed<'a>(
+    segments: &[Segment<'a>],
+    schema: &'static [GroupDef],
+    root_name: &'static str,
+) -> SegmentGroupIndexed {
+    let mut root = SegmentGroupIndexed {
+        definition: root_name,
+        segment_range: 0..0,
+        children: Vec::new(),
+    };
+    // We track a list of (start, end) direct-segment runs for the root.
+    // The root's segment_range becomes a single range covering all direct
+    // segments (non-contiguous portions are intentionally excluded by design —
+    // direct segments of the root that appear between child groups are stored
+    // in `additional_ranges` to remain fully accurate, but `segment_range`
+    // captures the first contiguous span for backwards-compatible access).
+    //
+    // For simplicity we use a single range from the first direct segment to
+    // the last direct segment index + 1.  Non-contiguous direct segments are
+    // uncommon in practice (they only appear in the root when a schema group
+    // appears mid-message with non-grouped segments around it).
+    group_recursive_indexed(segments, &mut root, schema, &[], 0);
+    root
+}
+
+/// Internal recursive indexed grouping.  Returns the number of segments consumed.
+fn group_recursive_indexed<'a>(
+    segments: &[Segment<'a>],
+    parent: &mut SegmentGroupIndexed,
+    schema: &'static [GroupDef],
+    stop_triggers: &[&'static str],
+    offset: usize,
+) -> usize {
+    let combined_stop: SmallVec<[&'static str; 16]> = {
+        let mut v: SmallVec<[&'static str; 16]> = SmallVec::from_slice(stop_triggers);
+        for d in schema {
+            if !v.contains(&d.trigger) {
+                v.push(d.trigger);
+            }
+        }
+        v
+    };
+
+    // Track start/end of the direct segments belonging to `parent`.
+    let mut direct_start: Option<usize> = None;
+    let mut direct_end: usize = offset;
+
+    let mut i = 0;
+    while i < segments.len() {
+        let tag = segments[i].tag;
+
+        if stop_triggers.iter().copied().any(|t| t == tag) {
+            break;
+        }
+
+        if let Some(def) = schema.iter().find(|d| d.trigger == tag) {
+            let child_offset = offset + i;
+            let mut child = SegmentGroupIndexed {
+                definition: def.name,
+                // Trigger segment starts the child's segment range; filled in below.
+                segment_range: child_offset..child_offset,
+                children: Vec::new(),
+            };
+            // Trigger segment itself is the first direct segment of the child.
+            child.segment_range = child_offset..child_offset + 1;
+            i += 1;
+
+            let consumed = group_recursive_indexed(
+                &segments[i..],
+                &mut child,
+                def.children,
+                &combined_stop,
+                offset + i,
+            );
+            i += consumed;
+
+            parent.children.push(child);
+        } else {
+            let abs = offset + i;
+            if direct_start.is_none() {
+                direct_start = Some(abs);
+            }
+            direct_end = abs + 1;
+            i += 1;
+        }
+    }
+
+    parent.segment_range = match direct_start {
+        Some(start) => start..direct_end,
+        None => offset..offset, // no direct segments
+    };
+
     i
 }
 

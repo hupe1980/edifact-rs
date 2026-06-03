@@ -28,7 +28,6 @@ be added without breaking existing match arms.
 | E015 | `MissingSegment` | Directory validator | — |
 | E016 | `QualifierMismatch` | Typed deserializer | `offset` |
 | E017 | `ConditionalRequirementNotMet` | Profile validator | `offset` |
-| E018 | `ValidationFailed` | Manual construction | — |
 | E019 | `InvalidReleaseSequence` | Parser | `offset` |
 | E020 | `SegmentTooLong` | Reader parser | `offset` |
 | E021 | `MissingRequiredComponent` | Deserializer | — |
@@ -40,6 +39,7 @@ be added without breaking existing match arms.
 | E027 | `InvalidFieldValue` | Typed deserializer | — |
 | E028 | `UnexpectedDataToken` | Parser | `offset` |
 | E029 | `FunctionalGroupNotSupported` | Envelope validator | `offset` |
+| E030 | `ValidationErrors` | Profile / directory validator | — |
 
 ---
 
@@ -296,24 +296,6 @@ triggered the condition.
 
 ---
 
-### E018 — `ValidationFailed`
-
-```
-validation failed with {error_count} issue(s); first issue: {first_message}
-```
-
-**When**: Constructed manually to surface a `ValidationReport` failure as an
-`EdifactError` — for example when a library boundary requires `Result<T, EdifactError>`.
-This variant is **not** emitted by `validate_strict`, which returns
-`Result<ValidationReport, ValidationReport>` directly.
-
-**Fields**: `error_count: usize`, `first_message: String`.
-
-**Fix**: Inspect the full `ValidationReport` from `validate_lenient`, or call
-`validate_strict` and handle the `Err(ValidationReport)` variant directly.
-
----
-
 ### E019 — `InvalidReleaseSequence`
 
 ```
@@ -482,21 +464,21 @@ ASCII letters) and that no data or component separators appear before it.
 
 ---
 
-### E029 — `FunctionalGroupNotSupported`
+### E030 — `ValidationErrors`
 
 ```
-functional group segments (UNG/UNE) at byte offset {offset} are not supported; strip them before calling validate_envelope
+validation failed with {error_count} issue(s)
 ```
 
-**When**: `validate_envelope` (or `EnvelopeValidator`) found a `UNG` or `UNE`
-segment.  Functional groups are a legacy EDIFACT envelope layer that this
-library does not process.
+**When**: Emitted by `validate_strict` (as the `Err` arm of
+`Result<ValidationReport, ValidationReport>`) and by other validators that convert a
+`ValidationReport` containing at least one error-severity issue into an `EdifactError`.
 
-**Fields**: `offset: usize`.
+**Fields**: `error_count: usize`, `report: Box<ValidationReport>`.
 
-**Fix**: Strip the `UNG`/`UNE` wrapper segments before calling
-`validate_envelope`, or pre-process the interchange to remove functional-group
-nesting.
+**Fix**: Inspect `report` for the full list of issues with locations, rule IDs, and
+suggested fixes. Call `validate_lenient` if you want validation to always return a
+report rather than an error.
 
 ---
 

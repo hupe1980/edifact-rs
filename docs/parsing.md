@@ -10,8 +10,9 @@ custom delimiter configuration, and envelope-level helpers.
 | Function | Input | Output type | When to use |
 |---|---|---|---|
 | `from_bytes(input)` | `&[u8]` | `impl Iterator<Item = Result<Segment<'_>, _>>` | In-memory buffer (fastest path) |
-| `from_reader(reader)` | `impl Read` | `Result<Vec<OwnedSegment>, _>` | Small files or `Cursor<Vec<u8>>` |
-| `from_reader_iter(reader)` | `impl Read` | `impl Iterator<Item = Result<OwnedSegment, _>>` | Streaming, large files |
+| `from_reader_collect(reader)` | `impl Read` | `Result<Vec<OwnedSegment>, _>` | Eagerly collect all segments from a reader |
+| `from_reader(reader)` | `impl Read` | `FromReaderIter<R>` | Lazy iterator — one segment at a time |
+| `from_reader_iter(reader)` | `impl Read` | `FromReaderIter<R>` | Alias for `from_reader` |
 | `from_bufread_stream_with_config(reader, config)` | `impl BufRead` | `Result<Vec<OwnedSegment>, _>` | DOS guard, custom limits |
 
 ---
@@ -125,18 +126,18 @@ assert_eq!(segs[0].element_str(0), Some("220"));
 
 ## Reader-based parsing
 
-### `from_reader` — read all at once
+### `from_reader_collect` — read all at once
 
 ```rust
-use edifact_rs::from_reader;
+use edifact_rs::from_reader_collect;
 use std::fs::File;
 
 let f = File::open("message.edi")?;
-let segments = from_reader(f)?; // Vec<OwnedSegment>
+let segments = from_reader_collect(f)?; // Vec<OwnedSegment>
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-### `from_reader_iter` — streaming, one segment at a time
+### `from_reader` / `from_reader_iter` — streaming, one segment at a time
 
 ```rust
 use edifact_rs::from_reader_iter;
@@ -236,7 +237,7 @@ and their stable codes (E001–E020).
 
 ## Strict vs. lenient envelope validation
 
-`from_bytes` and `from_reader` are **lenient by default** — they parse all
+`from_bytes`, `from_reader`, and `from_reader_collect` are **lenient by default** — they parse all
 segments and surface body segments even when `UNB`/`UNZ` or `UNH`/`UNT` reference
 parity is wrong. Use `validate_envelope` to enforce parity explicitly:
 

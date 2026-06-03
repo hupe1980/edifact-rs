@@ -133,15 +133,14 @@ pub struct Segment<'a> {
 
 `Segment<'a>` **borrows** its tag and all element text directly from the input
 `&[u8]`. No heap allocation is needed for the values; only the `Vec<Element>` and
-the `SmallVec<[Cow<'a, str>; 4]>` per element are allocated.
+the `SmallVec<[(Cow<'a, str>, Span); 4]>` per element are allocated.
 
 ### `Element<'a>` — component holder
 
 ```rust
 pub struct Element<'a> {
     pub span: Span,
-    pub components: SmallVec<[Cow<'a, str>; 4]>,  // inline for ≤4 components
-    pub component_spans: SmallVec<[Span; 4]>,
+    pub components: SmallVec<[(Cow<'a, str>, Span); 4]>,  // (value, span) — inline for ≤4 components
 }
 ```
 

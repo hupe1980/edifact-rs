@@ -49,8 +49,9 @@ for seg in from_reader_iter(f) {
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-It holds at most one `OwnedSegment` in memory at a time. Use this instead of
-`from_reader` when processing interchanges that are larger than available RAM.
+It holds at most one `OwnedSegment` in memory at a time. Use `from_reader_iter` (or
+`from_reader`) instead of `from_reader_collect` when processing interchanges that
+are larger than available RAM.
 
 ---
 
@@ -104,9 +105,9 @@ that you want to pipe directly to a file or socket.
 | API | Input | Peak memory | Notes |
 |---|---|---|---|
 | `from_bytes` | `&[u8]` | O(1) — zero copy | Fastest; requires full buffer |
-| `from_reader` | `impl Read` | O(n) segments | Collects all segments into `Vec` |
-| `from_reader_iter` | `impl Read` | O(1) | One segment at a time |
-| `message_windows_bytes` | `&[u8]` | O(window) | One UNH..UNT window at a time |
+| `from_reader_collect` | `impl Read` | O(n) segments | Eagerly collects all segments into `Vec` |
+| `from_reader` / `from_reader_iter` | `impl Read` | O(1) | Lazy iterator — one segment at a time |
+| `from_bytes_windows` | `&[u8]` | O(window) | One UNH..UNT window at a time |
 | `message_windows_from_reader` | `impl Read` | O(window) | Reader-based windows |
 | `deserialize_messages_from_reader` | `impl Read` | O(1) typed | Zero raw-segment buffer |
 
@@ -135,7 +136,7 @@ Criterion outputs are saved to `target/criterion/`. Open
 | `tokenizer/1mb` | Tokenization throughput on a 1 MB interchange |
 | `parser/small` | Parse + collect on a single message |
 | `parser/1mb` | Parse + collect on 1 MB |
-| `reader/1mb` | `from_reader` on 1 MB (reader overhead) |
+| `reader/1mb` | `from_reader_collect` on 1 MB (reader overhead) |
 | `writer/utilmd_message` | Serialize a UTILMD-sized message |
 | `validation/d11a_structure` | Structure validation on D.11A rules |
 

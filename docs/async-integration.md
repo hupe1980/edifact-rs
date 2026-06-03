@@ -17,7 +17,7 @@ other runtimes (`async-std`, `smol`) with minor API substitutions.
 
 ```toml
 [dependencies]
-edifact-rs = "0.7"
+edifact-rs = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync"] }
 ```
 
@@ -200,15 +200,12 @@ own error type:
 ```rust,no_run
 use edifact_rs::EdifactError;
 
-async fn safe_parse(bytes: Vec<u8>) -> Result<usize, EdifactError> {
-    tokio::task::spawn_blocking(move || {
+async fn safe_parse(bytes: Vec<u8>) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    let count = tokio::task::spawn_blocking(move || {
         edifact_rs::from_bytes(&bytes).count()
     })
-    .await
-    .map_err(|join_err| EdifactError::ValidationFailed {
-        error_count: 1,
-        first_message: format!("parse thread panicked: {join_err}"),
-    })
+    .await?;   // propagates JoinError if the worker thread panicked
+    Ok(count)
 }
 ```
 

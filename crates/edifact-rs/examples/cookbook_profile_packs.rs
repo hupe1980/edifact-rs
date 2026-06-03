@@ -29,45 +29,47 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
     // or map it independently.
     let document_pack = ProfileRulePack::new("ORDERS-DOCUMENT")
         .for_message_type("ORDERS") // only run for ORDERS messages
-        .with_stateless_rule_fn(|segments| {
-            let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
-            let document_code = bgm.get_element(0)?.get_component(0)?;
-            (document_code == "220").then(|| {
-                ValidationIssue::new(
-                    ValidationSeverity::Warning,
-                    "document code 220 is only allowed in a special trading-partner flow",
-                )
-                .with_rule_id("ORDERS-DEMO-P001")
-                .with_segment("BGM")
-                .with_element_index(0)
-                .with_suggestion("Use a trading-partner-specific document code in this example")
-            })
+        .with_stateless_rule_fn(|segments, issues| {
+            issues.extend((|| -> Option<ValidationIssue> {
+                let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
+                let document_code = bgm.get_element(0)?.get_component(0)?;
+                (document_code == "220").then(|| {
+                    ValidationIssue::new(
+                        ValidationSeverity::Warning,
+                        "document code 220 is only allowed in a special trading-partner flow",
+                    )
+                    .with_rule_id("ORDERS-DEMO-P001")
+                    .with_segment("BGM")
+                    .with_element_index(0)
+                    .with_suggestion("Use a trading-partner-specific document code in this example")
+                })
+            })());
         });
 
     // ── Pack 2: reference rule ────────────────────────────────────────────────
     let reference_pack = ProfileRulePack::new("ORDERS-REFERENCE")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments| {
-            let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
-            let reference = bgm.get_element(1)?.get_component(0)?;
-            (reference == "PO123").then(|| {
-                ValidationIssue::new(
-                    ValidationSeverity::Info,
-                    "demo rule observed the sample purchase-order reference",
-                )
-                .with_rule_id("ORDERS-DEMO-P002")
-                .with_segment("BGM")
-                .with_element_index(1)
-            })
+        .with_stateless_rule_fn(|segments, issues| {
+            issues.extend((|| -> Option<ValidationIssue> {
+                let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
+                let reference = bgm.get_element(1)?.get_component(0)?;
+                (reference == "PO123").then(|| {
+                    ValidationIssue::new(
+                        ValidationSeverity::Info,
+                        "demo rule observed the sample purchase-order reference",
+                    )
+                    .with_rule_id("ORDERS-DEMO-P002")
+                    .with_segment("BGM")
+                    .with_element_index(1)
+                })
+            })());
         });
 
     // ── Merge and validate ────────────────────────────────────────────────────
     // `.merge` combines both packs into one; rules run in declaration order.
     let pack = ProfileRulePack::new("ORDERS-COMBINED")
-        .merge(document_pack)
-        .expect("compatible packs")
-        .merge(reference_pack)
-        .expect("compatible packs");
+        .merge(document_pack)?
+        .merge(reference_pack)?;
 
     let report = ValidationContext::builder()
         .with_profile_pack(pack)

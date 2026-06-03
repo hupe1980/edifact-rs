@@ -1,6 +1,7 @@
 //! EDIFACT writer — serializes [`Segment`]s to wire format.
 
 use crate::{error::EdifactError, model::Segment, tokenizer::ServiceStringAdvice};
+use std::borrow::Cow;
 use std::io::Write;
 
 /// Streaming EDIFACT writer.
@@ -61,7 +62,7 @@ impl<W: Write> Writer<W> {
             // Element separator
             self.inner.write_all(&[self.ssa.element_sep])?;
             let mut first_component = true;
-            for component in &element.components {
+            for (component, _) in &element.components {
                 if !first_component {
                     self.inner.write_all(&[self.ssa.component_sep])?;
                 }
@@ -180,6 +181,70 @@ impl<W: Write> Writer<W> {
     /// Returns the active [`ServiceStringAdvice`] (delimiter configuration).
     pub fn service_string_advice(&self) -> ServiceStringAdvice {
         self.ssa
+    }
+
+    /// Escape a value string for inclusion in an EDIFACT segment.
+    ///
+    /// Any character in `value` that matches the active element separator,
+    /// component separator, release character, or segment terminator is escaped
+    /// by prefixing it with the release character (default `?`).
+    ///
+    /// Returns a borrowed `Cow::Borrowed(value)` when no escaping is needed,
+    /// avoiding an allocation on the fast path.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let writer = Writer::new(std::io::sink());
+    /// // '+' must be escaped since it is the default element separator.
+    /// assert_eq!(writer.escape_value("price+tax"), "price?+tax");
+    /// ```
+    pub fn escape_value<'v>(&self, value: &'v str) -> Cow<'v, str> {
+        let (elem, comp, release, term) = (
+            self.ssa.element_sep,
+            self.ssa.component_sep,
+            self.ssa.release_char,
+            self.ssa.segment_term,
+        );
+        let bytes = value.as_bytes();
+        let needs_escape = bytes
+            .iter()
+            .any(|&b| b == elem || b == comp || b == release || b == term);
+        if !needs_escape {
+            return Cow::Borrowed(value);
+        }
+        let mut out = Vec::with_capacity(value.len() + 4);
+        let mut last = 0;
+        let mut pos = 0;
+        while pos < bytes.len() {
+            let remaining = &bytes[pos..];
+            let hit_ecr = memchr::memchr3(elem, comp, release, remaining);
+            let hit_t = memchr::memchr(term, remaining);
+            let hit = match (hit_ecr, hit_t) {
+                (None, None) => break,
+                (Some(a), None) => a,
+                (None, Some(b)) => b,
+                (Some(a), Some(b)) => a.min(b),
+            };
+            let abs = pos + hit;
+            out.extend_from_slice(&bytes[last..abs]);
+            out.push(release);
+            out.push(bytes[abs]);
+            last = abs + 1;
+            pos = abs + 1;
+        }
+        out.extend_from_slice(&bytes[last..]);
+        // SAFETY:
+        //   1. `value` is a valid `&str`, so `bytes` is valid UTF-8 to start.
+        //   2. `self.ssa.release_char` is a single-byte ASCII value (0x21–0x7E),
+        //      enforced at construction time by `ServiceStringAdvice::is_valid()`
+        //      (called in `Writer::with_una`; the default SSA hardcodes `?` = 0x3F).
+        //      Inserting a single ASCII byte cannot split or corrupt a multi-byte
+        //      UTF-8 sequence, because ASCII bytes always have the high bit clear
+        //      while continuation bytes of multi-byte sequences always have the high
+        //      bit set (0x80–0xBF).
+        //   3. All other bytes are copied verbatim from the valid UTF-8 source.
+        Cow::Owned(unsafe { String::from_utf8_unchecked(out) })
     }
     /// Write only the segment tag bytes — no element separator or terminator.
     ///

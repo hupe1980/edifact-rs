@@ -10,7 +10,8 @@ APIs, can be composed from multiple sources, and plugged into any `ValidationCon
 
 A **profile rule pack** is a named collection of validation rules scoped to one or
 more EDIFACT message types. Each rule is a closure that receives a segment slice and
-returns `Some(ValidationIssue)` if the rule is violated, or `None` if it passes.
+a `&mut Vec<ValidationIssue>` into which it pushes violations. The closure pushes
+nothing when the segments pass.
 
 Packs can be:
 - **Authored** in downstream crates (your application or a MIG library)
@@ -25,37 +26,41 @@ Packs can be:
 ```rust
 use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
 
-let pack = ProfileRulePack::builder("ORDERS-RULES")
+let pack = ProfileRulePack::new("ORDERS-RULES")
     .for_message_type("ORDERS")
-    .with_rule_fn(|segments| {
-        // Find the BGM segment
-        let bgm = segments.iter().find(|s| s.tag == "BGM")?;
-        let code = bgm.get_element(0)?.get_component(0)?;
+    .with_stateless_rule_fn(|segments, issues| {
+        // Find the BGM segment; skip if absent
+        let Some(bgm) = segments.iter().find(|s| s.tag == "BGM") else { return };
+        let Some(code) = bgm.get_element(0).and_then(|e| e.get_component(0)) else { return };
 
         // Rule: only codes 220 (original) and 231 (quote) are accepted
-        (!matches!(code, "220" | "231")).then(|| {
-            ValidationIssue::new(
-                ValidationSeverity::Error,
-                format!("unsupported BGM document code '{code}'"),
-            )
-            .with_rule_id("ORDERS-BGM-P001")
-            .with_segment("BGM")
-            .with_element_index(0)
-            .with_suggestion("Use document code 220 (original order) or 231 (quotation)")
-        })
+        if !matches!(code, "220" | "231") {
+            issues.push(
+                ValidationIssue::new(
+                    ValidationSeverity::Error,
+                    format!("unsupported BGM document code '{code}'"),
+                )
+                .with_rule_id("ORDERS-BGM-P001")
+                .with_segment("BGM")
+                .with_element_index(0)
+                .with_suggestion("Use document code 220 (original order) or 231 (quotation)"),
+            );
+        }
     })
-    .with_rule_fn(|segments| {
+    .with_stateless_rule_fn(|segments, issues| {
         // Rule: a buyer NAD is mandatory
         let has_buyer = segments
             .iter()
             .filter(|s| s.tag == "NAD")
             .any(|s| s.element_str(0) == Some("BY"));
-        (!has_buyer).then(|| {
-            ValidationIssue::new(ValidationSeverity::Error, "buyer NAD+BY is required")
-                .with_rule_id("ORDERS-NAD-P001")
-                .with_segment("NAD")
-                .with_element_index(0)
-        })
+        if !has_buyer {
+            issues.push(
+                ValidationIssue::new(ValidationSeverity::Error, "buyer NAD+BY is required")
+                    .with_rule_id("ORDERS-NAD-P001")
+                    .with_segment("NAD")
+                    .with_element_index(0),
+            );
+        }
     });
 ```
 
@@ -67,7 +72,7 @@ let pack = ProfileRulePack::builder("ORDERS-RULES")
 use edifact_rs::{ValidationContext, from_bytes};
 
 # use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
-# let pack = ProfileRulePack::builder("ORDERS-RULES").for_message_type("ORDERS");
+# let pack = ProfileRulePack::new("ORDERS-RULES").for_message_type("ORDERS");
 let segs: Vec<_> = from_bytes(b"UNH+1+ORDERS:D:96A:UN'BGM+220+PO-4711+9'UNT+3+1'")
     .collect::<Result<_, _>>()?;
 
@@ -90,30 +95,26 @@ can be registered once:
 ```rust
 use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
 
-let document_pack = ProfileRulePack::builder("ORDERS-DOCUMENT")
+let document_pack = ProfileRulePack::new("ORDERS-DOCUMENT")
     .for_message_type("ORDERS")
-    .with_rule_fn(|segs| {
+    .with_stateless_rule_fn(|_segs, _issues| {
         // document code rules …
-        None
     });
 
-let reference_pack = ProfileRulePack::builder("ORDERS-REFERENCE")
+let reference_pack = ProfileRulePack::new("ORDERS-REFERENCE")
     .for_message_type("ORDERS")
-    .with_rule_fn(|segs| {
+    .with_stateless_rule_fn(|_segs, _issues| {
         // reference rules …
-        None
     });
 
-let partner_pack = ProfileRulePack::builder("ACME-PARTNER")
+let partner_pack = ProfileRulePack::new("ACME-PARTNER")
     .for_message_type("ORDERS")
-    .with_rule_fn(|segs| {
+    .with_stateless_rule_fn(|_segs, _issues| {
         // trading-partner–specific rules …
-        None
     });
 
 // Merge all three into one combined pack:
-let combined = ProfileRulePack::builder("ORDERS-COMBINED")
-    .merge(document_pack)
+let combined = document_pack
     .merge(reference_pack)
     .merge(partner_pack);
 ```
@@ -132,27 +133,26 @@ Packs check the `UNH` segment element 1 component 0 (the message identifier):
 # use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
 
 // This pack's rules run ONLY when the message type is "INVOIC"
-let invoic_pack = ProfileRulePack::builder("INVOIC-RULES")
+let invoic_pack = ProfileRulePack::new("INVOIC-RULES")
     .for_message_type("INVOIC")
-    .with_rule_fn(|segs| {
+    .with_stateless_rule_fn(|_segs, _issues| {
         // Will not run for ORDERS, UTILMD, etc.
-        None
     });
 
 // Without for_message_type, rules run for all message types:
-let universal_pack = ProfileRulePack::builder("UNIVERSAL")
-    .with_rule_fn(|segs| None);
+let universal_pack = ProfileRulePack::new("UNIVERSAL")
+    .with_stateless_rule_fn(|_segs, _issues| {});
 ```
 
 Call `.for_message_type` multiple times to include multiple types:
 
 ```rust
 # use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
-let multi_pack = ProfileRulePack::builder("TRADE-DOCS")
+let multi_pack = ProfileRulePack::new("TRADE-DOCS")
     .for_message_type("ORDERS")
     .for_message_type("ORDRSP")
     .for_message_type("INVOIC")
-    .with_rule_fn(|segs| None);
+    .with_stateless_rule_fn(|_segs, _issues| {});
 ```
 
 ---
@@ -166,15 +166,19 @@ Assign stable, namespaced rule IDs and filter them independently:
 let segs: Vec<_> = from_bytes(b"UNH+1+ORDERS:D:96A:UN'BGM+220+PO-4711+9'UNT+3+1'")
     .collect::<Result<_, _>>()?;
 
-let pack = ProfileRulePack::builder("ORDERS")
+let pack = ProfileRulePack::new("ORDERS")
     .for_message_type("ORDERS")
-    .with_rule_fn(|segs| {
-        Some(ValidationIssue::new(ValidationSeverity::Warning, "demo warning")
-            .with_rule_id("ORDERS-DOC-P001"))
+    .with_stateless_rule_fn(|_segs, issues| {
+        issues.push(
+            ValidationIssue::new(ValidationSeverity::Warning, "demo warning")
+                .with_rule_id("ORDERS-DOC-P001"),
+        );
     })
-    .with_rule_fn(|segs| {
-        Some(ValidationIssue::new(ValidationSeverity::Info, "demo info")
-            .with_rule_id("ORDERS-REF-P001"))
+    .with_stateless_rule_fn(|_segs, issues| {
+        issues.push(
+            ValidationIssue::new(ValidationSeverity::Info, "demo info")
+                .with_rule_id("ORDERS-REF-P001"),
+        );
     });
 
 let report = ValidationContext::builder()
@@ -220,25 +224,30 @@ fn validate_orders(input: &[u8]) -> Result<(), Vec<TradeError>> {
         .collect::<Result<_, _>>()
         .map_err(|_| vec![])?;
 
-    let pack = ProfileRulePack::builder("ORDERS")
+    let pack = ProfileRulePack::new("ORDERS")
         .for_message_type("ORDERS")
-        .with_rule_fn(|segs| {
-            let code = segs.iter()
+        .with_stateless_rule_fn(|segs, issues| {
+            let Some(code) = segs.iter()
                 .find(|s| s.tag == "BGM")
-                .and_then(|s| s.element_str(0))?;
-            (!matches!(code, "220" | "231")).then(|| {
-                ValidationIssue::new(ValidationSeverity::Error, format!("code {code}"))
-                    .with_rule_id("ORDERS-DOC-P001")
-            })
+                .and_then(|s| s.element_str(0))
+            else { return };
+            if !matches!(code, "220" | "231") {
+                issues.push(
+                    ValidationIssue::new(ValidationSeverity::Error, format!("code {code}"))
+                        .with_rule_id("ORDERS-DOC-P001"),
+                );
+            }
         })
-        .with_rule_fn(|segs| {
+        .with_stateless_rule_fn(|segs, issues| {
             let has_buyer = segs.iter()
                 .filter(|s| s.tag == "NAD")
                 .any(|s| s.element_str(0) == Some("BY"));
-            (!has_buyer).then(|| {
-                ValidationIssue::new(ValidationSeverity::Error, "missing NAD+BY")
-                    .with_rule_id("ORDERS-NAD-P001")
-            })
+            if !has_buyer {
+                issues.push(
+                    ValidationIssue::new(ValidationSeverity::Error, "missing NAD+BY")
+                        .with_rule_id("ORDERS-NAD-P001"),
+                );
+            }
         });
 
     let report = ValidationContext::builder()
@@ -277,27 +286,37 @@ For rules with shared state or complex initialization, implement the `ProfileRul
 trait directly:
 
 ```rust
-use edifact_rs::{ProfileRule, ProfileRulePack, ValidationIssue, ValidationSeverity, Segment};
+use edifact_rs::{
+    ProfileRule, ProfileRulePack, ValidationIssue, ValidationRuleContext,
+    ValidationSeverity, Segment,
+};
 
 struct AllowedCodesRule {
     allowed: Vec<String>,
 }
 
 impl ProfileRule for AllowedCodesRule {
-    fn evaluate(&self, segments: &[Segment<'_>]) -> Option<ValidationIssue> {
-        let bgm = segments.iter().find(|s| s.tag == "BGM")?;
-        let code = bgm.element_str(0)?;
-        (!self.allowed.iter().any(|a| a == code)).then(|| {
-            ValidationIssue::new(
-                ValidationSeverity::Error,
-                format!("code '{code}' is not in the allowed list"),
-            )
-            .with_rule_id("ORDERS-ALLOWED-CODE")
-        })
+    fn evaluate(
+        &self,
+        segments: &[Segment<'_>],
+        _context: &ValidationRuleContext<'_>,
+        issues: &mut Vec<ValidationIssue>,
+    ) {
+        let Some(bgm) = segments.iter().find(|s| s.tag == "BGM") else { return };
+        let Some(code) = bgm.element_str(0) else { return };
+        if !self.allowed.iter().any(|a| a == code) {
+            issues.push(
+                ValidationIssue::new(
+                    ValidationSeverity::Error,
+                    format!("code '{code}' is not in the allowed list"),
+                )
+                .with_rule_id("ORDERS-ALLOWED-CODE"),
+            );
+        }
     }
 }
 
-let pack = ProfileRulePack::builder("ORDERS")
+let pack = ProfileRulePack::new("ORDERS")
     .with_rule(AllowedCodesRule {
         allowed: vec!["220".into(), "231".into()],
     });
@@ -312,10 +331,10 @@ when validating in a `spawn_blocking` worker).
 
 ```rust
 # use edifact_rs::ProfileRulePack;
-let pack = ProfileRulePack::builder("MY-PACK")
+let pack = ProfileRulePack::new("MY-PACK")
     .for_message_type("ORDERS")
-    .with_rule_fn(|_| None)
-    .with_rule_fn(|_| None);
+    .with_stateless_rule_fn(|_segs, _issues| {})
+    .with_stateless_rule_fn(|_segs, _issues| {});
 
 println!("name:        {}", pack.name());           // "MY-PACK"
 println!("rule count:  {}", pack.rule_count());     // 2
@@ -328,14 +347,17 @@ println!("types:       {:?}", pack.message_types().collect::<Vec<_>>()); // ["OR
 
 1. **Use stable rule IDs** — prefix with your pack name: `"ORDERS-DOC-P001"`, not `"P001"`.
    This allows downstream code to filter and map rules independently.
-2. **Return `None` for passing rules** — rules are evaluated on every call; returning
-   `None` is free.
+2. **Push nothing for passing rules** — rules receive a `&mut Vec<ValidationIssue>`;
+   simply not pushing is the zero-cost pass path.
 3. **Scope packs to message types** — unscoped packs run for every message, even
    when the logic is type-specific.
 4. **Prefer `.merge()`** over registering many packs — a single merged pack is
    semantically cleaner and slightly more efficient (one iteration over segments).
 5. **Keep rules small and focused** — one rule per concern makes reporting and
    debugging easier.
+6. **Use `with_stateless_rule_fn` for simple rules** — when you do not need
+   the [`ValidationRuleContext`], the stateless variant is cleaner; reach for
+   `with_rule_fn` only when you need per-call metadata.
 
 ---
 

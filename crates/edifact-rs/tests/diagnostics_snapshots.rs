@@ -1,9 +1,9 @@
 mod common;
 
 use edifact_rs::ValidationContext;
+use expect_test::expect_file;
 
 const ORDERS_CONFORMING: &str = include_str!("fixtures/orders_conforming.edi");
-const PROFILE_ORDERS_DEMO_REPORT: &str = include_str!("snapshots/profile_orders_demo_report.txt");
 
 #[test]
 fn snapshot_profile_orders_demo_report_contract() {
@@ -29,5 +29,9 @@ fn snapshot_profile_orders_demo_report_contract() {
     }
 
     let rendered = report.render_deterministic();
-    assert_eq!(rendered.trim_end(), PROFILE_ORDERS_DEMO_REPORT.trim_end());
+
+    // `expect_file!` loads the snapshot file at compile-time and compares at
+    // runtime.  Set `UPDATE_EXPECT=1` (or run `cargo test` with that env var)
+    // to auto-update the snapshot file when the output intentionally changes.
+    expect_file!["snapshots/profile_orders_demo_report.txt"].assert_eq(&rendered);
 }
