@@ -2,6 +2,7 @@ pub mod edifact_rs {
     #[derive(Debug)]
     pub enum EdifactError {
         MissingRequiredElement { tag: String, element_index: usize },
+        MissingRequiredComponent { tag: String, element_index: usize, component_index: usize },
         MissingSegment { tag: String, expected_position: String },
         InvalidFieldValue { tag: String, element_index: usize, value: String },
     }
@@ -74,7 +75,8 @@ pub mod edifact_rs {
     }
 
     pub struct OwnedElement {
-        pub components: Vec<String>,
+        /// `(value, span)` pairs mirroring the real `OwnedElement` API.
+        pub components: Vec<(String, ())>,
     }
 
     pub struct OwnedSegment {
@@ -84,10 +86,10 @@ pub mod edifact_rs {
 
     impl OwnedSegment {
         pub fn element_str(&self, n: usize) -> Option<&str> {
-            self.elements.get(n)?.components.first().map(|s| s.as_str())
+            self.elements.get(n)?.components.first().map(|(s, _)| s.as_str())
         }
         pub fn component_str(&self, elem: usize, comp: usize) -> Option<&str> {
-            self.elements.get(elem)?.components.get(comp).map(|s| s.as_str())
+            self.elements.get(elem)?.components.get(comp).map(|(s, _)| s.as_str())
         }
     }
 
@@ -181,7 +183,7 @@ pub mod edifact_rs {
         segments.iter().filter(|s| T::matches_segment(s))
     }
 
-    pub mod __private {
+    pub mod helpers {
         pub use super::{
             composite_element, find_qualified_segment, find_qualified_segment_owned,
             find_segment, find_segment_owned, find_segments_typed,

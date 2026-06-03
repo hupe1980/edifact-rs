@@ -155,11 +155,11 @@ pub(crate) struct RawSegment {
 ///
 /// # Segment size guard
 ///
-/// Pass a limit to [`Tokenizer::with_limit`] to reject segments that exceed a
-/// byte-length threshold.  This bounds both the memory and CPU cost of parsing
-/// a single segment on the zero-copy slice path, and causes an
-/// [`EdifactError::SegmentTooLong`] error when the limit is exceeded.
-/// The default constructor [`Tokenizer::new`] sets no limit (`usize::MAX`).
+/// The default constructor [`Tokenizer::new`] enforces a **64 KiB** per-segment
+/// limit, which is sufficient for all well-formed EDIFACT interchanges and guards
+/// against adversarially crafted inputs that omit segment terminators.
+/// Use [`Tokenizer::with_limit`] to raise or lower this threshold, or
+/// [`Tokenizer::unlimited`] to remove it entirely (trusted / pre-validated input only).
 pub struct Tokenizer<'a> {
     input: &'a [u8],
     pos: usize,
@@ -196,20 +196,30 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    /// Construct a zero-copy tokenizer over `input` with explicit service-string advice.
+    /// Construct a tokenizer with the default 64 KiB segment-size limit.
     ///
-    /// No segment-size limit is applied.  Use [`Tokenizer::with_limit`] when
-    /// processing untrusted input to bound CPU and memory usage.
+    /// If a single segment's byte length exceeds 65 536 bytes, the iterator
+    /// returns [`EdifactError::SegmentTooLong`].  This guards against
+    /// pathological or adversarially crafted inputs that omit segment
+    /// terminators and would otherwise cause unbounded scanning.
+    ///
+    /// Call [`Tokenizer::unlimited`] if you deliberately need to process
+    /// segments larger than 64 KiB, or [`Tokenizer::with_limit`] to supply a
+    /// custom bound.
+    pub fn new(input: &'a [u8], ssa: ServiceStringAdvice) -> Self {
+        Self::with_limit(input, ssa, 65_536)
+    }
+
+    /// Construct a tokenizer with **no** segment-size limit.
     ///
     /// # Security
     ///
     /// This constructor imposes **no upper bound** on how many bytes a single
     /// segment may consume.  For untrusted or adversarially crafted input a
     /// missing segment terminator can cause the tokenizer to scan the entire
-    /// input before returning an error.  Call [`Tokenizer::with_limit`]
-    /// instead, or use the higher-level [`crate::from_bytes`] /
-    /// [`crate::from_reader_with_config`] which default to a 64 KiB limit.
-    pub fn new(input: &'a [u8], ssa: ServiceStringAdvice) -> Self {
+    /// input before returning an error.  Prefer [`Tokenizer::new`] (64 KiB
+    /// limit) or [`Tokenizer::with_limit`] for untrusted sources.
+    pub fn unlimited(input: &'a [u8], ssa: ServiceStringAdvice) -> Self {
         Self {
             input,
             pos: Self::una_start_pos(input),
@@ -574,7 +584,7 @@ mod tests {
             .elements
             .get(1)
             .and_then(|e| e.components.first())
-            .map(|s| s.as_str());
+            .map(|(s, _)| s.as_str());
         assert_eq!(raw_val, Some("test+value"));
     }
 }

@@ -7,7 +7,7 @@
 //!   cargo bench -p edifact-rs --bench bench_core
 
 use divan::Bencher;
-use edifact_rs::{from_bytes, from_reader, segments_to_bytes};
+use edifact_rs::{from_bytes, from_reader_collect, segments_to_bytes};
 mod bench_data;
 use bench_data::{one_mb, sample_msg, sample_segments};
 
@@ -60,7 +60,7 @@ fn bench_parse_reader_1mb(b: Bencher) {
     let data = one_mb();
     b.bench(|| {
         let cursor = std::io::Cursor::new(data);
-        let _ = from_reader(cursor).expect("bench fixture must be valid EDIFACT");
+        let _ = from_reader_collect(cursor).expect("bench fixture must be valid EDIFACT");
     });
 }
 

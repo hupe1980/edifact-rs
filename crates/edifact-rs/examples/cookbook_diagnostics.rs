@@ -93,12 +93,8 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
     #[cfg(feature = "diagnostics")]
     {
         if let Err(err) = run_validation() {
-            let report = miette::Report::new(err);
-            eprintln!("{report:?}");
-            return Err(edifact_rs::EdifactError::ValidationFailed {
-                error_count: 1,
-                first_message: "validation failed in diagnostics example".to_owned(),
-            });
+            eprintln!("{:?}", miette::Report::new(err));
+            std::process::exit(1);
         }
         Ok(())
     }

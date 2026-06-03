@@ -12,18 +12,16 @@ use std::io::{BufRead, BufReader, Read};
 
 fn finish_element<'a>(
     elements: &mut Vec<Element<'a>>,
-    current_components: &mut SmallVec<[Cow<'a, str>; 4]>,
-    current_component_spans: &mut SmallVec<[Span; 4]>,
+    current_components: &mut SmallVec<[(Cow<'a, str>, Span); 4]>,
     current_element_start: &mut Option<usize>,
 ) {
-    if let (Some(start), Some(last_span)) = (
-        current_element_start.take(),
-        current_component_spans.last().copied(),
-    ) {
+    if let (Some(start), Some((_, last_span))) =
+        (current_element_start.take(), current_components.last())
+    {
+        let last_end = last_span.end;
         elements.push(Element {
-            span: Span::new(start, last_span.end),
+            span: Span::new(start, last_end),
             components: std::mem::take(current_components),
-            component_spans: std::mem::take(current_component_spans),
         });
     }
 }
@@ -109,8 +107,7 @@ impl<'a> Iterator for Parser<'a> {
         };
 
         let mut elements: Vec<Element<'a>> = Vec::with_capacity(8);
-        let mut current_components: SmallVec<[Cow<'a, str>; 4]> = SmallVec::new();
-        let mut current_component_spans: SmallVec<[Span; 4]> = SmallVec::new();
+        let mut current_components: SmallVec<[(Cow<'a, str>, Span); 4]> = SmallVec::new();
         let mut current_element_start: Option<usize> = None;
         let mut in_element = false;
         let mut segment_end = tag_span.end;
@@ -125,7 +122,6 @@ impl<'a> Iterator for Parser<'a> {
                         finish_element(
                             &mut elements,
                             &mut current_components,
-                            &mut current_component_spans,
                             &mut current_element_start,
                         );
                         if let Some(last) = elements.last() {
@@ -150,7 +146,6 @@ impl<'a> Iterator for Parser<'a> {
                         finish_element(
                             &mut elements,
                             &mut current_components,
-                            &mut current_component_spans,
                             &mut current_element_start,
                         );
                         if let Some(last) = elements.last() {
@@ -164,7 +159,6 @@ impl<'a> Iterator for Parser<'a> {
                         finish_element(
                             &mut elements,
                             &mut current_components,
-                            &mut current_component_spans,
                             &mut current_element_start,
                         );
                     }
@@ -176,7 +170,6 @@ impl<'a> Iterator for Parser<'a> {
                         finish_element(
                             &mut elements,
                             &mut current_components,
-                            &mut current_component_spans,
                             &mut current_element_start,
                         );
                     }
@@ -184,8 +177,7 @@ impl<'a> Iterator for Parser<'a> {
                         Ok(v) => v,
                         Err(error) => return Some(Err(error)),
                     };
-                    current_components.push(resolved);
-                    current_component_spans.push(span);
+                    current_components.push((resolved, span));
                     current_element_start = Some(span.start);
                     in_element = true;
                 }
@@ -199,8 +191,7 @@ impl<'a> Iterator for Parser<'a> {
                         Ok(v) => v,
                         Err(error) => return Some(Err(error)),
                     };
-                    current_components.push(resolved);
-                    current_component_spans.push(span);
+                    current_components.push((resolved, span));
                 }
             }
         }
@@ -276,6 +267,15 @@ pub struct ReaderConfig {
     ///
     /// Default: `None` (unlimited).
     pub max_input_bytes: Option<u64>,
+    /// Maximum number of EDIFACT messages (UNH/UNT pairs) to process before
+    /// the stream stops.
+    ///
+    /// Once this many complete messages have been yielded the stream returns
+    /// `None`. Useful for rate-limiting or sampling large interchanges without
+    /// parsing the entire file.
+    ///
+    /// Default: `None` (unlimited).
+    pub max_messages: Option<usize>,
 }
 
 impl Default for ReaderConfig {
@@ -284,6 +284,7 @@ impl Default for ReaderConfig {
             max_segment_bytes: 65_536,
             max_segments: None,
             max_input_bytes: None,
+            max_messages: None,
         }
     }
 }
@@ -307,6 +308,13 @@ impl ReaderConfig {
     #[must_use]
     pub fn max_input_bytes(mut self, limit: u64) -> Self {
         self.max_input_bytes = Some(limit);
+        self
+    }
+
+    /// Set the maximum number of EDIFACT messages (UNH/UNT pairs) to yield and return `self`.
+    #[must_use]
+    pub fn max_messages(mut self, limit: usize) -> Self {
+        self.max_messages = Some(limit);
         self
     }
 }
@@ -343,10 +351,14 @@ pub struct OwnedSegmentStream<R: BufRead> {
     reader: R,
     ssa: crate::tokenizer::ServiceStringAdvice,
     state: StreamState,
-    stream_offset: usize,
+    stream_offset: u64,
     config: ReaderConfig,
     /// Number of segments successfully yielded so far.
     segments_yielded: usize,
+    /// Number of complete EDIFACT messages (UNH/UNT pairs) seen so far.
+    messages_yielded: usize,
+    /// Whether the last segment tag was UNH (inside a message).
+    in_message: bool,
     /// Total bytes consumed from the reader (UNA header + segment data).
     bytes_consumed: u64,
 }
@@ -364,6 +376,8 @@ impl<R: BufRead> OwnedSegmentStream<R> {
             stream_offset: 0,
             config,
             segments_yielded: 0,
+            messages_yielded: 0,
+            in_message: false,
             bytes_consumed: 0,
         }
     }
@@ -459,7 +473,10 @@ fn try_fast_segment<R: BufRead>(
     // Parse directly from the buffer slice — zero intermediate allocation.
     // Include the terminator byte so the parser sees a `SegmentTerminator`
     // token and records a span that is consistent with the `from_bytes` path.
-    let tok = Tokenizer::new(&buf[..pos + 1], ssa);
+    // Use `with_limit(max_segment_bytes)` so the tokenizer respects the caller's
+    // configured limit; `Tokenizer::new` would impose a hard 64 KiB cap that
+    // could reject segments already allowed by a larger `max_segment_bytes`.
+    let tok = Tokenizer::with_limit(&buf[..pos + 1], ssa, max_segment_bytes);
     let mut parser_iter = Parser::new(tok);
     match parser_iter.next() {
         None => FastSegment::Skip(pos + 1),
@@ -495,6 +512,14 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
             }
         }
 
+        // Check message count limit before attempting to read the next segment.
+        if let Some(max) = self.config.max_messages {
+            if self.messages_yielded >= max {
+                self.state = StreamState::Done;
+                return None;
+            }
+        }
+
         loop {
             // ── Fast path (after UNA has been consumed) ───────────────────
             if self.state == StreamState::Running {
@@ -502,14 +527,30 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
                 match try_fast_segment(
                     &mut self.reader,
                     self.ssa,
-                    seg_start,
+                    // Saturate rather than wrap on 32-bit targets; Span offsets
+                    // are `usize` so streams > 4 GiB on 32-bit produce clamped
+                    // (but monotonic) diagnostic positions.
+                    seg_start.min(usize::MAX as u64) as usize,
                     self.config.max_segment_bytes,
                 ) {
                     FastSegment::Parsed(seg, n) => {
-                        self.reader.consume(n);
+                        let n = n as u64;
+                        self.reader.consume(n as usize);
                         self.stream_offset += n;
-                        self.bytes_consumed = self.stream_offset as u64;
+                        self.bytes_consumed = self.stream_offset;
                         self.segments_yielded += 1;
+                        // Track message boundaries for max_messages enforcement.
+                        // Only count a UNT that closes a UNH we already saw; a bare
+                        // UNT without a preceding UNH is malformed and must not inflate
+                        // the counter (matches the documented UNH/UNT-pair semantics).
+                        if seg.tag == "UNT" {
+                            if self.in_message {
+                                self.messages_yielded += 1;
+                            }
+                            self.in_message = false;
+                        } else if seg.tag == "UNH" {
+                            self.in_message = true;
+                        }
                         // Eagerly mark Done if the byte budget was exhausted by
                         // this segment so the next next() call returns None
                         // without a redundant read attempt.
@@ -521,9 +562,10 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
                         return Some(Ok(seg));
                     }
                     FastSegment::Skip(n) => {
-                        self.reader.consume(n);
+                        let n = n as u64;
+                        self.reader.consume(n as usize);
                         self.stream_offset += n;
-                        self.bytes_consumed = self.stream_offset as u64;
+                        self.bytes_consumed = self.stream_offset;
                         continue;
                     }
                     FastSegment::Eof => return None,
@@ -539,11 +581,16 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
 
             // ── Slow path: byte accumulation (also handles UNA header) ────
             let mut scanned = self.state != StreamState::Init;
+            // `read_next_raw_segment` tracks offset as `usize` for segment
+            // start positions; sync back to the `u64` field afterward.
+            // Saturate rather than wrap on 32-bit targets (same rationale as
+            // the fast-path cast above).
+            let mut slow_offset: usize = self.stream_offset.min(usize::MAX as u64) as usize;
             let mut raw = match read_next_raw_segment(
                 &mut self.reader,
                 &mut self.ssa,
                 &mut scanned,
-                &mut self.stream_offset,
+                &mut slow_offset,
                 self.config.max_segment_bytes,
             ) {
                 Ok(Some(r)) => r,
@@ -553,18 +600,35 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
                     return Some(Err(e));
                 }
             };
+            self.stream_offset = slow_offset as u64;
             if scanned {
                 self.state = StreamState::Running;
             }
-            self.bytes_consumed = self.stream_offset as u64;
+            self.bytes_consumed = self.stream_offset;
 
             raw.bytes.push(self.ssa.segment_term);
-            let tok = Tokenizer::new(raw.bytes.as_slice(), self.ssa);
+            // Use `with_limit` so the configured max_segment_bytes is honoured on the
+            // slow path as well; `Tokenizer::new` would impose a hard 64 KiB cap that
+            // could reject segments the caller explicitly permitted via ReaderConfig.
+            let tok = Tokenizer::with_limit(
+                raw.bytes.as_slice(),
+                self.ssa,
+                self.config.max_segment_bytes,
+            );
             let mut parser_iter = Parser::new(tok);
             match parser_iter.next() {
                 Some(Ok(s)) => {
                     self.segments_yielded += 1;
-                    return Some(Ok(OwnedSegment::from(s).offset(raw.start_offset)));
+                    let seg = OwnedSegment::from(s).offset(raw.start_offset);
+                    if seg.tag == "UNT" {
+                        if self.in_message {
+                            self.messages_yielded += 1;
+                        }
+                        self.in_message = false;
+                    } else if seg.tag == "UNH" {
+                        self.in_message = true;
+                    }
+                    return Some(Ok(seg));
                 }
                 Some(Err(e)) => {
                     self.state = StreamState::Done;
@@ -732,7 +796,12 @@ fn read_next_byte<R: BufRead>(
 
     let byte = buf[0];
     reader.consume(1);
-    *stream_offset += 1;
+    // Saturating add: on 32-bit targets `stream_offset` is a `usize` clamped from a
+    // `u64` field.  Plain `+= 1` would wrap to 0 once the counter reaches `usize::MAX`
+    // and corrupt subsequent span diagnostics / `bytes_consumed` accounting.
+    // Using an explicit local avoids relying on `&mut` auto-deref evaluation order.
+    let next_offset = stream_offset.saturating_add(1);
+    *stream_offset = next_offset;
     Ok(Some(byte))
 }
 
@@ -825,8 +894,8 @@ mod tests {
             .iter()
             .find(|segment| segment.tag == "BGM")
             .expect("BGM segment should be present");
-        assert_eq!(bgm.elements[0].components[0], "220");
-        assert_eq!(bgm.elements[1].components[0], "test;value");
+        assert_eq!(bgm.elements[0].components[0].0, "220");
+        assert_eq!(bgm.elements[1].components[0].0, "test;value");
     }
 
     #[test]
@@ -843,7 +912,7 @@ mod tests {
         let parsed = from_bufread(reader).expect("reader parsing should succeed");
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].tag, "BGM");
-        assert_eq!(parsed[0].elements[1].components[0], "test+value");
+        assert_eq!(parsed[0].elements[1].components[0].0, "test+value");
         assert_eq!(parsed[1].tag, "UNT");
     }
 
@@ -854,7 +923,7 @@ mod tests {
             from_reader(std::io::Cursor::new(input)).expect("reader parsing should succeed");
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].tag, "BGM");
-        assert_eq!(parsed[0].elements[0].components[0], "220");
+        assert_eq!(parsed[0].elements[0].components[0].0, "220");
         assert_eq!(parsed[1].span, Span::new(10, 18));
     }
 

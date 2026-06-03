@@ -112,7 +112,7 @@ pub trait EdifactSegmentTag {
                     .elements
                     .first()
                     .and_then(|e| e.components.first())
-                    .map(|c| c.as_str())
+                    .map(|(c, _)| c.as_str())
                     .unwrap_or("");
                 qualifier_matches_pattern(q, pattern)
             }
@@ -152,8 +152,14 @@ where
 /// Unlike [`crate::from_bytes`], which parses bytes into raw [`Segment`]s, this
 /// function fully deserializes the payload into a typed Rust value via [`EdifactDeserialize`].
 ///
-/// This API currently buffers all parsed segments into a `Vec` before invoking
-/// typed deserialization.
+/// # Memory
+///
+/// This function buffers **all** parsed segments into a `Vec<Segment<'_>>` before
+/// calling `T::edifact_deserialize`.  For large interchanges — or when only the first
+/// matching segment is needed — prefer [`deserialize_first_streaming`] or
+/// [`deserialize_all_streaming`] to avoid holding the entire input in memory.
+/// For reader-based I/O with bounded memory use, see [`deserialize_first_from_reader`]
+/// and [`deserialize_all_from_reader`].
 pub fn deserialize<T: EdifactDeserialize>(input: &[u8]) -> Result<T, EdifactError> {
     let segments: Vec<Segment<'_>> = crate::from_bytes(input).collect::<Result<_, _>>()?;
     T::edifact_deserialize(&segments)
@@ -387,6 +393,9 @@ where
 ///
 /// Prefix matching without an explicit `*` was deliberately removed: `"M"` matches only `"M"`,
 /// not `"MS"` or `"MR"`.  Use `"M*"` for prefix semantics.
+///
+/// Patterns with more than 3 wildcard segments (i.e. 4 or more `*` characters) are rejected
+/// immediately with `false` to guard against pathological O(n·m) matching.
 pub fn qualifier_matches_pattern(value: &str, pattern: &str) -> bool {
     if pattern.is_empty() {
         return value.is_empty();
@@ -414,6 +423,15 @@ pub fn qualifier_matches_pattern(value: &str, pattern: &str) -> bool {
 
     // General multi-wildcard path.
     let parts: smallvec::SmallVec<[&str; 4]> = pattern.split('*').collect();
+
+    // Guard against pathological O(n·m) matching on adversarial patterns.
+    // EDIFACT qualifier patterns use at most 1–2 wildcards; 4 is a generous
+    // ceiling. Anything beyond is almost certainly a programming error or
+    // adversarial input — reject immediately.
+    if parts.len() > 4 {
+        return false;
+    }
+
     let prefix = parts[0];
     let suffix = parts[parts.len() - 1];
 
@@ -522,18 +540,40 @@ pub fn get_components_iter<'a>(seg: &'a Segment<'_>, idx: usize) -> impl Iterato
     seg.elements
         .get(idx)
         .into_iter()
-        .flat_map(|elem| elem.components.iter().map(|c| c.as_ref()))
+        .flat_map(|elem| elem.components.iter().map(|(c, _)| c.as_ref()))
 }
 
 /// A composite data element wrapper for clearer ergonomics.
+///
+/// Holds borrowed `&'a str` references to the underlying data — no string
+/// copies are made.  Up to 4 component pointers are stored inline (via
+/// [`SmallVec`]) so the common case is fully allocation-free.
+///
+/// The lifetime `'a` represents the underlying data lifetime.
+///
+/// [`SmallVec`]: smallvec::SmallVec
 pub struct CompositeElement<'a> {
-    components: &'a [std::borrow::Cow<'a, str>],
+    components: smallvec::SmallVec<[&'a str; 4]>,
 }
 
 impl<'a> CompositeElement<'a> {
+    /// Create a `CompositeElement` from a pre-existing `Cow` component slice.
+    ///
+    /// Used internally by generated owned-deserialization code.
+    pub fn from_slice(components: &'a [std::borrow::Cow<'a, str>]) -> Self {
+        Self {
+            components: components.iter().map(|c| c.as_ref()).collect(),
+        }
+    }
+
+    /// Crate-private constructor for direct `&str` components.
+    pub(crate) fn from_strs(components: smallvec::SmallVec<[&'a str; 4]>) -> Self {
+        Self { components }
+    }
+
     /// Get the component at index `i`, or None if absent.
     pub fn get(&self, i: usize) -> Option<&'a str> {
-        self.components.get(i).map(|c| c.as_ref())
+        self.components.get(i).copied()
     }
 
     /// Get the component at index `i`, or empty string if absent.
@@ -551,24 +591,21 @@ impl<'a> CompositeElement<'a> {
         self.components.is_empty()
     }
 
-    /// Iterate over all components.
-    pub fn iter(&self) -> impl Iterator<Item = &'a str> {
-        self.components.iter().map(|c| c.as_ref())
-    }
-
-    /// Create a `CompositeElement` from a pre-existing component slice.
-    ///
-    /// Used internally by [`edifact_deserialize_owned`][EdifactDeserialize::edifact_deserialize_owned]
-    /// generated code to pass component data without converting the whole segment.
-    pub fn from_slice(components: &'a [std::borrow::Cow<'a, str>]) -> Self {
-        Self { components }
+    /// Iterate over all component string values.
+    pub fn iter(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.components.iter().copied()
     }
 }
 
 /// Get a composite element from a segment with clearer ergonomics.
-pub fn composite_element<'a>(seg: &'a Segment<'_>, idx: usize) -> Option<CompositeElement<'a>> {
-    seg.elements.get(idx).map(|elem| CompositeElement {
-        components: &elem.components,
+pub fn composite_element<'a, 'd: 'a>(
+    seg: &'a Segment<'d>,
+    idx: usize,
+) -> Option<CompositeElement<'a>> {
+    // `.collect()` into `SmallVec<[&str; 4]>` keeps ≤4-component elements
+    // fully on the stack (no heap allocation for the common case).
+    seg.elements.get(idx).map(|elem| {
+        CompositeElement::from_strs(elem.components.iter().map(|(c, _)| c.as_ref()).collect())
     })
 }
 
@@ -723,7 +760,7 @@ where
         (start_idx..start_idx + count).map(move |idx| {
             components
                 .get(idx)
-                .map(|c| c.as_ref())
+                .map(|(c, _)| c.as_ref())
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| {
                     if element_exists {
@@ -817,7 +854,7 @@ where
     seg.elements
         .get(1)
         .and_then(|e| e.components.get(comp_idx))
-        .and_then(|c| if c.is_empty() { None } else { Some(c.clone()) })
+        .and_then(|(c, _)| if c.is_empty() { None } else { Some(c.clone()) })
 }
 
 /// An owned, heap-allocated `UNH..UNT` message window.
@@ -844,14 +881,14 @@ impl OwnedMessageWindow {
         let message_type = unh
             .and_then(|s| s.elements.get(1))
             .and_then(|e| e.components.first())
-            .map(|c| c.as_ref())
-            .filter(|s: &&str| !s.is_empty())
+            .map(|(c, _)| c.as_str())
+            .filter(|s| !s.is_empty())
             .map(str::to_owned);
         let association_code = unh
             .and_then(|s| s.elements.get(1))
             .and_then(|e| e.components.get(4))
-            .map(|c| c.as_ref())
-            .filter(|s: &&str| !s.is_empty())
+            .map(|(c, _)| c.as_str())
+            .filter(|s| !s.is_empty())
             .map(str::to_owned);
         Self {
             message_type,
@@ -1065,14 +1102,14 @@ impl<I: Iterator<Item = Result<crate::OwnedSegment, EdifactError>>> Iterator
 ///
 /// # Example
 /// ```
-/// use edifact_rs::message_windows_bytes;
+/// use edifact_rs::from_bytes_windows;
 /// let input = b"UNB+UNOA:1+SENDER+RECEIVER+200101:0900+1'\
 ///               UNH+1+ORDERS:D:96A:UN'\
 ///               BGM+220+PO-001+9'\
 ///               UNT+3+1'\
 ///               UNZ+1+1'";
 ///
-/// let windows: Vec<_> = message_windows_bytes(input)
+/// let windows: Vec<_> = from_bytes_windows(input)
 ///     .collect::<Result<_, _>>()
 ///     .unwrap();
 /// assert_eq!(windows.len(), 1);
@@ -1744,7 +1781,7 @@ mod tests {
     // ── SegmentAccessor unit tests ─────────────────────────────────────────────
 
     fn parse_one(input: &str) -> crate::OwnedSegment {
-        crate::from_reader(std::io::Cursor::new(input.as_bytes()))
+        crate::from_reader_collect(std::io::Cursor::new(input.as_bytes()))
             .expect("parse failed")
             .into_iter()
             .next()

@@ -15,31 +15,35 @@ UNT+4+2'";
 
     let pack = ProfileRulePack::new("ORDERS-PROGRESSIVE")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments| {
+        .with_stateless_rule_fn(|segments, issues| {
             let has_bgm = segments.iter().any(|segment| segment.tag == "BGM");
-            (!has_bgm).then(|| {
-                ValidationIssue::new(
-                    ValidationSeverity::Error,
-                    "BGM is required per streamed message window",
-                )
-                .with_rule_id("ORDERS-PROGRESSIVE-BGM")
-                .with_segment("BGM")
-            })
+            if !has_bgm {
+                issues.push(
+                    ValidationIssue::new(
+                        ValidationSeverity::Error,
+                        "BGM is required per streamed message window",
+                    )
+                    .with_rule_id("ORDERS-PROGRESSIVE-BGM")
+                    .with_segment("BGM"),
+                );
+            }
         })
-        .with_stateless_rule_fn(|segments| {
+        .with_stateless_rule_fn(|segments, issues| {
             let has_buyer = segments
                 .iter()
                 .filter(|segment| segment.tag == "NAD")
                 .any(|segment| segment.element_str(0) == Some("BY"));
-            (!has_buyer).then(|| {
-                ValidationIssue::new(
-                    ValidationSeverity::Warning,
-                    "buyer NAD+BY is recommended for progressive ORDERS validation",
-                )
-                .with_rule_id("ORDERS-PROGRESSIVE-BUYER")
-                .with_segment("NAD")
-                .with_element_index(0)
-            })
+            if !has_buyer {
+                issues.push(
+                    ValidationIssue::new(
+                        ValidationSeverity::Warning,
+                        "buyer NAD+BY is recommended for progressive ORDERS validation",
+                    )
+                    .with_rule_id("ORDERS-PROGRESSIVE-BUYER")
+                    .with_segment("NAD")
+                    .with_element_index(0),
+                );
+            }
         });
 
     let context = ValidationContext::builder()
@@ -56,11 +60,8 @@ UNT+4+2'";
 
         if segment.tag == "UNH" {
             if in_message {
-                return Err(edifact_rs::EdifactError::ValidationFailed {
-                    error_count: 1,
-                    first_message:
-                        "UNH seen while already inside a message window (missing UNT before next UNH)"
-                            .to_owned(),
+                return Err(edifact_rs::EdifactError::InvalidEventSequence {
+                    message: "UNH seen while already inside a message window (missing UNT before next UNH)",
                 });
             }
             current_window.clear();
@@ -98,9 +99,8 @@ UNT+4+2'";
     }
 
     if in_message {
-        return Err(edifact_rs::EdifactError::ValidationFailed {
-            error_count: 1,
-            first_message: "unterminated streamed message window: missing UNT".to_owned(),
+        return Err(edifact_rs::EdifactError::InvalidEventSequence {
+            message: "unterminated streamed message window: missing UNT",
         });
     }
 

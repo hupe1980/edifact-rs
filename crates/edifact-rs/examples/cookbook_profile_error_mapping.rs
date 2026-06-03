@@ -40,37 +40,41 @@ enum OrdersViolation {
 fn build_orders_pack() -> ProfileRulePack {
     let function_code_pack = ProfileRulePack::new("ORDERS-FUNCTION-CODE")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments| {
-            let bgm = segments.iter().find(|s| s.tag == "BGM")?;
-            let func = bgm.get_element(2)?.get_component(0)?;
-            // Only codes 9 (original) and 1 (cancellation) are accepted.
-            (!matches!(func, "9" | "1")).then(|| {
-                ValidationIssue::new(
-                    ValidationSeverity::Error,
-                    format!("unsupported BGM function code '{func}'"),
-                )
-                .with_rule_id("ORDERS-P001-FUNC")
-                .with_segment("BGM")
-                .with_element_index(2)
-                .with_suggestion("Use function code 9 (original) or 1 (cancellation)")
-            })
+        .with_stateless_rule_fn(|segments, issues| {
+            issues.extend((|| -> Option<ValidationIssue> {
+                let bgm = segments.iter().find(|s| s.tag == "BGM")?;
+                let func = bgm.get_element(2)?.get_component(0)?;
+                // Only codes 9 (original) and 1 (cancellation) are accepted.
+                (!matches!(func, "9" | "1")).then(|| {
+                    ValidationIssue::new(
+                        ValidationSeverity::Error,
+                        format!("unsupported BGM function code '{func}'"),
+                    )
+                    .with_rule_id("ORDERS-P001-FUNC")
+                    .with_segment("BGM")
+                    .with_element_index(2)
+                    .with_suggestion("Use function code 9 (original) or 1 (cancellation)")
+                })
+            })());
         });
 
     let reference_pack = ProfileRulePack::new("ORDERS-PO-REF")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments| {
-            let bgm = segments.iter().find(|s| s.tag == "BGM")?;
-            let reference = bgm.get_element(1)?.get_component(0)?;
-            reference.is_empty().then(|| {
-                ValidationIssue::new(
-                    ValidationSeverity::Error,
-                    "BGM purchase-order reference is empty",
-                )
-                .with_rule_id("ORDERS-P002-REF")
-                .with_segment("BGM")
-                .with_element_index(1)
-                .with_suggestion("Populate BGM element 1 with the buyer's PO reference number")
-            })
+        .with_stateless_rule_fn(|segments, issues| {
+            issues.extend((|| -> Option<ValidationIssue> {
+                let bgm = segments.iter().find(|s| s.tag == "BGM")?;
+                let reference = bgm.get_element(1)?.get_component(0)?;
+                reference.is_empty().then(|| {
+                    ValidationIssue::new(
+                        ValidationSeverity::Error,
+                        "BGM purchase-order reference is empty",
+                    )
+                    .with_rule_id("ORDERS-P002-REF")
+                    .with_segment("BGM")
+                    .with_element_index(1)
+                    .with_suggestion("Populate BGM element 1 with the buyer's PO reference number")
+                })
+            })());
         });
 
     ProfileRulePack::new("ORDERS-COMBINED")

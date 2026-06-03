@@ -54,13 +54,36 @@
 //!
 //! At runtime the generated deserialization code collects contiguous occurrences of
 //! the inner segment type `T` into the `Vec` using
-//! [`contiguous_groups_by_qualifier`][crate::__private::contiguous_groups_by_qualifier].
+//! `edifact_rs::helpers::contiguous_groups_by_qualifier`.
 //! This is behaviorally different from a bare `Vec<T>` without `#[edifact(group)]`,
-//! which uses [`find_segments_typed`][crate::__private::find_segments_typed] and does
+//! which uses `edifact_rs::helpers::find_segments_typed` and does
 //! not enforce contiguity.
 //!
-//! # Non-`String` fields and `Display` / `FromStr`
+//! # `#[edifact(required)]` on `Option<T>` fields
 //!
+//! By default, `Option<T>` fields produce `None` when the element is absent.
+//! Annotating an `Option<T>` field with `#[edifact(required)]` changes this:
+//! instead of `None`, deserialization returns
+//! `edifact_rs::EdifactError::MissingRequiredElement`
+//! when the element is absent or empty.  The Rust type stays `Option<T>`, which
+//! is useful when the EDIFACT specification mandates the element but your domain
+//! model treats it as optional for other reasons.
+//!
+//! ```ignore
+//! #[derive(EdifactSerialize, EdifactDeserialize)]
+//! #[edifact(segment = "DTM")]
+//! pub struct DtmSegment {
+//!     #[edifact(element = 0)]
+//!     qualifier: String,
+//!     /// Required by the spec but kept as Option in the domain model.
+//!     #[edifact(element = 1, required)]
+//!     date_time: Option<String>,
+//!     #[edifact(element = 2)]
+//!     format_code: Option<String>,
+//! }
+//! ```
+//!
+//! # Non-`String` fields and `Display` / `FromStr`
 //! Non-`String` field types (e.g. `u32`, `bool`, your own newtype) are serialized via
 //! `Display` and deserialized via `FromStr`.  The derive macro does **not** add a
 //! compile-time bound; if the type does not implement both traits the generated code
@@ -142,6 +165,15 @@ struct FieldAttrs {
     /// `#[edifact(qualifier = "Q")]` — message field constrained to qualifier.
     qualifier: Option<String>,
     qualifier_span: Option<proc_macro2::Span>,
+    /// `#[edifact(required)]` — treat an `Option<T>` field as mandatory.
+    ///
+    /// Without this attribute, `Option<T>` fields produce `None` when the element
+    /// is absent.  With `#[edifact(required)]` the deserialization emits
+    /// `EdifactError::MissingRequiredElement` instead, even though the Rust type is
+    /// still `Option<T>`.  This is useful for elements that the EDIFACT spec marks as
+    /// mandatory but which your domain model represents as optional for other reasons.
+    required: bool,
+    required_span: Option<proc_macro2::Span>,
 }
 
 // ── attribute parsing ──────────────────────────────────────────────────────────
@@ -219,8 +251,11 @@ fn parse_field_attrs(field: &Field) -> syn::Result<FieldAttrs> {
             } else if meta.path.is_ident("qualifier") {
                 out.qualifier = Some(meta.value()?.parse::<syn::LitStr>()?.value());
                 out.qualifier_span = Some(meta.path.span());
+            } else if meta.path.is_ident("required") {
+                out.required = true;
+                out.required_span = Some(meta.path.span());
             } else {
-                return Err(meta.error("unknown field-level `edifact` key; expected `element`, `component`, `composite`, `group`, or `qualifier`"));
+                return Err(meta.error("unknown field-level `edifact` key; expected `element`, `component`, `composite`, `group`, `qualifier`, or `required`"));
             }
             Ok(())
         })?;
@@ -240,18 +275,33 @@ fn is_vec_type(ty: &Type) -> bool {
 
 /// Returns `true` for the `String` path type.
 ///
-/// # Deliberate simplification
+/// Accepts only:
+/// - `String` (bare, single-segment)
+/// - `std::string::String` (fully qualified standard library path)
+/// - `alloc::string::String` (fully qualified alloc path for `no_std` contexts)
 ///
-/// Only the last path segment is compared to `"String"` (and similarly
-/// `"Option"`/`"Vec"` elsewhere).  This matches `std::string::String` and
-/// common single-segment re-exports, but would also match a user-defined type
-/// named `String`.  Fully qualified paths like `std::string::String` are
-/// handled correctly via `is_ident` which accepts them.  This is intentional
-/// to keep the implementation simple; the derive macro is designed for use with
-/// standard library types.
+/// A user-defined type whose last segment is `String` but that does not match
+/// one of these three forms is **not** treated as a string type, which prevents
+/// accidental string-extraction code generation for unrelated user types.
+///
+/// **Shadowing caveat:** bare `String` (single-segment, no path prefix) is matched
+/// by name only. If a crate shadows the standard-library `String` with a local type
+/// of the same name, this function will still classify it as a string type and the
+/// derive macro will generate incorrect string-extraction code rather than a
+/// composite or element parse. To avoid this, always use the fully-qualified path
+/// (`std::string::String`) in struct fields when `String` is shadowed in scope.
 fn is_string_type(ty: &Type) -> bool {
-    matches!(ty, Type::Path(p) if p.path.is_ident("String")
-        || p.path.segments.last().is_some_and(|s| s.ident == "String"))
+    let Type::Path(p) = ty else { return false };
+    // Single-segment bare "String"
+    if p.path.is_ident("String") {
+        return true;
+    }
+    // Fully-qualified std::string::String or alloc::string::String
+    let segs = &p.path.segments;
+    segs.len() == 3
+        && (segs[0].ident == "std" || segs[0].ident == "alloc")
+        && segs[1].ident == "string"
+        && segs[2].ident == "String"
 }
 
 /// Returns `true` for `&str` or `&'_ str` reference types.
@@ -391,6 +441,35 @@ fn validate_field_attrs(
         return Err(syn::Error::new(
             attrs.qualifier_span.unwrap_or_else(|| ident.span()),
             format!("field `{ident}`: qualifier-constrained groups must be Vec<T>"),
+        ));
+    }
+    if attrs.required && !is_option_type(ty) {
+        return Err(syn::Error::new(
+            attrs.required_span.unwrap_or_else(|| ident.span()),
+            format!(
+                "field `{ident}`: #[edifact(required)] only applies to Option<T> fields; \
+                 non-Option fields are always required"
+            ),
+        ));
+    }
+    if attrs.required && attrs.composite {
+        return Err(syn::Error::new(
+            attrs.required_span.unwrap_or_else(|| ident.span()),
+            format!(
+                "field `{ident}`: #[edifact(required)] cannot be combined with \
+                 #[edifact(composite)]; use a non-optional field type to require the \
+                 composite element"
+            ),
+        ));
+    }
+    if attrs.required && !is_segment_struct {
+        return Err(syn::Error::new(
+            attrs.required_span.unwrap_or_else(|| ident.span()),
+            format!(
+                "field `{ident}`: #[edifact(required)] is only valid on segment struct \
+                 element fields; to require a segment in a message struct, use a \
+                 non-optional field type"
+            ),
         ));
     }
     Ok(())
@@ -732,11 +811,11 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
         let find_seg = if let Some(qual) = &struct_attrs.qualifier {
             quote! {
-                ::edifact_rs::__private::find_qualified_segment(segments, #seg_tag, #qual)
+                ::edifact_rs::helpers::find_qualified_segment(segments, #seg_tag, #qual)
             }
         } else {
             quote! {
-                ::edifact_rs::__private::find_segment(segments, #seg_tag)
+                ::edifact_rs::helpers::find_segment(segments, #seg_tag)
             }
         };
 
@@ -750,7 +829,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         let inner_ty = option_inner_type(ty)
                             .ok_or_else(|| syn::Error::new(ident.span(), "expected Option<T>"))?;
                         return Ok(quote! {
-                            let #ident = match ::edifact_rs::__private::composite_element(__seg, #idx) {
+                            let #ident = match ::edifact_rs::helpers::composite_element(__seg, #idx) {
                                 ::core::option::Option::Some(__composite) => {
                                     ::core::option::Option::Some(
                                         <#inner_ty as ::edifact_rs::EdifactCompositeDeserialize>::edifact_deserialize_composite(__composite)?
@@ -762,25 +841,69 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     }
                     return Ok(quote! {
                         let #ident = <#ty as ::edifact_rs::EdifactCompositeDeserialize>::edifact_deserialize_composite(
-                            ::edifact_rs::__private::composite_element(__seg, #idx).ok_or_else(|| ::edifact_rs::EdifactError::MissingRequiredElement {
+                            ::edifact_rs::helpers::composite_element(__seg, #idx).ok_or_else(|| ::edifact_rs::EdifactError::MissingRequiredElement {
                                 tag: #seg_tag.to_owned(),
                                 element_index: #idx as usize,
                             })?
                         )?;
                     });
                 }
-                let value_expr = if let Some(comp) = attrs.component {
-                    let comp = comp as usize;
+                let component_idx: Option<usize> = attrs.component.map(|c| c as usize);
+                let value_expr = if let Some(comp) = component_idx {
                     quote! {
                         __seg.get_element(#idx).and_then(|__e| __e.get_component(#comp))
                     }
                 } else {
                     quote! { __seg.element_str(#idx) }
                 };
+                // Build the correct "missing required" error depending on whether the
+                // field targets a component within an element or a whole element.
+                let missing_required_err = if let Some(comp) = component_idx {
+                    quote! {
+                        ::edifact_rs::EdifactError::MissingRequiredComponent {
+                            tag: #seg_tag.to_owned(),
+                            element_index: #idx as usize,
+                            component_index: #comp as usize,
+                        }
+                    }
+                } else {
+                    quote! {
+                        ::edifact_rs::EdifactError::MissingRequiredElement {
+                            tag: #seg_tag.to_owned(),
+                            element_index: #idx as usize,
+                        }
+                    }
+                };
                 Ok(if is_option_type(ty) {
                     let inner_ty = option_inner_type(ty);
                     let inner_is_str = inner_ty.is_some_and(is_str_like);
-                    if inner_is_str {
+                    if attrs.required {
+                        // #[edifact(required)] on Option<T>: treat absence as an error.
+                        // Emits MissingRequiredComponent when combined with component = N,
+                        // MissingRequiredElement otherwise.
+                        if inner_is_str {
+                            quote! {
+                                let #ident = ::core::option::Option::Some(
+                                    #value_expr
+                                        .filter(|__s| !__s.is_empty())
+                                        .ok_or_else(|| #missing_required_err)?
+                                        .to_owned()
+                                );
+                            }
+                        } else {
+                            let inner_ty = inner_ty
+                                .ok_or_else(|| syn::Error::new(ident.span(), "expected Option<T>"))?;
+                            quote! {
+                                let #ident = ::core::option::Option::Some(
+                                    #value_expr
+                                        .filter(|__s| !__s.is_empty())
+                                        .ok_or_else(|| #missing_required_err)?
+                                        .parse::<#inner_ty>()
+                                        .map_err(|_| ::edifact_rs::EdifactError::InvalidText { offset: __seg.span.start })?
+                                );
+                            }
+                        }
+                    } else if inner_is_str {
                         quote! {
                             let #ident = #value_expr
                                 .filter(|__s| !__s.is_empty())
@@ -864,11 +987,11 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // Works directly on `&[OwnedSegment]` without allocating a `Vec<Segment>`.
         let find_seg_owned = if let Some(qual) = &struct_attrs.qualifier {
             quote! {
-                ::edifact_rs::__private::find_qualified_segment_owned(segments, #seg_tag, #qual)
+                ::edifact_rs::helpers::find_qualified_segment_owned(segments, #seg_tag, #qual)
             }
         } else {
             quote! {
-                ::edifact_rs::__private::find_segment_owned(segments, #seg_tag)
+                ::edifact_rs::helpers::find_segment_owned(segments, #seg_tag)
             }
         };
 
@@ -885,7 +1008,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                             let #ident = match __seg.elements.get(#idx) {
                                 ::core::option::Option::Some(__e) => {
                                     let __cows = __e.components.iter()
-                                        .map(|s| ::std::borrow::Cow::Borrowed(s.as_str()))
+                                        .map(|(s, _)| ::std::borrow::Cow::Borrowed(s.as_str()))
                                         .collect::<::std::vec::Vec<::std::borrow::Cow<'_, str>>>();
                                     ::core::option::Option::Some(
                                         <#inner_ty as ::edifact_rs::EdifactCompositeDeserialize>::edifact_deserialize_composite(
@@ -905,7 +1028,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                                     element_index: #idx as usize,
                                 })?
                                 .components.iter()
-                                .map(|s| ::std::borrow::Cow::Borrowed(s.as_str()))
+                                .map(|(s, _)| ::std::borrow::Cow::Borrowed(s.as_str()))
                                 .collect::<::std::vec::Vec<::std::borrow::Cow<'_, str>>>();
                             <#ty as ::edifact_rs::EdifactCompositeDeserialize>::edifact_deserialize_composite(
                                 ::edifact_rs::CompositeElement::from_slice(&__cows)
@@ -913,15 +1036,56 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         };
                     });
                 }
-                let value_expr_owned = if let Some(comp) = attrs.component {
-                    let comp = comp as usize;
+                let component_idx_owned: Option<usize> = attrs.component.map(|c| c as usize);
+                let value_expr_owned = if let Some(comp) = component_idx_owned {
                     quote! { __seg.component_str(#idx, #comp) }
                 } else {
                     quote! { __seg.element_str(#idx) }
                 };
+                // Build the correct "missing required" error for the owned path.
+                let missing_required_err_owned = if let Some(comp) = component_idx_owned {
+                    quote! {
+                        ::edifact_rs::EdifactError::MissingRequiredComponent {
+                            tag: #seg_tag.to_owned(),
+                            element_index: #idx as usize,
+                            component_index: #comp as usize,
+                        }
+                    }
+                } else {
+                    quote! {
+                        ::edifact_rs::EdifactError::MissingRequiredElement {
+                            tag: #seg_tag.to_owned(),
+                            element_index: #idx as usize,
+                        }
+                    }
+                };
                 Ok(if is_option_type(ty) {
                     if let Some(inner_ty) = option_inner_type(ty) {
-                        if is_str_like(inner_ty) {
+                        if attrs.required {
+                            // #[edifact(required)] on Option<T>: absence is an error.
+                            // Emits MissingRequiredComponent when combined with component = N,
+                            // MissingRequiredElement otherwise.
+                            if is_str_like(inner_ty) {
+                                quote! {
+                                    let #ident = ::core::option::Option::Some(
+                                        #value_expr_owned
+                                            .filter(|__s| !__s.is_empty())
+                                            .ok_or_else(|| #missing_required_err_owned)?
+                                            .to_owned()
+                                    );
+                                }
+                            } else {
+                                quote! {
+                                    let #ident = ::core::option::Option::Some(
+                                        #value_expr_owned
+                                            .filter(|__s| !__s.is_empty())
+                                            .ok_or_else(|| #missing_required_err_owned)?
+                                            .parse::<#inner_ty>()
+                                            .map_err(|_| ::edifact_rs::EdifactError::InvalidText { offset: __seg.span.start })?
+                                    );
+                                }
+                            }
+                        } else if is_str_like(inner_ty) {
                             quote! {
                                 let #ident = #value_expr_owned
                                     .filter(|__s| !__s.is_empty())
@@ -1009,7 +1173,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         let inner_ty = option_inner_type(ty)
                             .ok_or_else(|| syn::Error::new(ident.span(), "expected Option<T>"))?;
                         quote! {
-                            let #ident = match ::edifact_rs::__private::find_qualified_segment(
+                            let #ident = match ::edifact_rs::helpers::find_qualified_segment(
                                 segments,
                                 <#inner_ty as ::edifact_rs::EdifactSegmentTag>::SEGMENT_TAG,
                                 #qual,
@@ -1026,7 +1190,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         }
                     } else {
                         quote! {
-                            let __seg = ::edifact_rs::__private::find_qualified_segment(
+                            let __seg = ::edifact_rs::helpers::find_qualified_segment(
                                 segments,
                                 <#ty as ::edifact_rs::EdifactSegmentTag>::SEGMENT_TAG,
                                 #qual,
@@ -1044,7 +1208,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     let inner_ty = vec_inner_type(ty)
                         .ok_or_else(|| syn::Error::new(ident.span(), "expected Vec<T>"))?;
                     quote! {
-                        let #ident = ::edifact_rs::__private::find_segments_typed::<#inner_ty>(segments)
+                        let #ident = ::edifact_rs::helpers::find_segments_typed::<#inner_ty>(segments)
                             .map(|__seg| {
                                 <#inner_ty as ::edifact_rs::EdifactDeserialize>::edifact_deserialize(
                                     ::core::slice::from_ref(__seg),
@@ -1107,7 +1271,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         let inner_ty = option_inner_type(ty)
                             .ok_or_else(|| syn::Error::new(ident.span(), "expected Option<T>"))?;
                         quote! {
-                            let #ident = match ::edifact_rs::__private::find_qualified_segment_owned(
+                            let #ident = match ::edifact_rs::helpers::find_qualified_segment_owned(
                                 segments,
                                 <#inner_ty as ::edifact_rs::EdifactSegmentTag>::SEGMENT_TAG,
                                 #qual,
@@ -1124,7 +1288,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         }
                     } else {
                         quote! {
-                            let __seg = ::edifact_rs::__private::find_qualified_segment_owned(
+                            let __seg = ::edifact_rs::helpers::find_qualified_segment_owned(
                                 segments,
                                 <#ty as ::edifact_rs::EdifactSegmentTag>::SEGMENT_TAG,
                                 #qual,

@@ -2,7 +2,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, 
 use edifact_rs::{
     ProfileRulePack, ServiceStringAdvice, Tokenizer, ValidationContext, ValidationIssue,
     ValidationLayer, ValidationReport, ValidationRuleContext, ValidationSeverity, Validator,
-    from_bytes, from_reader, segments_to_bytes,
+    from_bytes, from_reader_collect, segments_to_bytes,
 };
 use std::io::{Cursor, Read};
 
@@ -71,7 +71,8 @@ fn bench_reader(c: &mut Criterion) {
     group.bench_function("1mb", |b| {
         b.iter(|| {
             let cursor = std::io::Cursor::new(data);
-            let segments = from_reader(cursor).expect("bench fixture must be valid EDIFACT");
+            let segments =
+                from_reader_collect(cursor).expect("bench fixture must be valid EDIFACT");
             black_box(segments);
         });
     });
@@ -79,7 +80,8 @@ fn bench_reader(c: &mut Criterion) {
     group.bench_function("parse_reader_chunked", |b| {
         b.iter(|| {
             let reader = ChunkedReader::new(data, 4 * 1024);
-            let segments = from_reader(reader).expect("bench fixture must be valid EDIFACT");
+            let segments =
+                from_reader_collect(reader).expect("bench fixture must be valid EDIFACT");
             black_box(segments);
         });
     });
@@ -129,18 +131,15 @@ fn bench_validation(c: &mut Criterion) {
         .build();
     let custom_pack = ProfileRulePack::new("bench-custom-pack")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments| {
-            let has_bgm = segments.iter().any(|seg| seg.tag == "BGM");
-            if has_bgm {
-                None
-            } else {
-                Some(
+        .with_stateless_rule_fn(|segments, issues| {
+            if !segments.iter().any(|seg| seg.tag == "BGM") {
+                issues.push(
                     ValidationIssue::new(
                         ValidationSeverity::Error,
                         "BGM segment missing in ORDERS message",
                     )
                     .with_rule_id("bench.custom.bgm_required"),
-                )
+                );
             }
         });
     let profile_context = ValidationContext::builder()
@@ -151,40 +150,34 @@ fn bench_validation(c: &mut Criterion) {
 
     let pack_a = ProfileRulePack::new("bench-pack-a")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments| {
-            let has_dtm = segments.iter().any(|seg| seg.tag == "DTM");
-            if has_dtm {
-                None
-            } else {
-                Some(
+        .with_stateless_rule_fn(|segments, issues| {
+            if !segments.iter().any(|seg| seg.tag == "DTM") {
+                issues.push(
                     ValidationIssue::new(
                         ValidationSeverity::Error,
                         "DTM segment missing in ORDERS message",
                     )
                     .with_rule_id("bench.pack_a.dtm_required"),
-                )
+                );
             }
         });
     let pack_b = ProfileRulePack::new("bench-pack-b")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments| {
-            let has_nad = segments.iter().any(|seg| seg.tag == "NAD");
-            if has_nad {
-                None
-            } else {
-                Some(
+        .with_stateless_rule_fn(|segments, issues| {
+            if !segments.iter().any(|seg| seg.tag == "NAD") {
+                issues.push(
                     ValidationIssue::new(
                         ValidationSeverity::Warning,
                         "NAD segment missing in ORDERS message",
                     )
                     .with_rule_id("bench.pack_b.nad_required"),
-                )
+                );
             }
         });
     let composed_profile_context = ValidationContext::builder()
         .with_message_type("ORDERS")
         .with_validator(ValidationLayer::Structure, NoopValidator)
-        .with_profile_pack(pack_a.merge(pack_b).expect("merge compatible packs"))
+        .with_profile_pack(pack_a.merge(pack_b).expect("compatible packs"))
         .build();
 
     group.bench_function("validate_structure_orders", |b| {

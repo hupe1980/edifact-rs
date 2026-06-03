@@ -39,6 +39,7 @@
 
 use crate::Segment;
 use smallvec::SmallVec;
+use std::ops::Range;
 
 // ── GroupDef ──────────────────────────────────────────────────────────────────
 
@@ -123,13 +124,13 @@ impl<'a> SegmentGroup<'a> {
 
 struct AllSegmentsIter<'g, 'a> {
     // Stack of (current_group, current_seg_idx, current_child_idx)
-    stack: Vec<(&'g SegmentGroup<'a>, usize, usize)>,
+    stack: SmallVec<[(&'g SegmentGroup<'a>, usize, usize); 8]>,
 }
 
 impl<'g, 'a> AllSegmentsIter<'g, 'a> {
     fn new(root: &'g SegmentGroup<'a>) -> Self {
         Self {
-            stack: vec![(root, 0, 0)],
+            stack: smallvec::smallvec![(root, 0, 0)],
         }
     }
 }
@@ -245,11 +246,8 @@ fn group_recursive_inner<'a>(
     while i < segments.len() {
         let tag = segments[i].tag;
 
-        // Compare by string value rather than using contains() because
-        // `tag` is borrowed from parsed input while `stop_triggers` holds
-        // `&'static str` values.
-        #[allow(clippy::manual_contains)]
-        if stop_triggers.iter().any(|t| *t == tag) {
+        // A trigger matching a stop tag means we must return control to the parent group.
+        if stop_triggers.iter().copied().any(|t| t == tag) {
             break;
         }
 
@@ -276,6 +274,170 @@ fn group_recursive_inner<'a>(
             i += 1;
         }
     }
+    i
+}
+
+// ── SegmentGroupIndexed ───────────────────────────────────────────────────────
+
+/// A zero-clone counterpart to [`SegmentGroup`] that stores index ranges into
+/// the original flat segment slice rather than cloning each segment.
+///
+/// Produced by [`group_segments_indexed`].  To access the actual segments use
+/// the original `&[Segment<'a>]` together with [`total_span`]:
+///
+/// ```rust,ignore
+/// let indexed = group_segments_indexed(&segments, MY_SCHEMA, "ROOT");
+/// for child in &indexed.children {
+///     let child_segs = &segments[child.total_span.clone()];
+/// }
+/// ```
+///
+/// [`total_span`]: SegmentGroupIndexed::total_span
+#[derive(Debug)]
+pub struct SegmentGroupIndexed {
+    /// Group name from the schema, e.g. `"SG2"`, or the root name.
+    pub definition: &'static str,
+    /// Contiguous span `[start, end)` of absolute indices into the original flat
+    /// segment slice covering **all** segments in this group instance — trigger
+    /// segment, direct segments, and all descendant groups combined.
+    ///
+    /// Use this to slice the original `&[Segment<'_>]` to get every segment
+    /// belonging to this group:
+    ///
+    /// ```rust,ignore
+    /// let all_sg2_segs = &segments[sg2.total_span.clone()];
+    /// ```
+    ///
+    /// To iterate over only the segments that belong *directly* to this group
+    /// (excluding descendants), use [`direct_segment_indices`].
+    ///
+    /// [`direct_segment_indices`]: SegmentGroupIndexed::direct_segment_indices
+    pub total_span: Range<usize>,
+    /// Child group instances, in message order.
+    pub children: Vec<SegmentGroupIndexed>,
+}
+
+impl SegmentGroupIndexed {
+    /// Iterate over the absolute indices of segments that belong *directly* to
+    /// this group — i.e. those within [`total_span`] that are **not** covered
+    /// by any child group's [`total_span`].
+    ///
+    /// Complexity: `O(total_span.len() × children.len())`.  For typical EDIFACT
+    /// message structures (≤ 8 children per group) this is negligible.
+    ///
+    /// [`total_span`]: SegmentGroupIndexed::total_span
+    pub fn direct_segment_indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.total_span.clone().filter(|i| {
+            !self
+                .children
+                .iter()
+                .any(|child| child.total_span.contains(i))
+        })
+    }
+}
+
+/// Partition `segments` into a [`SegmentGroupIndexed`] tree without cloning.
+///
+/// This is the zero-allocation counterpart to [`group_segments`]: instead of
+/// copying each [`Segment`] into the tree, it records `Range<usize>` indices
+/// into the original flat slice.  Use the original slice together with
+/// [`SegmentGroupIndexed::total_span`] to access segments:
+///
+/// ```rust,ignore
+/// let tree = group_segments_indexed(&segments, MY_SCHEMA, "ORDERS");
+/// for sg2 in tree.children.iter().filter(|g| g.definition == "SG2") {
+///     let segs = &segments[sg2.total_span.clone()];
+///     println!("first segment: {:?}", segs.first().map(|s| s.tag));
+///     // Direct segments only (excluding nested SG3, SG4 …):
+///     for idx in sg2.direct_segment_indices() {
+///         println!("  direct: {:?}", segments[idx].tag);
+///     }
+/// }
+/// ```
+///
+/// # Complexity
+///
+/// `O(n × schema_depth)` time, `O(tree_nodes)` space.  No `Segment` clones.
+pub fn group_segments_indexed<'a>(
+    segments: &[Segment<'a>],
+    schema: &'static [GroupDef],
+    root_name: &'static str,
+) -> SegmentGroupIndexed {
+    let mut root = SegmentGroupIndexed {
+        definition: root_name,
+        total_span: 0..0,
+        children: Vec::new(),
+    };
+    group_recursive_indexed(segments, &mut root, schema, &[], 0);
+    root
+}
+
+/// Internal recursive indexed grouping.  Returns the number of segments consumed.
+fn group_recursive_indexed<'a>(
+    segments: &[Segment<'a>],
+    parent: &mut SegmentGroupIndexed,
+    schema: &'static [GroupDef],
+    stop_triggers: &[&'static str],
+    offset: usize,
+) -> usize {
+    let combined_stop: SmallVec<[&'static str; 16]> = {
+        let mut v: SmallVec<[&'static str; 16]> = SmallVec::from_slice(stop_triggers);
+        for d in schema {
+            if !v.contains(&d.trigger) {
+                v.push(d.trigger);
+            }
+        }
+        v
+    };
+
+    // `span_start` is the absolute index of the first segment in this group.
+    // For child groups the caller pre-seeds `parent.total_span.start` with the
+    // trigger segment position; for the root (or any group with no pre-seeded
+    // trigger) we start at `offset`.
+    let span_start = if !parent.total_span.is_empty() {
+        parent.total_span.start // pre-seeded trigger position
+    } else {
+        offset
+    };
+
+    let mut i = 0;
+    while i < segments.len() {
+        let tag = segments[i].tag;
+
+        if stop_triggers.iter().copied().any(|t| t == tag) {
+            break;
+        }
+
+        if let Some(def) = schema.iter().find(|d| d.trigger == tag) {
+            let child_offset = offset + i;
+            let mut child = SegmentGroupIndexed {
+                definition: def.name,
+                // Pre-seed the trigger segment; the recursive call extends
+                // total_span to cover the full child subtree.
+                total_span: child_offset..child_offset + 1,
+                children: Vec::new(),
+            };
+            i += 1;
+
+            let consumed = group_recursive_indexed(
+                &segments[i..],
+                &mut child,
+                def.children,
+                &combined_stop,
+                offset + i,
+            );
+            i += consumed;
+
+            parent.children.push(child);
+        } else {
+            i += 1;
+        }
+    }
+
+    // Total span covers everything from the first segment (trigger or first
+    // direct segment) to the last segment consumed in this call.
+    parent.total_span = span_start..(offset + i);
+
     i
 }
 

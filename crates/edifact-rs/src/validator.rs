@@ -8,40 +8,60 @@ use std::sync::Arc;
 
 /// Typed context injected into profile rule closures at validation time.
 ///
-/// Rules access per-call metadata via [`ValidationRuleContext::metadata`].
-/// If no metadata was injected, every `metadata()` call returns `None`.
+/// Rules access per-call metadata via [`ValidationRuleContext::metadata`] and
+/// the message reference (UNH element 0) via [`ValidationRuleContext::message_ref`].
 ///
 /// # Example
 ///
 /// ```rust,ignore
 /// let pack = ProfileRulePack::new("AHB-11001")
-///     .with_rule_fn(|segs, ctx| {
-///         let pruefid: &Pruefid = ctx.metadata()?;
-///         // use pruefid …
-///         None
+///     .with_rule_fn(|segs, ctx, issues| {
+///         // Rule closures return `()` and push into `issues`;
+///         // use `let else` to skip when metadata is absent.
+///         let Some(pruefid) = ctx.metadata::<Pruefid>() else { return };
+///         let msg_ref = ctx.message_ref.unwrap_or("<unknown>");
+///         // use pruefid and msg_ref …
 ///     });
 ///
 /// let report = ValidationContext::builder()
 ///     .with_profile_pack(pack)
+///     .with_message_ref("0001")
 ///     .build()
 ///     .validate_lenient_with(&segments, &my_pruefid);
 /// ```
 #[derive(Clone, Copy)]
 pub struct ValidationRuleContext<'a> {
     metadata: Option<&'a (dyn Any + Send + Sync)>,
+    /// Message reference (`UNH` element 0) for this validation call.
+    ///
+    /// Set at build time via [`ValidationContextBuilder::with_message_ref`].  The reference
+    /// is forwarded automatically into every [`ValidationRuleContext`] constructed by
+    /// [`ValidationContext::validate_lenient`] and related methods.  `None` when no
+    /// reference was configured.
+    pub message_ref: Option<&'a str>,
 }
 
 impl<'a> ValidationRuleContext<'a> {
-    /// Construct a context with no metadata.
+    /// Construct a context with no metadata and no message reference.
     pub fn empty() -> Self {
-        Self { metadata: None }
+        Self {
+            metadata: None,
+            message_ref: None,
+        }
     }
 
     /// Construct a context holding a typed metadata reference.
     pub fn new<T: Any + Send + Sync>(value: &'a T) -> Self {
         Self {
             metadata: Some(value as &(dyn Any + Send + Sync)),
+            message_ref: None,
         }
+    }
+
+    /// Attach a message reference to this context (builder-style).
+    pub fn with_message_ref(mut self, msg_ref: &'a str) -> Self {
+        self.message_ref = Some(msg_ref);
+        self
     }
 
     /// Downcast the metadata to `T`.  Returns `None` if no metadata was
@@ -60,6 +80,7 @@ impl std::fmt::Debug for ValidationRuleContext<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ValidationRuleContext")
             .field("has_metadata", &self.metadata.is_some())
+            .field("message_ref", &self.message_ref)
             .finish()
     }
 }
@@ -70,15 +91,40 @@ impl std::fmt::Debug for ValidationRuleContext<'_> {
 /// EDIFACT message validation.  Rules receive a [`ValidationRuleContext`] that
 /// provides optional typed metadata injected at validation call time via
 /// [`ValidationContext::validate_lenient_with`].
+///
+/// # Multiple issues per invocation
+///
+/// [`evaluate`](ProfileRule::evaluate) appends issues into a caller-supplied
+/// `Vec` rather than returning a single `Option`.  This lets one rule iterate
+/// every matching segment and report *all* violations — not just the first.
+///
+/// Rules that only ever emit a single issue can still return early:
+///
+/// ```rust,ignore
+/// fn evaluate(&self, segments: &[Segment<'_>], _ctx: &ValidationRuleContext<'_>,
+///             issues: &mut Vec<ValidationIssue>) {
+///     if let Some(problem) = check_something(segments) {
+///         issues.push(problem);
+///     }
+/// }
+/// ```
+///
+/// # `bail_on_first_error` interaction
+///
+/// When [`ProfileRulePack::bail_on_first_error`] is set, the pack stops calling
+/// further rules as soon as this method pushes at least one error-severity issue.
+/// Issues already pushed remain in the report; subsequent rules in the same pack
+/// are skipped.
 pub trait ProfileRule: Send + Sync {
     /// Evaluate the rule against the given segments.
     ///
-    /// Return `Some(issue)` if the rule is violated, or `None` if the segments pass.
+    /// Push any violations into `issues`.  Push nothing if the segments pass.
     fn evaluate(
         &self,
         segments: &[Segment<'_>],
         context: &ValidationRuleContext<'_>,
-    ) -> Option<ValidationIssue>;
+        issues: &mut Vec<ValidationIssue>,
+    );
 }
 
 /// Wraps a context-aware closure as a [`ProfileRule`].
@@ -86,7 +132,7 @@ struct ClosureProfileRule<F>(F);
 
 impl<F> ProfileRule for ClosureProfileRule<F>
 where
-    F: for<'a> Fn(&[Segment<'a>], &ValidationRuleContext<'_>) -> Option<ValidationIssue>
+    F: for<'a> Fn(&[Segment<'a>], &ValidationRuleContext<'_>, &mut Vec<ValidationIssue>)
         + Send
         + Sync,
 {
@@ -94,8 +140,9 @@ where
         &self,
         segments: &[Segment<'_>],
         context: &ValidationRuleContext<'_>,
-    ) -> Option<ValidationIssue> {
-        (self.0)(segments, context)
+        issues: &mut Vec<ValidationIssue>,
+    ) {
+        (self.0)(segments, context, issues);
     }
 }
 
@@ -104,14 +151,15 @@ struct StatelessClosureProfileRule<F>(F);
 
 impl<F> ProfileRule for StatelessClosureProfileRule<F>
 where
-    F: for<'a> Fn(&[Segment<'a>]) -> Option<ValidationIssue> + Send + Sync,
+    F: for<'a> Fn(&[Segment<'a>], &mut Vec<ValidationIssue>) + Send + Sync,
 {
     fn evaluate(
         &self,
         segments: &[Segment<'_>],
         _context: &ValidationRuleContext<'_>,
-    ) -> Option<ValidationIssue> {
-        (self.0)(segments)
+        issues: &mut Vec<ValidationIssue>,
+    ) {
+        (self.0)(segments, issues);
     }
 }
 
@@ -249,14 +297,14 @@ impl ProfileRulePack {
 
     /// Add a context-aware rule closure.
     ///
-    /// The closure receives both the segment slice and a [`ValidationRuleContext`]
-    /// that may carry typed metadata injected at validation call time via
-    /// [`ValidationContext::validate_lenient_with`].
+    /// The closure receives the segment slice, a [`ValidationRuleContext`], and a
+    /// `&mut Vec<ValidationIssue>` to push any violations into.  Push nothing if
+    /// the segments pass.  Multiple issues may be pushed per invocation.
     ///
     /// For rules that do not need context, use [`with_stateless_rule_fn`][Self::with_stateless_rule_fn].
     pub fn with_rule_fn<F>(mut self, rule: F) -> Self
     where
-        F: for<'a> Fn(&[Segment<'a>], &ValidationRuleContext<'_>) -> Option<ValidationIssue>
+        F: for<'a> Fn(&[Segment<'a>], &ValidationRuleContext<'_>, &mut Vec<ValidationIssue>)
             + Send
             + Sync
             + 'static,
@@ -275,7 +323,7 @@ impl ProfileRulePack {
     /// corresponding rule in `self`.
     pub fn with_named_rule_fn<F>(mut self, id: impl Into<Arc<str>>, rule: F) -> Self
     where
-        F: for<'a> Fn(&[Segment<'a>], &ValidationRuleContext<'_>) -> Option<ValidationIssue>
+        F: for<'a> Fn(&[Segment<'a>], &ValidationRuleContext<'_>, &mut Vec<ValidationIssue>)
             + Send
             + Sync
             + 'static,
@@ -289,11 +337,12 @@ impl ProfileRulePack {
 
     /// Add a context-free rule closure.
     ///
-    /// Convenience wrapper for rules that do not inspect the
+    /// The closure receives the segment slice and a `&mut Vec<ValidationIssue>` to
+    /// push violations into.  Convenience wrapper for rules that do not inspect the
     /// [`ValidationRuleContext`].
     pub fn with_stateless_rule_fn<F>(mut self, rule: F) -> Self
     where
-        F: for<'a> Fn(&[Segment<'a>]) -> Option<ValidationIssue> + Send + Sync + 'static,
+        F: for<'a> Fn(&[Segment<'a>], &mut Vec<ValidationIssue>) + Send + Sync + 'static,
     {
         self.rules.push(NamedRule {
             id: None,
@@ -307,7 +356,7 @@ impl ProfileRulePack {
     /// See [`with_named_rule_fn`][Self::with_named_rule_fn] for override semantics.
     pub fn with_named_stateless_rule_fn<F>(mut self, id: impl Into<Arc<str>>, rule: F) -> Self
     where
-        F: for<'a> Fn(&[Segment<'a>]) -> Option<ValidationIssue> + Send + Sync + 'static,
+        F: for<'a> Fn(&[Segment<'a>], &mut Vec<ValidationIssue>) + Send + Sync + 'static,
     {
         self.rules.push(NamedRule {
             id: Some(id.into()),
@@ -348,6 +397,13 @@ impl ProfileRulePack {
     /// to a release and the other is not, the scope is preserved; if both are
     /// scoped, they must match.
     ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError::IncompatibleReleaseScopes`] if both packs specify
+    /// different release scopes.  Use
+    /// [`merge_unchecked`][Self::merge_unchecked] in code-generated or
+    /// build-verified contexts where compatibility is guaranteed.
+    ///
     /// # Example
     ///
     /// ```rust,ignore
@@ -355,7 +411,7 @@ impl ProfileRulePack {
     ///     .with_stateless_rule_fn(/* mandatory segment rules */);
     ///
     /// let ahb_11001 = ProfileRulePack::new("AHB-11001")
-    ///     .extend_from(&base)
+    ///     .extend_from(&base)?
     ///     .with_stateless_rule_fn(/* 11001-specific rules */);
     /// ```
     pub fn extend_from(mut self, base: &ProfileRulePack) -> Result<Self, EdifactError> {
@@ -374,13 +430,38 @@ impl ProfileRulePack {
     /// Rules from `self` run before rules from `other`.  If both packs contain
     /// named rules with the same id, **both run** — use
     /// [`merge_with_override`][Self::merge_with_override] to de-duplicate by id instead.
-    /// Release scoping follows the same compatibility rule as
-    /// [`extend_from`][Self::extend_from].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError::IncompatibleReleaseScopes`] if both packs specify
+    /// different release scopes.  Use
+    /// [`merge_unchecked`][Self::merge_unchecked] in code-generated or
+    /// build-verified contexts where compatibility is guaranteed.
     pub fn merge(mut self, mut other: Self) -> Result<Self, EdifactError> {
         self.message_types.append(&mut other.message_types);
         self.release = merge_release_scopes(self.release.take(), other.release.take())?;
         self.rules.append(&mut other.rules);
         Ok(self)
+    }
+
+    /// Merge two packs without checking release-scope compatibility.
+    ///
+    /// Identical to [`merge`][Self::merge] except that incompatible release
+    /// scopes do **not** return `Err` — `other`'s release takes precedence when
+    /// both packs specify different values.
+    ///
+    /// Use this in code-generated profiles where compatibility is guaranteed at
+    /// build time and the fallible `Result` return of [`merge`][Self::merge]
+    /// would only add noise.
+    pub fn merge_unchecked(mut self, mut other: Self) -> Self {
+        self.message_types.append(&mut other.message_types);
+        // Let the incoming release win; `None` defers to whichever side has a value.
+        self.release = match (self.release.take(), other.release.take()) {
+            (_, Some(r)) => Some(r),
+            (current, None) => current,
+        };
+        self.rules.append(&mut other.rules);
+        self
     }
 
     /// Merge `other` into `self`, with `other` taking precedence for any rule
@@ -394,20 +475,23 @@ impl ProfileRulePack {
     ///   **retained unchanged**.
     ///
     /// Message-type restrictions from `other` are merged into `self`.
-    /// Release scoping follows the same compatibility rule as
-    /// [`extend_from`][Self::extend_from].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError::IncompatibleReleaseScopes`] if both packs specify
+    /// different release scopes.
     ///
     /// # Example
     ///
     /// ```rust,ignore
     /// let base = ProfileRulePack::new("UTILMD-5.4")
-    ///     .with_named_stateless_rule_fn("AHB-11001-BGM-M", |segs| { /* old rule */ None });
+    ///     .with_named_stateless_rule_fn("AHB-11001-BGM-M", |segs, _issues| { /* old */ });
     ///
     /// let delta = ProfileRulePack::new("UTILMD-5.5-delta")
-    ///     .with_named_stateless_rule_fn("AHB-11001-BGM-M", |segs| { /* updated rule */ None });
+    ///     .with_named_stateless_rule_fn("AHB-11001-BGM-M", |segs, _issues| { /* updated */ });
     ///
     /// // `result` runs the updated BGM-M rule only once:
-    /// let result = base.merge_with_override(delta);
+    /// let result = base.merge_with_override(delta)?;
     /// assert_eq!(result.rule_count(), 1);
     /// ```
     pub fn merge_with_override(mut self, mut other: Self) -> Result<Self, EdifactError> {
@@ -456,14 +540,12 @@ fn merge_release_scopes(
     incoming: Option<String>,
 ) -> Result<Option<String>, EdifactError> {
     match (current, incoming) {
-        (Some(current), Some(incoming)) => {
-            // Both packs specify a release; they must match to compose safely.
-            if current != incoming {
-                return Err(EdifactError::IncompatibleReleaseScopes { current, incoming });
-            }
-            Ok(Some(current))
-        }
-        (current @ Some(_), None) => Ok(current),
+        (Some(x), Some(y)) if x != y => Err(EdifactError::IncompatibleReleaseScopes {
+            current: x,
+            incoming: y,
+        }),
+        (Some(x), Some(_)) => Ok(Some(x)),
+        (Some(x), None) => Ok(Some(x)),
         (None, incoming) => Ok(incoming),
     }
 }
@@ -477,10 +559,11 @@ impl Validator for ProfileRulePack {
     ) {
         let unh = segments.iter().find(|segment| segment.tag == "UNH");
 
+        // Cache UNH element 1 to avoid two separate get_element(1) calls (F-019).
+        let unh_e1 = unh.and_then(|s| s.get_element(1));
+
         // Message-type filter: skip if no registered type matches.
-        let message_type = unh
-            .and_then(|s| s.get_element(1))
-            .and_then(|e| e.get_component(0));
+        let message_type = unh_e1.and_then(|e| e.get_component(0));
         if !self.message_types.is_empty()
             && !message_type.is_some_and(|mt| self.message_types.contains(mt))
         {
@@ -490,33 +573,36 @@ impl Validator for ProfileRulePack {
         // Release filter: skip if pack is bound to a specific association code that
         // does not match the message's UNH DE 0057 (element 1, component 4).
         if let Some(bound_release) = &self.release {
-            let msg_association = unh
-                .and_then(|s| s.get_element(1))
-                .and_then(|e| e.get_component(4));
+            let msg_association = unh_e1.and_then(|e| e.get_component(4));
             if msg_association != Some(bound_release.as_str()) {
                 return;
             }
         }
 
+        // Reusable buffer: avoids a heap allocation per rule invocation on the
+        // no-violation fast path.
+        let mut rule_issues: Vec<ValidationIssue> = Vec::new();
+
         for named in &self.rules {
-            if let Some(issue) = named.rule.evaluate(segments, context) {
-                let was_error = match issue.severity {
+            let errors_before = report.errors.len();
+            named.rule.evaluate(segments, context, &mut rule_issues);
+            for issue in rule_issues.drain(..) {
+                match issue.severity {
                     ValidationSeverity::Critical | ValidationSeverity::Error => {
                         report.add_error(issue);
-                        true
                     }
                     ValidationSeverity::Warning => {
                         report.add_warning(issue);
-                        false
                     }
                     ValidationSeverity::Info => {
                         report.add_info(issue);
-                        false
                     }
-                };
-                if self.bail_on_first_error && was_error {
-                    return;
                 }
+            }
+            // bail_on_first_error fires at rule-invocation granularity: if this rule
+            // pushed at least one error-severity issue, skip remaining rules.
+            if self.bail_on_first_error && report.errors.len() > errors_before {
+                return;
             }
         }
     }
@@ -573,14 +659,23 @@ pub struct ValidationContextBuilder {
 }
 
 impl Default for ValidationContextBuilder {
-    /// Default context builder has all layers enabled, same as [`ValidationContextBuilder::new`].
+    /// Default context builder.
+    ///
+    /// Structure, code-list, and profile layers are enabled by default.
+    /// The envelope layer is **disabled** by default; call
+    /// [`ValidationContextBuilder::with_envelope_validation`] to enable it.
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl ValidationContextBuilder {
-    /// Create a new context builder with all layers enabled.
+    /// Create a new context builder.
+    ///
+    /// Structure, code-list, and profile layers are enabled by default.
+    /// The envelope layer is **disabled** by default; call
+    /// [`with_envelope_validation`][Self::with_envelope_validation] to enable it
+    /// and add the built-in [`EnvelopeValidator`] in one step.
     pub fn new() -> Self {
         Self {
             inner: ValidationContext {
@@ -723,14 +818,7 @@ impl ValidationContext {
     /// Uses any metadata set via [`ValidationContextBuilder::with_metadata`].
     /// For per-call metadata, use [`validate_lenient_with`][Self::validate_lenient_with].
     pub fn validate_lenient(&self, segments: &[Segment<'_>]) -> ValidationReport {
-        let ctx = self
-            .metadata
-            .as_ref()
-            .map(|arc| ValidationRuleContext {
-                metadata: Some(arc.as_ref() as &(dyn Any + Send + Sync)),
-            })
-            .unwrap_or_else(ValidationRuleContext::empty);
-        self.validate_with_context(segments, &ctx)
+        self.validate_with_context(segments, &self.build_rule_context())
     }
 
     /// Execute validators with per-call typed metadata.
@@ -745,7 +833,10 @@ impl ValidationContext {
         segments: &[Segment<'_>],
         value: &T,
     ) -> ValidationReport {
-        let ctx = ValidationRuleContext::new(value);
+        let ctx = ValidationRuleContext {
+            metadata: Some(value as &(dyn Any + Send + Sync)),
+            message_ref: self.message_ref.as_deref(),
+        };
         self.validate_with_context(segments, &ctx)
     }
 
@@ -779,11 +870,101 @@ impl ValidationContext {
 
     /// Execute validators in lenient mode against an owned-segment slice.
     ///
-    /// Converts owned segments to borrowed segments on-the-fly and delegates to
-    /// [`validate_lenient`][Self::validate_lenient].
+    /// Avoids building a `Vec<Segment<'_>>` for the entire slice up front.
+    /// Instead, segments are converted to `Segment<'_>` on demand, per validator
+    /// layer:
+    ///
+    /// - **Envelope layer**: converts the full slice once (`O(n)` allocations).
+    /// - **Non-envelope layers after envelope ran**: converts only the
+    ///   non-service segments (UNB/UNZ/UNG/UNE filtered out) — also `O(n)` but
+    ///   a smaller constant.
+    /// - **Non-envelope layers when no envelope ran**: converts the full slice
+    ///   once, shared across all remaining layers via a lazy `OnceCell`.
+    ///
+    /// When no layers are enabled this returns an empty [`ValidationReport`]
+    /// without any allocation.
     pub fn validate_lenient_owned(&self, segments: &[OwnedSegment]) -> ValidationReport {
-        let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
-        self.validate_lenient(&borrowed)
+        if self.validators.is_empty()
+            && !self.envelope_enabled
+            && !self.structure_enabled
+            && !self.code_list_enabled
+            && !self.profile_enabled
+        {
+            return ValidationReport::default();
+        }
+        self.validate_with_context_owned(segments, &self.build_rule_context())
+    }
+
+    fn build_rule_context(&self) -> ValidationRuleContext<'_> {
+        self.metadata
+            .as_ref()
+            .map(|arc| ValidationRuleContext {
+                metadata: Some(arc.as_ref() as &(dyn Any + Send + Sync)),
+                message_ref: self.message_ref.as_deref(),
+            })
+            .unwrap_or_else(|| ValidationRuleContext {
+                metadata: None,
+                message_ref: self.message_ref.as_deref(),
+            })
+    }
+
+    /// Internal: validate owned segments without the upfront full-slice
+    /// `as_borrowed()` conversion that `validate_lenient_owned` used to require.
+    fn validate_with_context_owned(
+        &self,
+        segments: &[OwnedSegment],
+        context: &ValidationRuleContext<'_>,
+    ) -> ValidationReport {
+        let mut report = ValidationReport::default();
+        // Lazy full-slice borrow — built only when the first non-envelope
+        // validator needs it (i.e. when no envelope validator ran).
+        let mut full_borrowed: Option<Vec<Segment<'_>>> = None;
+        // Lazy filtered borrow — built once when the first non-envelope
+        // validator runs after an envelope pass.
+        let mut filtered_borrowed: Option<Vec<Segment<'_>>> = None;
+        let mut envelope_ran = false;
+
+        for lv in &self.validators {
+            if !self.layer_enabled(lv.layer) {
+                continue;
+            }
+            if lv.layer == ValidationLayer::Envelope {
+                // Convert full slice for envelope validation.
+                let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
+                lv.validator.validate_batch(&borrowed, &mut report, context);
+                envelope_ran = true;
+            } else if envelope_ran {
+                // Use filtered slice (no service segments).
+                let active = filtered_borrowed.get_or_insert_with(|| {
+                    segments
+                        .iter()
+                        .filter(|s| !matches!(s.tag.as_str(), "UNB" | "UNZ" | "UNG" | "UNE"))
+                        .map(|s| s.as_borrowed())
+                        .collect()
+                });
+                lv.validator.validate_batch(active, &mut report, context);
+            } else {
+                // No envelope pass yet — use the full slice, lazily converted.
+                let active = full_borrowed
+                    .get_or_insert_with(|| segments.iter().map(|s| s.as_borrowed()).collect());
+                lv.validator.validate_batch(active, &mut report, context);
+            }
+        }
+
+        // Stamp every issue with the message reference if one was configured.
+        if let Some(ref msg_ref) = self.message_ref {
+            for issue in report
+                .errors
+                .iter_mut()
+                .chain(report.warnings.iter_mut())
+                .chain(report.infos.iter_mut())
+            {
+                if issue.message_ref.is_none() {
+                    issue.message_ref = Some(msg_ref.clone());
+                }
+            }
+        }
+        report
     }
 
     /// Execute validators in strict mode against an owned-segment slice.
@@ -804,11 +985,40 @@ impl ValidationContext {
         context: &ValidationRuleContext<'_>,
     ) -> ValidationReport {
         let mut report = ValidationReport::default();
+        // After the envelope layer runs, strip the interchange / functional-group
+        // service segments so they do not reach structure / profile validators that
+        // only understand message-level segments.  The allocation is deferred until
+        // the envelope layer is actually present and enabled.
+        let mut filtered: Option<Vec<Segment<'_>>> = None;
+        let mut envelope_ran = false;
+
         for lv in &self.validators {
-            if self.layer_enabled(lv.layer) {
+            if !self.layer_enabled(lv.layer) {
+                continue;
+            }
+            // For the envelope layer always use the full unmodified slice.
+            if lv.layer == ValidationLayer::Envelope {
                 lv.validator.validate_batch(segments, &mut report, context);
+                envelope_ran = true;
+            } else {
+                // For every other layer: if the envelope ran, use the filtered
+                // slice that has UNB/UNZ/UNG/UNE removed; otherwise use the
+                // original slice unchanged.
+                let active: &[Segment<'_>] = if envelope_ran {
+                    filtered.get_or_insert_with(|| {
+                        segments
+                            .iter()
+                            .filter(|s| !matches!(s.tag, "UNB" | "UNZ" | "UNG" | "UNE"))
+                            .cloned()
+                            .collect()
+                    })
+                } else {
+                    segments
+                };
+                lv.validator.validate_batch(active, &mut report, context);
             }
         }
+
         // Stamp every issue with the message reference if one was configured.
         if let Some(ref msg_ref) = self.message_ref {
             for issue in report
@@ -1053,33 +1263,37 @@ mod tests {
     fn demo_orders_profile_pack() -> ProfileRulePack {
         ProfileRulePack::new("ORDERS-DEMO")
             .for_message_type("ORDERS")
-            .with_stateless_rule_fn(|segments| {
-                let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
-                let document_code = bgm.get_element(0)?.get_component(0)?;
-                (document_code == "220").then(|| {
-                    ValidationIssue::new(
-                        ValidationSeverity::Error,
-                        "profile rule DEMO-P001 violated: BGM document code 220 is rejected in this demo pack",
-                    )
-                    .with_rule_id("DEMO-P001")
-                    .with_segment("BGM")
-                    .with_element_index(0)
-                    .with_suggestion("Use a different BGM document code in this demo pack")
-                })
+            .with_stateless_rule_fn(|segments, issues| {
+                issues.extend((|| -> Option<ValidationIssue> {
+                    let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
+                    let document_code = bgm.get_element(0)?.get_component(0)?;
+                    (document_code == "220").then(|| {
+                        ValidationIssue::new(
+                            ValidationSeverity::Error,
+                            "profile rule DEMO-P001 violated: BGM document code 220 is rejected in this demo pack",
+                        )
+                        .with_rule_id("DEMO-P001")
+                        .with_segment("BGM")
+                        .with_element_index(0)
+                        .with_suggestion("Use a different BGM document code in this demo pack")
+                    })
+                })());
             })
-            .with_stateless_rule_fn(|segments| {
-                let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
-                let reference = bgm.get_element(1)?.get_component(0)?;
-                (reference == "PO123").then(|| {
-                    ValidationIssue::new(
-                        ValidationSeverity::Warning,
-                        "profile rule DEMO-P002 warning: purchase-order reference PO123 is reserved in this demo pack",
-                    )
-                    .with_rule_id("DEMO-P002")
-                    .with_segment("BGM")
-                    .with_element_index(1)
-                    .with_suggestion("Use a non-reserved reference in this demo pack")
-                })
+            .with_stateless_rule_fn(|segments, issues| {
+                issues.extend((|| -> Option<ValidationIssue> {
+                    let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
+                    let reference = bgm.get_element(1)?.get_component(0)?;
+                    (reference == "PO123").then(|| {
+                        ValidationIssue::new(
+                            ValidationSeverity::Warning,
+                            "profile rule DEMO-P002 warning: purchase-order reference PO123 is reserved in this demo pack",
+                        )
+                        .with_rule_id("DEMO-P002")
+                        .with_segment("BGM")
+                        .with_element_index(1)
+                        .with_suggestion("Use a non-reserved reference in this demo pack")
+                    })
+                })());
             })
     }
 
@@ -1264,5 +1478,143 @@ mod tests {
         let result = ctx.validate_strict(&segments);
         assert!(result.is_err());
         assert!(result.unwrap_err().has_errors());
+    }
+
+    // ── bail_on_first_error ──────────────────────────────────────────────────
+
+    /// A rule that emits two error-severity issues (one per DTM segment).
+    fn two_dtm_errors_rule() -> ProfileRulePack {
+        ProfileRulePack::new("TEST-BAIL")
+            .with_stateless_rule_fn(|segments, issues| {
+                // Rule A: emits one error per DTM segment.
+                for seg in segments.iter().filter(|s| s.tag == "DTM") {
+                    issues.push(
+                        ValidationIssue::new(
+                            ValidationSeverity::Error,
+                            format!("DTM error at offset {}", seg.span.start),
+                        )
+                        .with_rule_id("BAIL-R1")
+                        .with_segment("DTM"),
+                    );
+                }
+            })
+            .with_stateless_rule_fn(|segments, issues| {
+                // Rule B: never fires; used to verify bail skips this rule.
+                for seg in segments.iter().filter(|s| s.tag == "BGM") {
+                    issues.push(
+                        ValidationIssue::new(ValidationSeverity::Error, "BGM error")
+                            .with_rule_id("BAIL-R2")
+                            .with_segment(seg.tag),
+                    );
+                }
+            })
+    }
+
+    #[test]
+    fn bail_on_first_error_fires_at_rule_invocation_granularity() {
+        // Two DTM segments → Rule A emits 2 errors for them.
+        // With bail, Rule B (BGM check) must NOT run.
+        let input =
+            b"UNH+1+ORDERS:D:96A:UN'BGM+220+9'DTM+137:20240101:102'DTM+163:20240201:102'UNT+5+1'";
+        let segments = crate::from_bytes(input)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse failed");
+
+        let pack_with_bail = two_dtm_errors_rule().bail_on_first_error(true);
+        let ctx = ValidationContext::builder()
+            .with_profile_pack(pack_with_bail)
+            .build();
+        let report = ctx.validate_lenient(&segments);
+
+        // Rule A fires: both DTM errors are in the report (the whole rule invocation
+        // runs to completion before bail is checked).
+        assert_eq!(
+            report
+                .errors()
+                .iter()
+                .filter(|i| i.rule_id.as_deref() == Some("BAIL-R1"))
+                .count(),
+            2,
+            "both DTM errors from Rule A should be present"
+        );
+        // Bail fired after Rule A: Rule B (BGM) must be skipped.
+        assert_eq!(
+            report
+                .errors()
+                .iter()
+                .filter(|i| i.rule_id.as_deref() == Some("BAIL-R2"))
+                .count(),
+            0,
+            "Rule B should have been skipped by bail"
+        );
+    }
+
+    #[test]
+    fn bail_disabled_runs_all_rules() {
+        let input = b"UNH+1+ORDERS:D:96A:UN'BGM+220+9'DTM+137:20240101:102'UNT+4+1'";
+        let segments = crate::from_bytes(input)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse failed");
+
+        let pack_no_bail = two_dtm_errors_rule(); // bail_on_first_error defaults to false
+        let ctx = ValidationContext::builder()
+            .with_profile_pack(pack_no_bail)
+            .build();
+        let report = ctx.validate_lenient(&segments);
+
+        // Both rules run: one DTM error from Rule A, one BGM error from Rule B.
+        assert_eq!(
+            report
+                .errors()
+                .iter()
+                .filter(|i| i.rule_id.as_deref() == Some("BAIL-R1"))
+                .count(),
+            1
+        );
+        assert_eq!(
+            report
+                .errors()
+                .iter()
+                .filter(|i| i.rule_id.as_deref() == Some("BAIL-R2"))
+                .count(),
+            1
+        );
+    }
+
+    // ── message_ref in ValidationRuleContext ─────────────────────────────────
+
+    #[test]
+    fn message_ref_is_visible_inside_rule_closure() {
+        let input = b"UNH+MSG001+ORDERS:D:96A:UN'BGM+220+9'UNT+3+1'";
+        let segments = crate::from_bytes(input)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse failed");
+
+        let pack = ProfileRulePack::new("MSG-REF-TEST").with_rule_fn(|_segs, ctx, issues| {
+            if let Some(mref) = ctx.message_ref {
+                issues.push(
+                    ValidationIssue::new(
+                        ValidationSeverity::Info,
+                        format!("validating message {mref}"),
+                    )
+                    .with_rule_id("CTX-REF"),
+                );
+            }
+        });
+
+        let ctx = ValidationContext::builder()
+            .with_profile_pack(pack)
+            .with_message_ref("MSG001")
+            .build();
+
+        let report = ctx.validate_lenient(&segments);
+        let info = report
+            .infos()
+            .iter()
+            .find(|i| i.rule_id.as_deref() == Some("CTX-REF"))
+            .expect("expected info issue from CTX-REF rule");
+        assert!(info.message.contains("MSG001"));
+        // The message_ref is also stamped onto the issue itself.
+        assert_eq!(info.message_ref.as_deref(), Some("MSG001"));
     }
 }

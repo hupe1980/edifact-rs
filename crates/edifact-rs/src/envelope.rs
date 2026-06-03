@@ -156,6 +156,88 @@ pub fn validate_envelope(
     Ok((interchange_env, message_envs))
 }
 
+/// Validate the EDIFACT envelope structure and collect **all** errors rather
+/// than stopping at the first failure.
+///
+/// This is the lenient counterpart of [`validate_envelope`].  It attempts
+/// every check independently and accumulates all violations into the returned
+/// `Vec`.  An empty `Vec` means the envelope is valid.
+///
+/// This is particularly useful for diagnostic tooling, linters, or batch
+/// processors where surfacing every problem at once is more helpful than
+/// short-circuiting on the first error.
+///
+/// # Caveats
+///
+/// Because checks build on each other (e.g., count checks require a valid UNB
+/// and UNZ), some secondary errors may be silenced when a prerequisite check
+/// already failed.  Most *independent* checks (control-reference match,
+/// message/segment counts) are run even after the first failure.  However,
+/// if a functional group segment (`UNG`/`UNE`) is detected, the function
+/// returns immediately with only that error — the remaining structure is
+/// ambiguous and running further checks would produce misleading results.
+pub fn validate_envelope_lenient(segments: &[Segment<'_>]) -> Vec<EdifactError> {
+    let mut errors: Vec<EdifactError> = Vec::new();
+
+    // Functional group check is always independent.
+    if let Some(ung_or_une) = segments.iter().find(|s| s.tag == "UNG" || s.tag == "UNE") {
+        errors.push(EdifactError::FunctionalGroupNotSupported {
+            offset: ung_or_une.span.start,
+        });
+        // UNG/UNE makes the rest of the envelope ambiguous — stop early.
+        return errors;
+    }
+
+    // Run the normal path and, if it succeeds, we're done.
+    match validate_envelope(segments) {
+        Ok(_) => {}
+        Err(first) => {
+            errors.push(first);
+
+            // Now try individual sub-checks that are independent of each other.
+            // Interchange envelope checks.
+            if let Ok(mut ie) = extract_interchange(segments) {
+                // extract_interchange succeeded — try message extraction separately.
+                match extract_messages(segments) {
+                    Ok(msgs) => {
+                        ie.actual_message_count = u32::try_from(msgs.len()).unwrap_or(u32::MAX);
+                        if ie.declared_message_count != ie.actual_message_count {
+                            // Only push if not already in errors (the normal path
+                            // may have returned this as the first error).
+                            let dup = EdifactError::MessageCountMismatch {
+                                expected: ie.declared_message_count,
+                                actual: ie.actual_message_count,
+                            };
+                            if !errors.iter().any(|e| e == &dup) {
+                                errors.push(dup);
+                            }
+                        }
+                        for msg in &msgs {
+                            if msg.declared_segment_count != msg.actual_segment_count {
+                                let dup = EdifactError::SegmentCountMismatch {
+                                    expected: msg.declared_segment_count,
+                                    actual: msg.actual_segment_count,
+                                    message_ref: msg.message_ref.clone(),
+                                };
+                                if !errors.iter().any(|e| e == &dup) {
+                                    errors.push(dup);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if !errors.iter().any(|err| err == &e) {
+                            errors.push(e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    errors
+}
+
 fn extract_interchange(segments: &[Segment<'_>]) -> Result<InterchangeEnvelope, EdifactError> {
     if segments.first().map(|segment| segment.tag) != Some("UNB") {
         return Err(EdifactError::MissingSegment {
@@ -350,7 +432,7 @@ mod tests {
 
     /// Parse test fixtures into an owned-segment vec (no memory leaks).
     fn parse(input: &[u8]) -> Vec<crate::OwnedSegment> {
-        crate::from_reader(std::io::Cursor::new(input)).expect("parse failed")
+        crate::from_reader_collect(std::io::Cursor::new(input)).expect("parse failed")
     }
 
     /// Parse then validate: convenience wrapper for tests that only need the result.

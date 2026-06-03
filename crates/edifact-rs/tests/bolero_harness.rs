@@ -60,33 +60,39 @@ fn fuzz_parse_write_parse_invariant_small_message() {
                 .unwrap();
 
             let encoded = segments_to_bytes(&segs).unwrap();
-            let reparsed = from_bytes(&encoded).collect::<Result<Vec<_>, _>>().unwrap();
+            {
+                let reparsed = from_bytes(&encoded).collect::<Result<Vec<_>, _>>().unwrap();
 
-            assert_eq!(
-                reparsed.len(),
-                segs.len(),
-                "segment count must survive round-trip"
-            );
-            for (orig, rt) in segs.iter().zip(reparsed.iter()) {
-                assert_eq!(orig.tag, rt.tag, "tag must survive round-trip");
                 assert_eq!(
-                    orig.elements.len(),
-                    rt.elements.len(),
-                    "element count must survive round-trip for tag {}",
-                    orig.tag,
+                    reparsed.len(),
+                    segs.len(),
+                    "segment count must survive round-trip"
                 );
-                for (ei, (oe, re)) in orig.elements.iter().zip(rt.elements.iter()).enumerate() {
+                for (orig, rt) in segs.iter().zip(reparsed.iter()) {
+                    assert_eq!(orig.tag, rt.tag, "tag must survive round-trip");
                     assert_eq!(
-                        oe.components.len(),
-                        re.components.len(),
-                        "component count must survive round-trip for tag {} element {ei}",
+                        orig.elements.len(),
+                        rt.elements.len(),
+                        "element count must survive round-trip for tag {}",
                         orig.tag,
                     );
-                    assert_eq!(
-                        oe.components, re.components,
-                        "component values must survive round-trip for tag {} element {ei}",
-                        orig.tag,
-                    );
+                    for (ei, (oe, re)) in orig.elements.iter().zip(rt.elements.iter()).enumerate() {
+                        let oe_comps: Vec<&str> =
+                            oe.components.iter().map(|(c, _)| c.as_ref()).collect();
+                        let re_comps: Vec<&str> =
+                            re.components.iter().map(|(c, _)| c.as_ref()).collect();
+                        assert_eq!(
+                            oe_comps.len(),
+                            re_comps.len(),
+                            "component count must survive round-trip for tag {} element {ei}",
+                            orig.tag,
+                        );
+                        assert_eq!(
+                            oe_comps, re_comps,
+                            "component values must survive round-trip for tag {} element {ei}",
+                            orig.tag,
+                        );
+                    }
                 }
             }
         });
@@ -132,7 +138,7 @@ fn fuzz_validation_layers_no_panic() {
 
 #[test]
 fn fuzz_qualifier_matches_pattern_no_panic() {
-    use edifact_rs::__private::qualifier_matches_pattern;
+    use edifact_rs::helpers::qualifier_matches_pattern;
     // For any two arbitrary strings the function must never panic.
     check!().with_type::<(String, String)>().cloned().for_each(
         |(value, pattern): (String, String)| {
@@ -143,7 +149,7 @@ fn fuzz_qualifier_matches_pattern_no_panic() {
 
 #[test]
 fn fuzz_qualifier_pattern_invariants() {
-    use edifact_rs::__private::qualifier_matches_pattern;
+    use edifact_rs::helpers::qualifier_matches_pattern;
     // Invariant 1: a literal pattern (no '*') is always an exact match.
     // Invariant 2: pattern "*" matches every value (wildcard-only).
     // Invariant 3: empty pattern matches only empty value.
@@ -238,15 +244,15 @@ fn fuzz_validate_envelope_no_panic() {
 
 #[test]
 fn fuzz_message_windows_bytes_no_panic() {
-    // `message_windows_bytes` must not panic for any byte sequence.
-    use edifact_rs::message_windows_bytes;
+    // `from_bytes_windows` must not panic for any byte sequence.
+    use edifact_rs::from_bytes_windows;
 
     check!()
         .with_type::<Vec<u8>>()
         .cloned()
         .for_each(|input: Vec<u8>| {
             // Consume the full iterator — any item may be Ok or Err.
-            for _ in message_windows_bytes(&input) { /* consume */ }
+            for _ in from_bytes_windows(&input) { /* consume */ }
         });
 }
 
@@ -259,7 +265,7 @@ fn fuzz_reader_no_panic_and_equivalence() {
     // Two properties are tested:
     //   1. No panic for any arbitrary byte sequence.
     //   2. When both paths succeed, the resulting segments are identical.
-    use edifact_rs::from_reader;
+    use edifact_rs::from_reader_collect;
 
     check!()
         .with_type::<Vec<u8>>()
@@ -267,7 +273,7 @@ fn fuzz_reader_no_panic_and_equivalence() {
         .for_each(|input: Vec<u8>| {
             // Use a small BufReader capacity to maximise buffer-boundary splits.
             let reader = std::io::BufReader::with_capacity(8, std::io::Cursor::new(&input));
-            let reader_result: Result<Vec<_>, _> = from_reader(reader);
+            let reader_result: Result<Vec<_>, _> = from_reader_collect(reader);
             let slice_result: Result<Vec<_>, _> = from_bytes(&input).collect();
 
             // Property 1: no panic (guaranteed by running the code above).
@@ -339,5 +345,222 @@ fn fuzz_tokenizer_with_limit_no_panic() {
                     let _ = result;
                 }
             }
+        });
+}
+
+#[test]
+fn fuzz_directory_validator_no_panic() {
+    // `DirectoryValidator::validate_batch` must never panic for any parseable byte
+    // sequence, regardless of whether the interchange looks like a known message type
+    // or contains completely invalid structure.
+    use edifact_rs::{
+        DirectoryValidator, ElementRef, SegmentDefinition, Status, ValidationReport,
+        ValidationRuleContext, Validator,
+    };
+
+    // A minimal static segment directory: just BGM and DTM so we exercise both
+    // "known segment" and "unknown segment" paths without pulling in a full directory.
+    static BGM_ELEMENTS: &[ElementRef] = &[
+        ElementRef {
+            position: 1,
+            data_element: "C002",
+            status: Status::Conditional,
+            max_repeat: 1,
+        },
+        ElementRef {
+            position: 2,
+            data_element: "1004",
+            status: Status::Conditional,
+            max_repeat: 1,
+        },
+    ];
+    static DTM_ELEMENTS: &[ElementRef] = &[ElementRef {
+        position: 1,
+        data_element: "C507",
+        status: Status::Mandatory,
+        max_repeat: 1,
+    }];
+    static BGM_DEF: SegmentDefinition = SegmentDefinition {
+        tag: "BGM",
+        name: "Beginning of message",
+        elements: BGM_ELEMENTS,
+    };
+    static DTM_DEF: SegmentDefinition = SegmentDefinition {
+        tag: "DTM",
+        name: "Date/time/period",
+        elements: DTM_ELEMENTS,
+    };
+
+    fn seg_lookup(tag: &str) -> Option<&'static SegmentDefinition> {
+        match tag {
+            "BGM" => Some(&BGM_DEF),
+            "DTM" => Some(&DTM_DEF),
+            _ => None,
+        }
+    }
+    fn code_valid(_: &str, _: &str) -> bool {
+        true
+    }
+    fn suggest(_: &str, _: &str) -> Option<&'static str> {
+        None
+    }
+    fn expected_components(_: &str, _: usize) -> Option<u8> {
+        None
+    }
+
+    check!()
+        .with_type::<Vec<u8>>()
+        .cloned()
+        .for_each(|input: Vec<u8>| {
+            let Ok(segments) = from_bytes(&input).collect::<Result<Vec<_>, _>>() else {
+                return;
+            };
+            let validator = DirectoryValidator::new(
+                "FUZZ",
+                seg_lookup,
+                code_valid,
+                suggest,
+                expected_components,
+                None,
+            );
+            let mut report = ValidationReport::default();
+            let ctx = ValidationRuleContext::empty();
+            validator.validate_batch(&segments, &mut report, &ctx);
+        });
+}
+
+#[test]
+fn fuzz_serialization_no_panic() {
+    // Feeding arbitrary segments through the serialisation round-trip must never panic.
+    // Specifically exercises `Writer::write_segment` and the escape logic in `ser.rs`.
+    use edifact_rs::segments_to_bytes;
+
+    check!()
+        .with_type::<Vec<u8>>()
+        .cloned()
+        .for_each(|input: Vec<u8>| {
+            let Ok(segs) = from_bytes(&input).collect::<Result<Vec<_>, _>>() else {
+                return;
+            };
+            // `segments_to_bytes` must not panic even if segments contain
+            // release-character edge cases or unusual delimiter combinations.
+            let _ = segments_to_bytes(&segs);
+        });
+}
+
+/// Checks that `Writer::escape_value` never leaves unescaped structural delimiter
+/// bytes (element separator, component separator, segment terminator) in its output,
+/// and that the escaped value can be round-tripped back through the parser to recover
+/// the original string.
+///
+/// The release character itself is intentionally **not** forbidden from appearing in
+/// the output; it is a legitimate payload byte and is only required to be present
+/// *before* each structural delimiter that was escaped.
+///
+/// We construct a `ServiceStringAdvice` with printable-ASCII delimiters and
+/// a valid release character, then run arbitrary UTF-8 values through the
+/// escape path and verify the invariant.
+#[test]
+fn fuzz_escape_value_no_unescaped_delimiters() {
+    use edifact_rs::{Parser, ServiceStringAdvice, Tokenizer, Writer};
+
+    check!()
+        .with_type::<(Vec<u8>, u8, u8, u8, u8)>()
+        .cloned()
+        .for_each(|(value_bytes, elem_raw, comp_raw, release_raw, term_raw): (Vec<u8>, u8, u8, u8, u8)| {
+            // Map raw bytes into the printable-ASCII 0x21–0x7E range.
+            const PRINTABLE_LEN: u8 = 0x7E - 0x21 + 1; // 94 printable ASCII chars
+            let elem_sep  = 0x21u8 + (elem_raw    % PRINTABLE_LEN);
+            let comp_sep  = 0x21u8 + (comp_raw    % PRINTABLE_LEN);
+            let release   = 0x21u8 + (release_raw % PRINTABLE_LEN);
+            let term      = 0x21u8 + (term_raw    % PRINTABLE_LEN);
+
+            // Delimiters must all be distinct — skip if any collide.
+            let delimiters = [elem_sep, comp_sep, release, term];
+            if delimiters.iter().collect::<std::collections::HashSet<_>>().len() < 4 {
+                return;
+            }
+
+            // The value must be valid UTF-8; skip invalid byte sequences.
+            let Ok(value) = std::str::from_utf8(&value_bytes) else {
+                return;
+            };
+
+            // Build a UNA string: UNA<comp><elem>. <release><term>
+            // (decimal point placeholder is always `.`; not used as a delimiter here)
+            let una = format!(
+                "UNA{}{}.{} {}",
+                comp_sep as char,
+                elem_sep as char,
+                release as char,
+                term as char,
+            );
+            let ssa = ServiceStringAdvice::from_bytes_strict(una.as_bytes());
+            let Ok(ssa) = ssa else {
+                return; // Invalid SSA combination — skip.
+            };
+
+            // Build a Writer backed by a Vec<u8>.
+            let mut buf = Vec::new();
+            let Ok(writer) = Writer::with_una(&mut buf, ssa.clone()) else {
+                return;
+            };
+
+            // Escape the value — must not panic.
+            let escaped = writer.escape_value(value);
+
+            // Property: structural delimiters (element/component separator, segment terminator)
+            // must each be preceded by the release character when they appear in the output.
+            // The release character itself may appear freely as a payload byte.
+            let elem_ch    = elem_sep as char;
+            let comp_ch    = comp_sep as char;
+            let release_ch = release  as char;
+            let term_ch    = term     as char;
+
+            let chars: Vec<char> = escaped.chars().collect();
+            for (idx, &ch) in chars.iter().enumerate() {
+                if ch == elem_ch || ch == comp_ch || ch == term_ch {
+                    let preceded_by_release = idx > 0 && chars[idx - 1] == release_ch;
+                    assert!(
+                        preceded_by_release,
+                        "unescaped delimiter {ch:?} at position {idx} in escaped value {escaped:?} \
+                         (original: {value:?}, elem={elem_ch:?} comp={comp_ch:?} \
+                         release={release_ch:?} term={term_ch:?})"
+                    );
+                }
+            }
+
+            // Round-trip property: build a minimal segment and parse it back.
+            // Use Tokenizer::with_limit so the SSA delimiters are honoured.
+            if !value.contains('\n') && !value.contains('\r') {
+                let message = format!("BGM+{}{}", escaped, term as char);
+                let t = Tokenizer::with_limit(message.as_bytes(), ssa, 65_536);
+                let mut p = Parser::new(t);
+                if let Some(Ok(seg)) = p.next() {
+                    if let Some(v) = seg.element_str(0) {
+                        assert_eq!(
+                            v, value,
+                            "round-trip mismatch: escaped={escaped:?} value={value:?}"
+                        );
+                    }
+                }
+            }
+        });
+}
+
+#[test]
+fn fuzz_validate_envelope_lenient_no_panic() {
+    // `validate_envelope_lenient` must not panic for any parseable byte sequence.
+    use edifact_rs::validate_envelope_lenient;
+
+    check!()
+        .with_type::<Vec<u8>>()
+        .cloned()
+        .for_each(|input: Vec<u8>| {
+            let Ok(segs) = from_bytes(&input).collect::<Result<Vec<_>, _>>() else {
+                return;
+            };
+            // Returns a Vec<EdifactError> — must never panic.
+            let _ = validate_envelope_lenient(&segs);
         });
 }

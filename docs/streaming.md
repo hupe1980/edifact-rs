@@ -12,7 +12,7 @@ synchronous (`std::io::Read`) and can be bridged to async runtimes — see
 | API | Source | Output | Memory model |
 |---|---|---|---|
 | `from_reader_iter(reader)` | `impl Read` | `Iterator<Item = Result<OwnedSegment, _>>` | O(1) — one segment at a time |
-| `message_windows_bytes(input)` | `&[u8]` | `Iterator<Item = Result<MessageWindow<'_>, _>>` | O(window) — one message window |
+| `from_bytes_windows(input)` | `&[u8]` | `Iterator<Item = Result<MessageWindow<'_>, _>>` | O(window) — one message window |
 | `message_windows_from_reader(reader)` | `impl Read` | `Iterator<Item = Result<OwnedMessageWindow, _>>` | O(window) — lazy I/O |
 | `deserialize_first_streaming(input)` | `&[u8]` | `Result<T, _>` | Stops at first match |
 | `deserialize_all_streaming(input)` | `&[u8]` | `Result<Vec<T>, _>` | Collects matching segments |
@@ -54,10 +54,10 @@ A **message window** is the slice of segments between a `UNH` and its matching `
 (inclusive). Envelope segments (`UNB`, `UNZ`, `UNG`, `UNE`) are **skipped**
 automatically.
 
-### `message_windows_bytes` — byte-slice source
+### `from_bytes_windows` — byte-slice source
 
 ```rust
-use edifact_rs::message_windows_bytes;
+use edifact_rs::from_bytes_windows;
 
 let interchange = b"\
     UNB+UNOA:1+S+R+200101:0900+1'\
@@ -65,7 +65,7 @@ let interchange = b"\
     UNH+2+ORDERS:D:96A:UN'BGM+220+PO-002+9'UNT+3+2'\
     UNZ+2+1'";
 
-for result in message_windows_bytes(interchange) {
+for result in from_bytes_windows(interchange) {
     let window = result?;
     // window.message_type  — Option<Cow<'_, str>> from UNH element 1, component 0
     // window.association_code — Option<Cow<'_, str>> from UNH DE 0057
@@ -217,17 +217,18 @@ let input = Cursor::new(b"\
     UNH+1+ORDERS:D:11A:UN'BGM+220+PO-001+9'UNT+3+1'\
     UNH+2+ORDERS:D:11A:UN'BGM+220+PO-002+9'UNT+3+2'".to_vec());
 
-let pack = ProfileRulePack::builder("ORDERS-PROGRESSIVE")
+let pack = ProfileRulePack::new("ORDERS-PROGRESSIVE")
     .for_message_type("ORDERS")
-    .with_rule_fn(|segs| {
-        let has_bgm = segs.iter().any(|s| s.tag == "BGM");
-        (!has_bgm).then(|| {
-            ValidationIssue::new(
-                ValidationSeverity::Error,
-                "every ORDERS message must contain a BGM segment",
-            )
-            .with_rule_id("ORDERS-P001")
-        })
+    .with_stateless_rule_fn(|segs, issues| {
+        if !segs.iter().any(|s| s.tag == "BGM") {
+            issues.push(
+                ValidationIssue::new(
+                    ValidationSeverity::Error,
+                    "every ORDERS message must contain a BGM segment",
+                )
+                .with_rule_id("ORDERS-P001"),
+            );
+        }
     });
 
 let ctx = ValidationContext::builder()

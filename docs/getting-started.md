@@ -22,7 +22,7 @@ rustup update      # upgrade to latest stable
 
 ```toml
 [dependencies]
-edifact-rs = "0.7"
+edifact-rs = "0.8"
 ```
 
 The `derive` feature is enabled by default, which re-exports
@@ -39,14 +39,14 @@ Enable diagnostics:
 
 ```toml
 [dependencies]
-edifact-rs = { version = "0.7", features = ["diagnostics"] }
+edifact-rs = { version = "0.8", features = ["diagnostics"] }
 ```
 
 Disable derive macros (core parsing only):
 
 ```toml
 [dependencies]
-edifact-rs = { version = "0.7", default-features = false }
+edifact-rs = { version = "0.8", default-features = false }
 ```
 
 ---
@@ -147,14 +147,19 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 
 ```rust
 use edifact_rs::{
-    ValidationContext, ValidationLayer, Validator, ValidationReport, Segment,
-    from_bytes,
+    ValidationContext, ValidationLayer, Validator, ValidationReport, ValidationRuleContext,
+    Segment, from_bytes,
 };
 
 struct MyValidator;
 
 impl Validator for MyValidator {
-    fn validate_batch(&self, _segments: &[Segment<'_>], _report: &mut ValidationReport) {
+    fn validate_batch(
+        &self,
+        _segments: &[Segment<'_>],
+        _report: &mut ValidationReport,
+        _context: &ValidationRuleContext<'_>,
+    ) {
         // your validation logic here
     }
     fn set_message_type(&mut self, _: Option<&str>) {}
