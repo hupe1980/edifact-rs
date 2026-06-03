@@ -445,6 +445,26 @@ fn validate_field_attrs(
             ),
         ));
     }
+    if attrs.required && attrs.composite {
+        return Err(syn::Error::new(
+            attrs.required_span.unwrap_or_else(|| ident.span()),
+            format!(
+                "field `{ident}`: #[edifact(required)] cannot be combined with \
+                 #[edifact(composite)]; use a non-optional field type to require the \
+                 composite element"
+            ),
+        ));
+    }
+    if attrs.required && !is_segment_struct {
+        return Err(syn::Error::new(
+            attrs.required_span.unwrap_or_else(|| ident.span()),
+            format!(
+                "field `{ident}`: #[edifact(required)] is only valid on segment struct \
+                 element fields; to require a segment in a message struct, use a \
+                 non-optional field type"
+            ),
+        ));
+    }
     Ok(())
 }
 
