@@ -283,6 +283,13 @@ fn is_vec_type(ty: &Type) -> bool {
 /// A user-defined type whose last segment is `String` but that does not match
 /// one of these three forms is **not** treated as a string type, which prevents
 /// accidental string-extraction code generation for unrelated user types.
+///
+/// **Shadowing caveat:** bare `String` (single-segment, no path prefix) is matched
+/// by name only. If a crate shadows the standard-library `String` with a local type
+/// of the same name, this function will still classify it as a string type and the
+/// derive macro will generate incorrect string-extraction code rather than a
+/// composite or element parse. To avoid this, always use the fully-qualified path
+/// (`std::string::String`) in struct fields when `String` is shadowed in scope.
 fn is_string_type(ty: &Type) -> bool {
     let Type::Path(p) = ty else { return false };
     // Single-segment bare "String"

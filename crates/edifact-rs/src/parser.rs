@@ -799,7 +799,9 @@ fn read_next_byte<R: BufRead>(
     // Saturating add: on 32-bit targets `stream_offset` is a `usize` clamped from a
     // `u64` field.  Plain `+= 1` would wrap to 0 once the counter reaches `usize::MAX`
     // and corrupt subsequent span diagnostics / `bytes_consumed` accounting.
-    *stream_offset = stream_offset.saturating_add(1);
+    // Using an explicit local avoids relying on `&mut` auto-deref evaluation order.
+    let next_offset = stream_offset.saturating_add(1);
+    *stream_offset = next_offset;
     Ok(Some(byte))
 }
 
