@@ -12,9 +12,10 @@
 //! cargo run -p edifact-rs --example cookbook_parse_map_validate_write
 //! ```
 
-use edifact_rs::{__private::find_qualified_segment, from_bytes, segments_to_bytes, validate_each,
-    Segment, ValidationContext, ValidationLayer, ValidationReport, ValidationRuleContext,
-    Validator,
+use edifact_rs::{
+    __private::find_qualified_segment, Segment, ValidationContext, ValidationLayer,
+    ValidationReport, ValidationRuleContext, Validator, from_bytes, segments_to_bytes,
+    validate_each,
 };
 
 /// A simple custom validator that checks for known segment tags

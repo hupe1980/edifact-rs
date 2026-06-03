@@ -255,8 +255,6 @@ impl<T: std::fmt::Display> EdifactSerialize for DecimalFloatDisplay<T> {
     }
 }
 
-
-
 /// Serialize `value` to the given [`Write`] implementation.
 pub fn to_writer<T, W>(inner: W, value: &T) -> Result<(), EdifactError>
 where

@@ -511,15 +511,15 @@ impl EdifactError {
             Self::IncompatibleReleaseScopes { .. } => Some(
                 "Only compose ProfileRulePack values that share the same release scope, or where at most one has a release scope set",
             ),
-            Self::InvalidFieldValue { .. } => {
-                Some("Correct the field value to match the expected format or range for this element")
-            }
-            Self::UnexpectedDataToken { .. } => {
-                Some("A data element appeared before any segment tag; check for partial writes or encoding corruption")
-            }
-            Self::FunctionalGroupNotSupported { .. } => {
-                Some("Strip UNG/UNE segments before calling validate_envelope, or process the interchange as raw segments")
-            }
+            Self::InvalidFieldValue { .. } => Some(
+                "Correct the field value to match the expected format or range for this element",
+            ),
+            Self::UnexpectedDataToken { .. } => Some(
+                "A data element appeared before any segment tag; check for partial writes or encoding corruption",
+            ),
+            Self::FunctionalGroupNotSupported { .. } => Some(
+                "Strip UNG/UNE segments before calling validate_envelope, or process the interchange as raw segments",
+            ),
             Self::ValidationFailed { .. }
             | Self::MessageCountMismatch { .. }
             | Self::SegmentCountMismatch { .. }
@@ -775,10 +775,10 @@ pub struct ValidationIssue {
     pub segment_occurrence: Option<u16>,
     /// Message reference (`UNH` element 0, DE 0062) that this issue belongs to.
     ///
-    /// Populated automatically when the [`ValidationContext`] was built with
-    /// `with_message_ref`.  Useful in batch processing where many messages are
-    /// validated and issues from different messages must be correlated back to
-    /// the originating `UNH`/`UNT` envelope.
+    /// Populated automatically when the context was built with
+    /// `ValidationContextBuilder::with_message_ref`.  Useful in batch processing
+    /// where many messages are validated and issues from different messages must
+    /// be correlated back to the originating `UNH`/`UNT` envelope.
     pub message_ref: Option<String>,
     /// Suggested remediation (if available).
     pub suggestion: Option<String>,

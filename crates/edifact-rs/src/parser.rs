@@ -257,7 +257,7 @@ pub struct ReaderConfig {
     pub max_segment_bytes: usize,
     /// Maximum number of segments to yield before the stream stops.
     ///
-    /// Once this many segments have been produced [`OwnedSegmentStream`] returns
+    /// Once this many segments have been produced the segment stream returns
     /// `None`, effectively truncating the message.  Useful for preventing
     /// resource exhaustion when the total segment count in a message is expected
     /// to be bounded.

@@ -312,7 +312,12 @@ impl<'a> SegmentDefRef<'a> {
                 .elements
                 .iter()
                 .filter(|e| e.status == Status::Mandatory)
-                .map(|e| ((e.position as usize).saturating_sub(1), e.data_element.as_str()))
+                .map(|e| {
+                    (
+                        (e.position as usize).saturating_sub(1),
+                        e.data_element.as_str(),
+                    )
+                })
                 .collect::<Vec<_>>(),
         }
         .into_iter()

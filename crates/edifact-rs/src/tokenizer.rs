@@ -88,10 +88,20 @@ impl ServiceStringAdvice {
         ];
         let no_ws = |b: u8| !matches!(b, b' ' | b'\t' | b'\r' | b'\n');
         // All five must be non-whitespace and mutually distinct (10 pairwise checks).
-        no_ws(e) && no_ws(c) && no_ws(d) && no_ws(r) && no_ws(t)
-            && e != c && e != d && e != r && e != t
-            && c != d && c != r && c != t
-            && d != r && d != t
+        no_ws(e)
+            && no_ws(c)
+            && no_ws(d)
+            && no_ws(r)
+            && no_ws(t)
+            && e != c
+            && e != d
+            && e != r
+            && e != t
+            && c != d
+            && c != r
+            && c != t
+            && d != r
+            && d != t
             && r != t
     }
 }

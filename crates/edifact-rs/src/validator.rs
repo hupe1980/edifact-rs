@@ -1,6 +1,8 @@
 //! Validation pipeline for structural and semantic EDIFACT checks.
 
-use crate::{EdifactError, OwnedSegment, Segment, ValidationIssue, ValidationReport, ValidationSeverity};
+use crate::{
+    EdifactError, OwnedSegment, Segment, ValidationIssue, ValidationReport, ValidationSeverity,
+};
 use std::any::Any;
 use std::sync::Arc;
 
@@ -184,9 +186,7 @@ impl ProfileRulePack {
     ///
     /// Anonymous rules (added without an id) are skipped.
     pub fn rule_ids(&self) -> impl Iterator<Item = &str> {
-        self.rules
-            .iter()
-            .filter_map(|r| r.id.as_deref())
+        self.rules.iter().filter_map(|r| r.id.as_deref())
     }
 
     /// Return the association-assigned release code this pack is bound to, if any.
@@ -813,7 +813,9 @@ impl ValidationContext {
         }
         // Stamp every issue with the message reference if one was configured.
         if let Some(ref msg_ref) = self.message_ref {
-            for issue in report.errors.iter_mut()
+            for issue in report
+                .errors
+                .iter_mut()
                 .chain(report.warnings.iter_mut())
                 .chain(report.infos.iter_mut())
             {

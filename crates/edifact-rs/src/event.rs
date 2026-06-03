@@ -160,7 +160,10 @@ impl<W: Write> WriterEmitter<W> {
     /// # Errors
     ///
     /// Returns [`EdifactError::InvalidUna`] when `ssa.is_valid()` is false.
-    pub fn with_una(inner: W, ssa: crate::tokenizer::ServiceStringAdvice) -> Result<Self, crate::EdifactError> {
+    pub fn with_una(
+        inner: W,
+        ssa: crate::tokenizer::ServiceStringAdvice,
+    ) -> Result<Self, crate::EdifactError> {
         Ok(Self {
             writer: crate::Writer::with_una(inner, ssa)?,
             state: EmitterState::Idle,

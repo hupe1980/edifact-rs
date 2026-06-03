@@ -3,7 +3,6 @@
 use crate::{error::EdifactError, model::Segment, tokenizer::ServiceStringAdvice};
 use std::io::Write;
 
-
 /// Streaming EDIFACT writer.
 ///
 /// Wraps any [`Write`] implementation and serializes segments one at a time.

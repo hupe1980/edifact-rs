@@ -239,7 +239,10 @@ pub use directory_validator::{
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use edifact_rs_derive::{EdifactDeserialize, EdifactSerialize};
 pub use event::{EdifactEvent, EventEmitter, OwnedEdifactEvent, VecEmitter, WriterEmitter};
-pub use ser::{DecimalFloat, DecimalFloatDisplay, EdifactCompositeSerialize, EdifactSerialize, to_bytes, to_edifact_string};
+pub use ser::{
+    DecimalFloat, DecimalFloatDisplay, EdifactCompositeSerialize, EdifactSerialize, to_bytes,
+    to_edifact_string,
+};
 
 // ── core free functions ───────────────────────────────────────────────────────
 
@@ -346,7 +349,9 @@ pub fn from_reader<R: Read>(reader: R) -> Result<Vec<OwnedSegment>, EdifactError
 ///     .unwrap();
 /// assert_eq!(segs[0].tag, "BGM");
 /// ```
-pub fn from_bytes_owned(input: &[u8]) -> impl Iterator<Item = Result<OwnedSegment, EdifactError>> + '_ {
+pub fn from_bytes_owned(
+    input: &[u8],
+) -> impl Iterator<Item = Result<OwnedSegment, EdifactError>> + '_ {
     from_bytes(input).map(|r| r.map(OwnedSegment::from))
 }
 

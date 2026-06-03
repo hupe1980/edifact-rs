@@ -529,11 +529,14 @@ mod tests {
             result.is_err(),
             "UNG/UNE is documented as unsupported; must return an error, not silently produce wrong counts"
         );
-        // The error must identify the offending segment (UNG or UNE), not some
-        // unrelated internal failure.
+        // The error must be the dedicated FunctionalGroupNotSupported variant,
+        // not some unrelated internal failure.
         assert!(
-            matches!(result, Err(EdifactError::InvalidSegmentForMessage { ref tag, .. }) if tag == "UNG" || tag == "UNE"),
-            "expected InvalidSegmentForMessage for UNG or UNE, got {result:?}"
+            matches!(
+                result,
+                Err(EdifactError::FunctionalGroupNotSupported { .. })
+            ),
+            "expected FunctionalGroupNotSupported, got {result:?}"
         );
     }
 }

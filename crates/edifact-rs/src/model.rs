@@ -346,7 +346,7 @@ impl OwnedSegment {
     /// Get the first component of element `n`, or `None` if absent.
     ///
     /// This is the zero-allocation equivalent of `as_borrowed().element_str(n)`.
-    /// Used internally by [`crate::find_segment_owned`] and the derived
+    /// Used internally by [`crate::__private::find_segment_owned`] and the derived
     /// [`crate::EdifactDeserialize::edifact_deserialize_owned`] implementations.
     #[inline]
     pub fn element_str(&self, n: usize) -> Option<&str> {
