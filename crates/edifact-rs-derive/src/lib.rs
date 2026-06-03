@@ -54,9 +54,9 @@
 //!
 //! At runtime the generated deserialization code collects contiguous occurrences of
 //! the inner segment type `T` into the `Vec` using
-//! [`contiguous_groups_by_qualifier`][edifact_rs::helpers::contiguous_groups_by_qualifier].
+//! `edifact_rs::helpers::contiguous_groups_by_qualifier`.
 //! This is behaviorally different from a bare `Vec<T>` without `#[edifact(group)]`,
-//! which uses [`find_segments_typed`][edifact_rs::helpers::find_segments_typed] and does
+//! which uses `edifact_rs::helpers::find_segments_typed` and does
 //! not enforce contiguity.
 //!
 //! # `#[edifact(required)]` on `Option<T>` fields
@@ -64,7 +64,7 @@
 //! By default, `Option<T>` fields produce `None` when the element is absent.
 //! Annotating an `Option<T>` field with `#[edifact(required)]` changes this:
 //! instead of `None`, deserialization returns
-//! [`EdifactError::MissingRequiredElement`][edifact_rs::EdifactError::MissingRequiredElement]
+//! `edifact_rs::EdifactError::MissingRequiredElement`
 //! when the element is absent or empty.  The Rust type stays `Option<T>`, which
 //! is useful when the EDIFACT specification mandates the element but your domain
 //! model treats it as optional for other reasons.

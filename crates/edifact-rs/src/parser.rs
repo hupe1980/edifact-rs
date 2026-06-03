@@ -527,7 +527,10 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
                 match try_fast_segment(
                     &mut self.reader,
                     self.ssa,
-                    seg_start as usize,
+                    // Saturate rather than wrap on 32-bit targets; Span offsets
+                    // are `usize` so streams > 4 GiB on 32-bit produce clamped
+                    // (but monotonic) diagnostic positions.
+                    seg_start.min(usize::MAX as u64) as usize,
                     self.config.max_segment_bytes,
                 ) {
                     FastSegment::Parsed(seg, n) => {
@@ -580,7 +583,9 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
             let mut scanned = self.state != StreamState::Init;
             // `read_next_raw_segment` tracks offset as `usize` for segment
             // start positions; sync back to the `u64` field afterward.
-            let mut slow_offset: usize = self.stream_offset as usize;
+            // Saturate rather than wrap on 32-bit targets (same rationale as
+            // the fast-path cast above).
+            let mut slow_offset: usize = self.stream_offset.min(usize::MAX as u64) as usize;
             let mut raw = match read_next_raw_segment(
                 &mut self.reader,
                 &mut self.ssa,

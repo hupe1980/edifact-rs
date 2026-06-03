@@ -546,13 +546,14 @@ pub fn get_components_iter<'a>(seg: &'a Segment<'_>, idx: usize) -> impl Iterato
 /// A composite data element wrapper for clearer ergonomics.
 ///
 /// Holds borrowed `&'a str` references to the underlying data — no string
-/// copies are made.  Creating the wrapper does, however, allocate a small
-/// [`Vec`] to hold the component pointers; on the fast path this is typically
-/// 4 or fewer entries (SSO-like inline storage is *not* used here).
+/// copies are made.  Up to 4 component pointers are stored inline (via
+/// [`SmallVec`]) so the common case is fully allocation-free.
 ///
 /// The lifetime `'a` represents the underlying data lifetime.
+///
+/// [`SmallVec`]: smallvec::SmallVec
 pub struct CompositeElement<'a> {
-    components: Vec<&'a str>,
+    components: smallvec::SmallVec<[&'a str; 4]>,
 }
 
 impl<'a> CompositeElement<'a> {
@@ -566,7 +567,7 @@ impl<'a> CompositeElement<'a> {
     }
 
     /// Crate-private constructor for direct `&str` components.
-    pub(crate) fn from_strs(components: Vec<&'a str>) -> Self {
+    pub(crate) fn from_strs(components: smallvec::SmallVec<[&'a str; 4]>) -> Self {
         Self { components }
     }
 
@@ -601,6 +602,8 @@ pub fn composite_element<'a, 'd: 'a>(
     seg: &'a Segment<'d>,
     idx: usize,
 ) -> Option<CompositeElement<'a>> {
+    // `.collect()` into `SmallVec<[&str; 4]>` keeps ≤4-component elements
+    // fully on the stack (no heap allocation for the common case).
     seg.elements.get(idx).map(|elem| {
         CompositeElement::from_strs(elem.components.iter().map(|(c, _)| c.as_ref()).collect())
     })
