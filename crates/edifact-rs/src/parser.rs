@@ -473,7 +473,10 @@ fn try_fast_segment<R: BufRead>(
     // Parse directly from the buffer slice — zero intermediate allocation.
     // Include the terminator byte so the parser sees a `SegmentTerminator`
     // token and records a span that is consistent with the `from_bytes` path.
-    let tok = Tokenizer::new(&buf[..pos + 1], ssa);
+    // Use `with_limit(max_segment_bytes)` so the tokenizer respects the caller's
+    // configured limit; `Tokenizer::new` would impose a hard 64 KiB cap that
+    // could reject segments already allowed by a larger `max_segment_bytes`.
+    let tok = Tokenizer::with_limit(&buf[..pos + 1], ssa, max_segment_bytes);
     let mut parser_iter = Parser::new(tok);
     match parser_iter.next() {
         None => FastSegment::Skip(pos + 1),

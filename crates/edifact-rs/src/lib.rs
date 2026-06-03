@@ -426,8 +426,9 @@ pub fn from_bytes_with_config<'a>(
 ///
 /// # Errors
 ///
-/// Each `next()` call returns `None` on success (end of stream), or
-/// `Some(Err(EdifactError))` on parse or I/O failure.
+/// Each `next()` call yields `Some(Ok(segment))` for a successfully parsed
+/// segment, `Some(Err(EdifactError))` for a parse or I/O failure, and `None`
+/// when the end of the stream has been reached.
 pub fn from_reader<R: Read>(reader: R) -> FromReaderIter<R> {
     from_reader_iter(reader)
 }

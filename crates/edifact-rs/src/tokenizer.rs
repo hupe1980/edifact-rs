@@ -155,11 +155,11 @@ pub(crate) struct RawSegment {
 ///
 /// # Segment size guard
 ///
-/// Pass a limit to [`Tokenizer::with_limit`] to reject segments that exceed a
-/// byte-length threshold.  This bounds both the memory and CPU cost of parsing
-/// a single segment on the zero-copy slice path, and causes an
-/// [`EdifactError::SegmentTooLong`] error when the limit is exceeded.
-/// The default constructor [`Tokenizer::new`] sets no limit (`usize::MAX`).
+/// The default constructor [`Tokenizer::new`] enforces a **64 KiB** per-segment
+/// limit, which is sufficient for all well-formed EDIFACT interchanges and guards
+/// against adversarially crafted inputs that omit segment terminators.
+/// Use [`Tokenizer::with_limit`] to raise or lower this threshold, or
+/// [`Tokenizer::unlimited`] to remove it entirely (untrusted input only).
 pub struct Tokenizer<'a> {
     input: &'a [u8],
     pos: usize,
