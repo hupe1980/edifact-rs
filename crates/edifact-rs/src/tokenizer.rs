@@ -60,7 +60,7 @@ impl ServiceStringAdvice {
 
     /// Parse a UNA header and validate that the five active service characters
     /// (`element_sep`, `component_sep`, `decimal_mark`, `release_char`, `segment_term`) are all
-    /// mutually distinct and are not ASCII whitespace (`CR`, `LF`, space, tab).
+    /// mutually distinct and in the printable ASCII range `0x21–0x7E`.
     ///
     /// Returns [`EdifactError::InvalidUna`] if the invariant is violated.
     /// Falls back to [`ServiceStringAdvice::default`] when no UNA is present.
