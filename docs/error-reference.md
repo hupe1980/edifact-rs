@@ -488,9 +488,13 @@ nesting.
 validation failed with {error_count} error(s)
 ```
 
-**When**: Emitted by `validate_strict` (as the `Err` arm of
-`Result<ValidationReport, ValidationReport>`) and by other validators that convert a
-`ValidationReport` containing at least one error-severity issue into an `EdifactError`.
+**When**: Constructed explicitly to promote a `ValidationReport` that contains at
+least one error-severity issue into an `EdifactError` — typically inside application
+code or library helpers that need to return `Result<_, EdifactError>` rather than a
+bare report.  Note that `validate_strict` itself returns
+`Result<ValidationReport, ValidationReport>` (the `Err` arm carries the full report)
+and does **not** produce this variant automatically; callers must wrap it themselves
+when needed.
 
 **Fields**: `error_count: usize`, `report: Box<ValidationReport>`.
 

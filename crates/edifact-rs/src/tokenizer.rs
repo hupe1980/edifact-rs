@@ -196,7 +196,6 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    /// Construct a zero-copy tokenizer over `input` with explicit service-string advice.
     /// Construct a tokenizer with the default 64 KiB segment-size limit.
     ///
     /// If a single segment's byte length exceeds 65 536 bytes, the iterator

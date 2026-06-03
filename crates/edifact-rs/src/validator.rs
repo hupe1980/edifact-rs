@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// let pack = ProfileRulePack::new("AHB-11001")
 ///     .with_rule_fn(|segs, ctx, issues| {
 ///         let pruefid: &Pruefid = ctx.metadata()?;
-///         let msg_ref = ctx.message_ref().unwrap_or("<unknown>");
+///         let msg_ref = ctx.message_ref.unwrap_or("<unknown>");
 ///         // use pruefid and msg_ref …
 ///     });
 ///

@@ -545,12 +545,12 @@ pub fn get_components_iter<'a>(seg: &'a Segment<'_>, idx: usize) -> impl Iterato
 
 /// A composite data element wrapper for clearer ergonomics.
 ///
-/// Holds borrowed string references for a single composite element.
-/// Both the zero-copy borrowed path (from [`composite_element`]) and the
-/// owned path (from [`from_slice`][CompositeElement::from_slice]) collect
-/// `&'a str` slices from the underlying data — no string allocation occurs.
+/// Holds borrowed `&'a str` references to the underlying data — no string
+/// copies are made.  Creating the wrapper does, however, allocate a small
+/// [`Vec`] to hold the component pointers; on the fast path this is typically
+/// 4 or fewer entries (SSO-like inline storage is *not* used here).
 ///
-/// The lifetime `'a` represents the data lifetime.
+/// The lifetime `'a` represents the underlying data lifetime.
 pub struct CompositeElement<'a> {
     components: Vec<&'a str>,
 }

@@ -534,8 +534,13 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
                         self.bytes_consumed = self.stream_offset;
                         self.segments_yielded += 1;
                         // Track message boundaries for max_messages enforcement.
+                        // Only count a UNT that closes a UNH we already saw; a bare
+                        // UNT without a preceding UNH is malformed and must not inflate
+                        // the counter (matches the documented UNH/UNT-pair semantics).
                         if seg.tag == "UNT" {
-                            self.messages_yielded += 1;
+                            if self.in_message {
+                                self.messages_yielded += 1;
+                            }
                             self.in_message = false;
                         } else if seg.tag == "UNH" {
                             self.in_message = true;
@@ -601,7 +606,9 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
                     self.segments_yielded += 1;
                     let seg = OwnedSegment::from(s).offset(raw.start_offset);
                     if seg.tag == "UNT" {
-                        self.messages_yielded += 1;
+                        if self.in_message {
+                            self.messages_yielded += 1;
+                        }
                         self.in_message = false;
                     } else if seg.tag == "UNH" {
                         self.in_message = true;
