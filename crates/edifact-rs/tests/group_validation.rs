@@ -60,9 +60,11 @@ fn parse_segs(input: &str) -> Vec<edifact_rs::Segment<'static>> {
 
 // ── F-029 Test 1: group rule fires only for the scoped group ──────────────────
 
-/// A rule scoped to "SG5" must NOT fire when DTM appears only in SG1.
+/// A rule scoped to "SG5" DOES fire when DTM is absent from SG5, even though it
+/// appears in SG1. Cross-group contamination must not suppress the missing-segment
+/// error for SG5.
 #[test]
-fn group_rule_scoped_to_sg5_does_not_fire_when_dtm_only_in_sg1() {
+fn group_rule_fires_when_required_segment_absent_from_scoped_group() {
     // DTM is in SG1 (after RFF), not in SG5 (LOC).  Rule: DTM must be in SG5.
     let input = "UNH+1+MSCONS:D:04B:UN'RFF+Z13:REF1'DTM+137:20230101:102'LOC+172+LOC1'UNT+5+1'";
     let segs = parse_segs(input);
@@ -358,5 +360,49 @@ fn forbid_segment_in_group_occurrence_is_relative_not_absolute() {
         occurrences,
         vec![0, 1],
         "segment_occurrence in group must count only matching segments, not absolute group slice position"
+    );
+}
+
+// ── bail_on_first_error: child traversal must not stop on pre-existing errors ─
+
+#[test]
+fn bail_on_first_error_does_not_skip_sibling_groups_due_to_earlier_flat_errors() {
+    // Two SG5 groups (LOC+L1 and LOC+L2), each missing DTM.
+    // The flat pass also fires an error (BGM missing).
+    // With bail_on_first_error the group pass should stop after the FIRST group
+    // error it introduces — not skip all group rules because the flat pass
+    // already put errors in the report before the group pass started.
+    let segs = parse_segs(
+        "UNH+1+MSCONS:D:04B:UN'\
+         LOC+172+L1'LOC+172+L2'UNT+3+1'",
+    );
+    let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+
+    // A pack with bail_on_first_error that requires DTM in every SG5.
+    // Also require BGM (flat) — this fires first and puts an error in the report.
+    let pack = ProfileRulePack::new("TEST")
+        .require_segment("BGM", "BGM-M")
+        .require_segment_in_group("SG5", "DTM", "SG5-DTM-M")
+        .bail_on_first_error(true);
+    let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+
+    let report = ctx.validate_lenient_grouped(&tree, &segs);
+
+    // We must have at least the flat BGM error AND at least one group error.
+    // (bail_on_first_error stops after the first group error from THIS pass,
+    // not because the flat pass already populated errors.)
+    assert!(report.has_errors(), "expected errors in report: {report}");
+    let rule_ids: Vec<&str> = report
+        .errors()
+        .iter()
+        .filter_map(|i| i.rule_id.as_deref())
+        .collect();
+    assert!(
+        rule_ids.contains(&"BGM-M"),
+        "flat error BGM-M must be present: {report}"
+    );
+    assert!(
+        rule_ids.contains(&"SG5-DTM-M"),
+        "group error SG5-DTM-M must not be skipped by pre-existing flat errors: {report}"
     );
 }

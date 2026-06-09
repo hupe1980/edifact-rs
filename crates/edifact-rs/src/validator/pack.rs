@@ -602,8 +602,9 @@ impl ProfileRulePack {
         }
 
         for child in &group.children {
+            let errors_before_child = report.errors.len();
             self.walk_group_tree(child, all_segments, report, context);
-            if self.bail_on_first_error && !report.errors.is_empty() {
+            if self.bail_on_first_error && report.errors.len() > errors_before_child {
                 return;
             }
         }

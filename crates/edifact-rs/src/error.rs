@@ -757,9 +757,10 @@ pub enum ValidationSeverity {
 impl ValidationSeverity {
     /// Return a lowercase ASCII string for this severity level.
     ///
-    /// Stable for the four known variants.  When new variants are added in a future
-    /// release this method returns `"unknown"` via the `_ =>` arm so existing code
-    /// keeps compiling and serialising gracefully without hard-coding strings.
+    /// Stable for the four known variants.  Because the enum is
+    /// `#[non_exhaustive]`, new variants added in future releases are
+    /// handled by a catch-all arm that returns `"unknown"` so that
+    /// existing code keeps compiling and serialising gracefully.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -767,6 +768,8 @@ impl ValidationSeverity {
             Self::Error => "error",
             Self::Warning => "warning",
             Self::Info => "info",
+            #[allow(unreachable_patterns)]
+            _ => "unknown",
         }
     }
 
