@@ -34,23 +34,23 @@ entirely — which covers the large majority of real-world EDIFACT segments.
 
 ---
 
-## `from_reader_iter` — O(1) memory streaming
+## `from_reader` — O(1) memory streaming
 
-`from_reader_iter(reader)` is the reader-based API with minimal memory overhead:
+`from_reader(reader)` is the reader-based API with minimal memory overhead:
 
 ```rust
-use edifact_rs::from_reader_iter;
+use edifact_rs::from_reader;
 
 let f = std::fs::File::open("large.edi")?;
-for seg in from_reader_iter(f) {
+for seg in from_reader(f) {
     let seg = seg?;  // OwnedSegment (segment-sized allocation only)
     // process and drop — O(1) peak memory
 }
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-It holds at most one `OwnedSegment` in memory at a time. Use `from_reader_iter` (or
-`from_reader`) instead of `from_reader_collect` when processing interchanges that
+It holds at most one `OwnedSegment` in memory at a time. Use `from_reader`
+instead of `from_reader_collect` when processing interchanges that
 are larger than available RAM.
 
 ---
@@ -106,7 +106,7 @@ that you want to pipe directly to a file or socket.
 |---|---|---|---|
 | `from_bytes` | `&[u8]` | O(1) — zero copy | Fastest; requires full buffer |
 | `from_reader_collect` | `impl Read` | O(n) segments | Eagerly collects all segments into `Vec` |
-| `from_reader` / `from_reader_iter` | `impl Read` | O(1) | Lazy iterator — one segment at a time |
+| `from_reader` | `impl Read` | O(1) | Lazy iterator — one segment at a time |
 | `from_bytes_windows` | `&[u8]` | O(window) | One UNH..UNT window at a time |
 | `message_windows_from_reader` | `impl Read` | O(window) | Reader-based windows |
 | `deserialize_messages_from_reader` | `impl Read` | O(1) typed | Zero raw-segment buffer |
@@ -210,7 +210,7 @@ most deployments.
 | Scenario | Typical peak allocation |
 |---|---|
 | Parse 1 MB interchange, collect all | ~3–4× input size (segments + `SmallVec` inlining) |
-| Parse 1 MB, `from_reader_iter` (streaming) | ~4 KB (one segment buffer) |
+| Parse 1 MB, `from_reader` (streaming) | ~4 KB (one segment buffer) |
 | Typed streaming, `deserialize_messages_from_reader` | ~4 KB + sizeof(T) |
 | Write 1 MB interchange via `WriterEmitter` | ~8 KB (internal buffer) |
 | Write 1 MB interchange via `ser::to_bytes` | ~1× output size |

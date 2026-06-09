@@ -255,14 +255,13 @@ println!("{} issue(s) from ORDERS-DOC rules", doc_issues.total_issues());
 Separate structure, code-list, and profile checks into distinct layers:
 
 ```rust
-use edifact_rs::{Validator, ValidationContext, ValidationLayer, ValidationReport, Segment};
+use edifact_rs::{Validator, ValidationContext, ValidationLayer, ValidationReport, ValidationRuleContext, Segment};
 
 struct StructureValidator;
 impl Validator for StructureValidator {
-    fn validate_batch(&self, _segments: &[Segment<'_>], _report: &mut ValidationReport) {
+    fn validate_batch(&self, _segments: &[Segment<'_>], _report: &mut ValidationReport, _context: &ValidationRuleContext<'_>) {
         // check mandatory segments, ordering, ...
     }
-    fn set_message_type(&mut self, _: Option<&str>) {}
 }
 
 let context = ValidationContext::builder()
@@ -329,7 +328,7 @@ edifact-rs workspace
 | Mode | API | Allocation model |
 |---|---|---|
 | Zero-copy | `from_bytes(input: &[u8])` | Borrows from `input` — no heap for segment data |
-| Owned streaming | `from_reader_iter(reader)` | One `OwnedSegment` per segment; reader not buffered |
+| Owned streaming | `from_reader(reader)` | One `OwnedSegment` per segment; reader not buffered |
 
 **Key types:**
 

@@ -185,7 +185,7 @@ async fn parse_from_async_reader<R: AsyncReadExt + Unpin>(
 | Payload size | Source | Recommended pattern |
 |---|---|---|
 | < 1 MB | Any | Pattern A — buffer, then `from_bytes` |
-| 1 MB – 100 MB | File | Pattern B — `spawn_blocking` + `from_reader_iter` |
+| 1 MB – 100 MB | File | Pattern B — `spawn_blocking` + `from_reader` |
 | > 100 MB | File | Pattern B or C — streaming with channel |
 | Any | `TcpStream` / HTTP | Pattern A (small) or E + B (large) |
 | Any, with typed structs | Reader | Pattern D — typed channel streaming |

@@ -150,7 +150,7 @@ from the raw bytes).
 
 ### `OwnedSegment` — heap-owned copy
 
-When parsing from a `Read` source (`from_reader_iter`, `message_windows_from_reader`),
+When parsing from a `Read` source (`from_reader`, `message_windows_from_reader`),
 the library can't borrow from the input buffer. It produces `OwnedSegment` instead:
 
 ```rust

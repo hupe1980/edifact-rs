@@ -11,7 +11,7 @@ synchronous (`std::io::Read`) and can be bridged to async runtimes — see
 
 | API | Source | Output | Memory model |
 |---|---|---|---|
-| `from_reader_iter(reader)` | `impl Read` | `Iterator<Item = Result<OwnedSegment, _>>` | O(1) — one segment at a time |
+| `from_reader(reader)` | `impl Read` | `Iterator<Item = Result<OwnedSegment, _>>` | O(1) — one segment at a time |
 | `from_bytes_windows(input)` | `&[u8]` | `Iterator<Item = Result<MessageWindow<'_>, _>>` | O(window) — one message window |
 | `message_windows_from_reader(reader)` | `impl Read` | `Iterator<Item = Result<OwnedMessageWindow, _>>` | O(window) — lazy I/O |
 | `deserialize_first_streaming(input)` | `&[u8]` | `Result<T, _>` | Stops at first match |
@@ -24,18 +24,18 @@ synchronous (`std::io::Read`) and can be bridged to async runtimes — see
 
 ## Segment-level streaming
 
-### `from_reader_iter` — raw segment stream
+### `from_reader` — raw segment stream
 
 Process one `OwnedSegment` at a time without loading the interchange into memory:
 
 ```rust
-use edifact_rs::from_reader_iter;
+use edifact_rs::from_reader;
 use std::fs::File;
 
 fn main() -> Result<(), edifact_rs::EdifactError> {
     let f = File::open("interchange.edi")?;
 
-    for result in from_reader_iter(f) {
+    for result in from_reader(f) {
         let seg = result?;
         println!("tag={} elements={}", seg.tag, seg.elements.len());
     }
@@ -207,9 +207,9 @@ Combine `message_windows_from_reader` with `ValidationContext` to validate each
 message as it arrives, without buffering the whole interchange:
 
 ```rust
-use edifact_rs::{
+use edifact_rs:{
     ValidationContext, ProfileRulePack, ValidationIssue, ValidationSeverity,
-    from_reader_iter, message_windows_from_reader, OwnedSegment,
+    message_windows_from_reader, OwnedSegment,
 };
 use std::io::Cursor;
 
@@ -253,13 +253,13 @@ See the full example in [`cookbook_streamed_progressive_validation.rs`](../crate
 
 ---
 
-## Manual window assembly with `from_reader_iter`
+## Manual window assembly with `from_reader`
 
 For full control over window boundaries (e.g. custom grouping logic), use the raw
 segment iterator:
 
 ```rust
-use edifact_rs::{from_reader_iter, OwnedSegment};
+use edifact_rs::{from_reader, OwnedSegment};
 use std::io::Cursor;
 
 let input = Cursor::new(b"\
@@ -270,7 +270,7 @@ let input = Cursor::new(b"\
 let mut current: Vec<OwnedSegment> = Vec::new();
 let mut in_message = false;
 
-for result in from_reader_iter(input) {
+for result in from_reader(input) {
     let seg = result?;
     match seg.tag.as_str() {
         "UNH" => {
@@ -301,7 +301,7 @@ for result in from_reader_iter(input) {
 | Scenario | Peak heap usage |
 |---|---|
 | `from_bytes` on a 1 MB slice | One `Vec<Element<'_>>` per segment (tags borrow from slice) |
-| `from_reader_iter` on a 1 GB file | ~O(1 segment) at any time |
+| `from_reader` on a 1 GB file | ~O(1 segment) at any time |
 | `message_windows_from_reader` on 100 messages of 20 segments each | O(20 segments) — one window at a time |
 | `deserialize_messages_from_reader` typed | O(20 segments) window + O(1 typed struct) |
 

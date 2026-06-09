@@ -89,41 +89,58 @@ println!("{} error(s)", report.errors.len());
 
 ## Merging packs
 
-Use `.merge(other)` to combine packs from multiple sources into a single pack that
-can be registered once:
+Two composition strategies are available depending on whether you want to layer rules
+or override specific ones:
+
+### `extend_from` — inherit a base pack, then append specialisations
 
 ```rust
 use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
 
-let document_pack = ProfileRulePack::new("ORDERS-DOCUMENT")
-    .for_message_type("ORDERS")
-    .with_stateless_rule_fn(|_segs, _issues| {
-        // document code rules …
+let base_pack = ProfileRulePack::new("UTILMD-BASE")
+    .for_message_type("UTILMD")
+    .with_named_stateless_rule_fn("BASE-BGM", |_segs, _issues| {
+        // shared baseline rules …
     });
 
-let reference_pack = ProfileRulePack::new("ORDERS-REFERENCE")
-    .for_message_type("ORDERS")
+// Partner-specific pack that prepends the base rules before its own:
+let partner_pack = ProfileRulePack::new("UTILMD-ACME")
+    .for_message_type("UTILMD")
     .with_stateless_rule_fn(|_segs, _issues| {
-        // reference rules …
-    });
-
-let partner_pack = ProfileRulePack::new("ACME-PARTNER")
-    .for_message_type("ORDERS")
-    .with_stateless_rule_fn(|_segs, _issues| {
-        // trading-partner–specific rules …
-    });
-
-// Merge all three into one combined pack:
-let combined = document_pack
-    .merge(reference_pack)?
-    .merge(partner_pack)?;
+        // ACME-specific rules — appended after base rules …
+    })
+    .extend_from(&base_pack)?;  // base rules run first
+# Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-> **Note**: `.merge(other)` consumes both packs and returns `Result<ProfileRulePack, EdifactError>`.
-> It fails with `EdifactError::IncompatibleReleaseScopes` if both packs carry different
-> release values.  Use `.merge_unchecked(other)` (infallible, incoming release wins) when
-> compatibility is guaranteed at build time.  The combined pack applies rules from all
-> merged packs in order.
+### `merge_with_override` — delta upgrades (override specific rules by ID)
+
+When you have a versioned base and want to ship a delta that replaces only changed
+rules (identified by their stable rule ID):
+
+```rust
+use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
+
+let base = ProfileRulePack::new("UTILMD-5.4")
+    .for_message_type("UTILMD")
+    .with_named_stateless_rule_fn("AHB-11001-BGM-M", |_segs, _issues| {
+        // 5.4 BGM rule …
+    });
+
+let delta = ProfileRulePack::new("UTILMD-5.5-delta")
+    .with_named_stateless_rule_fn("AHB-11001-BGM-M", |_segs, _issues| {
+        // updated 5.5 BGM rule — replaces the 5.4 version
+    });
+
+// Result has rule_count() == 1 (the 5.4 rule is replaced, not duplicated)
+let result = base.merge_with_override(delta)?;
+assert_eq!(result.rule_count(), 1);
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+> Both methods return `Result<ProfileRulePack, EdifactError>` and fail with
+> `EdifactError::IncompatibleReleaseScopes` when the two packs carry different
+> release values.
 
 ---
 
@@ -330,6 +347,65 @@ when validating in a `spawn_blocking` worker).
 
 ---
 
+## Group-scoped rules
+
+Group-scoped rules fire once per occurrence of a named segment group, giving each
+group instance its own isolated segment list. This lets you enforce intra-group
+invariants (e.g. every `SG5` must contain at least one `LIN`) without writing manual
+tree-walking code.
+
+### Convenience builders
+
+```rust
+use edifact_rs::{ProfileRulePack, GroupDef};
+
+// Schema: SG5 contains LIN and zero or more SG6 children.
+let schema = GroupDef::new("SG5", "LIN", vec![
+    GroupDef::new("SG6", "RFF", vec![]),
+]);
+
+let pack = ProfileRulePack::new("ORDERS-GROUPS")
+    .for_message_type("ORDERS")
+    // Require LIN in every SG5 occurrence:
+    .require_segment_in_group("SG5", "LIN", "ORDERS-SG5-LIN-M")
+    // Forbid a legacy segment in SG5:
+    .forbid_segment_in_group("SG5", "OLD", "ORDERS-SG5-OLD-F")
+    // Require qualifier "1" on LIN within SG5 (element 0, component 0):
+    .require_qualifier_in_group("SG5", "LIN", 0, 0, "1", "ORDERS-SG5-LIN-Q1");
+```
+
+### Custom group rule closure
+
+For full control, supply a closure via `with_scoped_group_rule_fn`:
+
+```rust
+# use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
+let pack = ProfileRulePack::new("ORDERS-GROUPS")
+    .for_message_type("ORDERS")
+    .with_scoped_group_rule_fn(
+        "SG5",                        // fires only inside SG5 occurrences
+        |group_name, segs, issues| {
+            let has_qty = segs.iter().any(|s| s.tag == "QTY");
+            if !has_qty {
+                issues.push(
+                    ValidationIssue::new(
+                        ValidationSeverity::Error,
+                        "every SG5 must contain a QTY segment",
+                    )
+                    .with_rule_id("ORDERS-SG5-QTY-M")
+                    .with_segment_group(group_name),
+                );
+            }
+        },
+    );
+```
+
+Group rules are run via `validate_lenient_grouped` / `validate_strict_grouped` on
+`ValidationContext`. See [Validation](validation.md) for how to supply a `GroupDef`
+schema and run the group pass.
+
+---
+
 ## Pack introspection
 
 ```rust
@@ -337,10 +413,12 @@ when validating in a `spawn_blocking` worker).
 let pack = ProfileRulePack::new("MY-PACK")
     .for_message_type("ORDERS")
     .with_stateless_rule_fn(|_segs, _issues| {})
-    .with_stateless_rule_fn(|_segs, _issues| {});
+    .with_stateless_rule_fn(|_segs, _issues| {})
+    .require_segment_in_group("SG5", "LIN", "SG5-LIN-M");
 
-println!("name:        {}", pack.name());           // "MY-PACK"
-println!("rule count:  {}", pack.rule_count());     // 2
+println!("name:        {}", pack.name());              // "MY-PACK"
+println!("rule count:  {}", pack.rule_count());        // 2
+println!("group rules: {}", pack.group_rule_count()); // 1
 println!("types:       {:?}", pack.message_types().collect::<Vec<_>>()); // ["ORDERS"]
 ```
 
@@ -354,8 +432,10 @@ println!("types:       {:?}", pack.message_types().collect::<Vec<_>>()); // ["OR
    simply not pushing is the zero-cost pass path.
 3. **Scope packs to message types** — unscoped packs run for every message, even
    when the logic is type-specific.
-4. **Prefer `.merge()`** over registering many packs — a single merged pack is
-   semantically cleaner and slightly more efficient (one iteration over segments).
+4. **Compose with `extend_from` / `merge_with_override`** — `extend_from` prepends a
+   shared base pack (base rules run first); `merge_with_override` replaces rules by
+   stable ID for versioned delta upgrades. Both are cleaner than registering many
+   loose packs separately.
 5. **Keep rules small and focused** — one rule per concern makes reporting and
    debugging easier.
 6. **Use `with_stateless_rule_fn` for simple rules** — when you do not need

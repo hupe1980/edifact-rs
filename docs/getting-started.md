@@ -162,7 +162,6 @@ impl Validator for MyValidator {
     ) {
         // your validation logic here
     }
-    fn set_message_type(&mut self, _: Option<&str>) {}
 }
 
 fn main() -> Result<(), edifact_rs::EdifactError> {
@@ -193,12 +192,12 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 ## 6. Process a reader (large files)
 
 ```rust
-use edifact_rs::from_reader_iter;
+use edifact_rs::from_reader;
 use std::fs::File;
 
 fn main() -> Result<(), edifact_rs::EdifactError> {
     let f = File::open("interchange.edi")?;
-    for result in from_reader_iter(f) {
+    for result in from_reader(f) {
         let segment = result?;
         println!("{}", segment.tag);
     }
@@ -206,7 +205,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 }
 ```
 
-`from_reader_iter` parses one `OwnedSegment` at a time without buffering the whole file.
+`from_reader` parses one `OwnedSegment` at a time without buffering the whole file.
 
 → Full streaming guide: [Streaming](streaming.md)
 
