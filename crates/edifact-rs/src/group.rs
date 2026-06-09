@@ -401,7 +401,7 @@ impl SegmentGroupIndexed {
 /// # Group validation
 ///
 /// `group_segments_indexed` pairs naturally with
-/// [`ValidationContext::validate_lenient_grouped`] to enforce group-presence rules:
+/// [`crate::validator::ValidationContext::validate_lenient_grouped`] to enforce group-presence rules:
 ///
 /// ```rust,ignore
 /// use edifact_rs::{ProfileRulePack, ValidationContext};
@@ -435,7 +435,7 @@ pub fn group_segments_indexed<'a>(
 /// Partition an owned-segment slice into a [`SegmentGroup`] tree according to `schema`.
 ///
 /// Equivalent to [`group_segments`] but accepts `&[OwnedSegment]` for use with
-/// the reader-based API ([`crate::from_reader`] → [`crate::OwnedSegmentStream`]).
+/// the reader-based API ([`crate::from_reader`] → [`crate::FromReaderIter`]).
 ///
 /// Internally borrows each `OwnedSegment` as a `Segment<'_>` and delegates to
 /// [`group_segments`], so all grouping logic is shared.
@@ -461,7 +461,8 @@ pub fn group_owned_segments_indexed(
 }
 
 /// Internal recursive indexed grouping.  Returns the number of segments consumed.
-fn group_recursive_indexed<'a>(    segments: &[Segment<'a>],
+fn group_recursive_indexed<'a>(
+    segments: &[Segment<'a>],
     parent: &mut SegmentGroupIndexed,
     schema: &'static [GroupDef],
     stop_triggers: &[&'static str],

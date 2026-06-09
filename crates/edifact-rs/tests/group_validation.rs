@@ -9,7 +9,7 @@
 
 use edifact_rs::{
     ProfileRulePack, ValidationContext, ValidationIssue, ValidationSeverity,
-    group::{GroupDef, group_segments_indexed, group_owned_segments_indexed},
+    group::{GroupDef, group_owned_segments_indexed, group_segments_indexed},
 };
 
 // ── Schema shared across tests ────────────────────────────────────────────────
@@ -68,8 +68,7 @@ fn group_rule_scoped_to_sg5_does_not_fire_when_dtm_only_in_sg1() {
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
-    let pack = ProfileRulePack::new("TEST")
-        .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
+    let pack = ProfileRulePack::new("TEST").require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
     let report = ctx.validate_lenient_grouped(&tree, &segs);
@@ -91,8 +90,7 @@ fn group_rule_does_not_fire_when_segment_present_in_scoped_group() {
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
-    let pack = ProfileRulePack::new("TEST")
-        .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
+    let pack = ProfileRulePack::new("TEST").require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
     let report = ctx.validate_lenient_grouped(&tree, &segs);
@@ -111,8 +109,7 @@ fn forbid_segment_in_group_fires_when_segment_present() {
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
-    let pack = ProfileRulePack::new("TEST")
-        .forbid_segment_in_group("SG5", "UNS", "SG5-UNS-F");
+    let pack = ProfileRulePack::new("TEST").forbid_segment_in_group("SG5", "UNS", "SG5-UNS-F");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
     let report = ctx.validate_lenient_grouped(&tree, &segs);
@@ -127,8 +124,7 @@ fn forbid_segment_in_group_does_not_fire_when_segment_absent() {
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
-    let pack = ProfileRulePack::new("TEST")
-        .forbid_segment_in_group("SG5", "UNS", "SG5-UNS-F");
+    let pack = ProfileRulePack::new("TEST").forbid_segment_in_group("SG5", "UNS", "SG5-UNS-F");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
     assert!(ctx.validate_lenient_grouped(&tree, &segs).is_valid());
@@ -141,7 +137,8 @@ fn forbid_segment_in_group_does_not_fire_when_segment_absent() {
 #[test]
 fn group_rules_for_different_groups_do_not_cross_contaminate() {
     // DTM in SG1 (after RFF) but not in SG5 (after LOC), and QTY in SG6 (after QTY trigger).
-    let input = "UNH+1+MSCONS:D:04B:UN'RFF+Z13:R1'DTM+137:20230101:102'LOC+172+L1'QTY+220:100'UNT+5+1'";
+    let input =
+        "UNH+1+MSCONS:D:04B:UN'RFF+Z13:R1'DTM+137:20230101:102'LOC+172+L1'QTY+220:100'UNT+5+1'";
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
@@ -170,8 +167,7 @@ fn group_rule_issues_are_auto_stamped_with_group_name() {
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
-    let pack = ProfileRulePack::new("TEST")
-        .require_segment_in_group("SG5", "QTY", "SG5-QTY-M");
+    let pack = ProfileRulePack::new("TEST").require_segment_in_group("SG5", "QTY", "SG5-QTY-M");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
     let report = ctx.validate_lenient_grouped(&tree, &segs);
@@ -194,12 +190,14 @@ fn validate_lenient_grouped_owned_works_with_owned_segments() {
     let owned = owned_segs(input);
     let tree = group_owned_segments_indexed(&owned, SCHEMA, "ROOT");
 
-    let pack = ProfileRulePack::new("TEST")
-        .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
+    let pack = ProfileRulePack::new("TEST").require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
     let report = ctx.validate_lenient_grouped_owned(&tree, &owned);
-    assert!(report.is_valid(), "DTM present in SG5 — no errors expected: {report}");
+    assert!(
+        report.is_valid(),
+        "DTM present in SG5 — no errors expected: {report}"
+    );
 }
 
 // ── F-029 Test 6: multiple group occurrences (repetition) ────────────────────
@@ -212,8 +210,7 @@ fn group_rule_fires_per_occurrence_when_group_repeats() {
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
-    let pack = ProfileRulePack::new("TEST")
-        .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
+    let pack = ProfileRulePack::new("TEST").require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
     let report = ctx.validate_lenient_grouped(&tree, &segs);

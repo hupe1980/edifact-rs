@@ -583,7 +583,11 @@ fn fuzz_profile_rule_pack_no_panic() {
     };
 
     static FUZZ_SCHEMA: &[GroupDef] = &[
-        GroupDef { name: "SG1", trigger: "BGM", children: &[] },
+        GroupDef {
+            name: "SG1",
+            trigger: "BGM",
+            children: &[],
+        },
         GroupDef {
             name: "SG2",
             trigger: "NAD",
@@ -624,21 +628,19 @@ fn fuzz_profile_rule_pack_no_panic() {
 fn fuzz_group_segments_indexed_no_panic() {
     use edifact_rs::group::{GroupDef, group_segments_indexed};
 
-    static DEEP_SCHEMA: &[GroupDef] = &[
-        GroupDef {
-            name: "G1",
-            trigger: "AAA",
+    static DEEP_SCHEMA: &[GroupDef] = &[GroupDef {
+        name: "G1",
+        trigger: "AAA",
+        children: &[GroupDef {
+            name: "G2",
+            trigger: "BBB",
             children: &[GroupDef {
-                name: "G2",
-                trigger: "BBB",
-                children: &[GroupDef {
-                    name: "G3",
-                    trigger: "CCC",
-                    children: &[],
-                }],
+                name: "G3",
+                trigger: "CCC",
+                children: &[],
             }],
-        },
-    ];
+        }],
+    }];
 
     check!()
         .with_type::<Vec<u8>>()

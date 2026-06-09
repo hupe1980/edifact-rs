@@ -507,7 +507,8 @@ impl ValidationContext {
             }
             if lv.layer == ValidationLayer::Envelope {
                 let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
-                lv.validator.validate_batch(&borrowed, &mut report, effective_ctx);
+                lv.validator
+                    .validate_batch(&borrowed, &mut report, effective_ctx);
                 envelope_ran = true;
             } else if envelope_ran {
                 let active = filtered_borrowed.get_or_insert_with(|| {
@@ -517,11 +518,13 @@ impl ValidationContext {
                         .map(|s| s.as_borrowed())
                         .collect()
                 });
-                lv.validator.validate_batch(active, &mut report, effective_ctx);
+                lv.validator
+                    .validate_batch(active, &mut report, effective_ctx);
             } else {
                 let active = full_borrowed
                     .get_or_insert_with(|| segments.iter().map(|s| s.as_borrowed()).collect());
-                lv.validator.validate_batch(active, &mut report, effective_ctx);
+                lv.validator
+                    .validate_batch(active, &mut report, effective_ctx);
             }
             if self.bail_on_first_critical
                 && report
@@ -587,7 +590,8 @@ impl ValidationContext {
                 continue;
             }
             if lv.layer == ValidationLayer::Envelope {
-                lv.validator.validate_batch(segments, &mut report, effective_ctx);
+                lv.validator
+                    .validate_batch(segments, &mut report, effective_ctx);
                 envelope_ran = true;
             } else {
                 let active: &[Segment<'_>] = if envelope_ran {
@@ -601,7 +605,8 @@ impl ValidationContext {
                 } else {
                     segments
                 };
-                lv.validator.validate_batch(active, &mut report, effective_ctx);
+                lv.validator
+                    .validate_batch(active, &mut report, effective_ctx);
             }
             if self.bail_on_first_critical
                 && report

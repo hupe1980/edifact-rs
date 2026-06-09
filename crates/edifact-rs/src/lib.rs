@@ -306,7 +306,7 @@ pub struct FromBytesIter<'a> {
     bytes_consumed: u64,
 }
 
-/// Iterator returned by [`from_reader_iter`].
+/// Iterator returned by [`from_reader`].
 pub struct FromReaderIter<R: Read> {
     inner: parser::OwnedSegmentStream<std::io::BufReader<R>>,
 }

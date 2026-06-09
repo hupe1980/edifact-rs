@@ -376,8 +376,7 @@ pub enum EdifactError {
 
     /// Two [`crate::ProfileRulePack`] values with incompatible release scopes were composed.
     ///
-    /// When composing packs via [`crate::ProfileRulePack::merge`],
-    /// [`crate::ProfileRulePack::extend_from`], or
+    /// When composing packs via [`crate::ProfileRulePack::extend_from`] or
     /// [`crate::ProfileRulePack::merge_with_override`], both packs must either
     /// share the same release scope or at most one may carry a scope.
     #[error("incompatible release scopes: cannot compose {current:?} with {incoming:?}")]

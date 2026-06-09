@@ -360,7 +360,9 @@ mod tests {
         use super::DecimalFloat;
         // Rust Display for f64 picks the shortest round-trip form; a 320-byte buffer covers all values.
         let mut emitter = VecEmitter::default();
-        DecimalFloat(f64::MAX).edifact_serialize(&mut emitter).unwrap();
+        DecimalFloat(f64::MAX)
+            .edifact_serialize(&mut emitter)
+            .unwrap();
         let s = match &emitter.events[0] {
             OwnedEdifactEvent::Element { value } => value.clone(),
             _ => panic!("expected Element event"),
@@ -368,7 +370,9 @@ mod tests {
         assert!(!s.is_empty());
         // f32::MAX too
         let mut emitter2 = VecEmitter::default();
-        DecimalFloat(f32::MAX).edifact_serialize(&mut emitter2).unwrap();
+        DecimalFloat(f32::MAX)
+            .edifact_serialize(&mut emitter2)
+            .unwrap();
         assert!(matches!(
             &emitter2.events[0],
             OwnedEdifactEvent::Element { .. }

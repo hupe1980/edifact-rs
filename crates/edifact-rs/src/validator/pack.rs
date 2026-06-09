@@ -1,7 +1,7 @@
 //! Profile rule packs: `ProfileRule`, `ProfileRulePack`, and supporting types.
 
-use super::Validator;
 use super::ValidationRuleContext;
+use super::Validator;
 use crate::group::SegmentGroupIndexed;
 use crate::{EdifactError, Segment, ValidationIssue, ValidationReport, ValidationSeverity};
 use std::sync::Arc;
@@ -461,18 +461,22 @@ impl ProfileRulePack {
         rule_id: impl Into<Arc<str>>,
     ) -> Self {
         let id: Arc<str> = rule_id.into();
-        self.with_scoped_group_rule_fn(group_scope, id.clone(), move |_group, segs, _ctx, issues| {
-            if !segs.iter().any(|s| s.tag == tag) {
-                issues.push(
-                    ValidationIssue::new(
-                        ValidationSeverity::Error,
-                        format!("mandatory segment {tag} is missing from group {group_scope}"),
-                    )
-                    .with_segment(tag)
-                    .with_rule_id(id.as_ref()),
-                );
-            }
-        })
+        self.with_scoped_group_rule_fn(
+            group_scope,
+            id.clone(),
+            move |_group, segs, _ctx, issues| {
+                if !segs.iter().any(|s| s.tag == tag) {
+                    issues.push(
+                        ValidationIssue::new(
+                            ValidationSeverity::Error,
+                            format!("mandatory segment {tag} is missing from group {group_scope}"),
+                        )
+                        .with_segment(tag)
+                        .with_rule_id(id.as_ref()),
+                    );
+                }
+            },
+        )
     }
 
     /// Assert segment `tag` does **not** appear in any occurrence of group `group_scope`.
@@ -485,19 +489,23 @@ impl ProfileRulePack {
         rule_id: impl Into<Arc<str>>,
     ) -> Self {
         let id: Arc<str> = rule_id.into();
-        self.with_scoped_group_rule_fn(group_scope, id.clone(), move |_group, segs, _ctx, issues| {
-            for (occ, _s) in segs.iter().enumerate().filter(|(_, s)| s.tag == tag) {
-                issues.push(
-                    ValidationIssue::new(
-                        ValidationSeverity::Error,
-                        format!("segment {tag} must not appear in group {group_scope}"),
-                    )
-                    .with_segment(tag)
-                    .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
-                    .with_rule_id(id.as_ref()),
-                );
-            }
-        })
+        self.with_scoped_group_rule_fn(
+            group_scope,
+            id.clone(),
+            move |_group, segs, _ctx, issues| {
+                for (occ, _s) in segs.iter().enumerate().filter(|(_, s)| s.tag == tag) {
+                    issues.push(
+                        ValidationIssue::new(
+                            ValidationSeverity::Error,
+                            format!("segment {tag} must not appear in group {group_scope}"),
+                        )
+                        .with_segment(tag)
+                        .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
+                        .with_rule_id(id.as_ref()),
+                    );
+                }
+            },
+        )
     }
 
     /// Assert qualifier `qualifier` at `(element, component)` in segment `tag` is
@@ -512,30 +520,34 @@ impl ProfileRulePack {
         rule_id: impl Into<Arc<str>>,
     ) -> Self {
         let id: Arc<str> = rule_id.into();
-        self.with_scoped_group_rule_fn(group_scope, id.clone(), move |_group, segs, _ctx, issues| {
-            for (occ, s) in segs.iter().enumerate().filter(|(_, s)| s.tag == tag) {
-                let actual = s
-                    .get_element(element as usize)
-                    .and_then(|e| e.get_component(component as usize));
-                if actual != Some(qualifier) {
-                    issues.push(
-                        ValidationIssue::new(
-                            ValidationSeverity::Error,
-                            format!(
-                                "segment {tag} element {element} component {component} must be \
+        self.with_scoped_group_rule_fn(
+            group_scope,
+            id.clone(),
+            move |_group, segs, _ctx, issues| {
+                for (occ, s) in segs.iter().enumerate().filter(|(_, s)| s.tag == tag) {
+                    let actual = s
+                        .get_element(element as usize)
+                        .and_then(|e| e.get_component(component as usize));
+                    if actual != Some(qualifier) {
+                        issues.push(
+                            ValidationIssue::new(
+                                ValidationSeverity::Error,
+                                format!(
+                                    "segment {tag} element {element} component {component} must be \
                                  {qualifier:?} in group {group_scope}, found {:?}",
-                                actual.unwrap_or("<absent>")
-                            ),
-                        )
-                        .with_segment(tag)
-                        .with_element_index(element)
-                        .with_component_index(component)
-                        .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
-                        .with_rule_id(id.as_ref()),
-                    );
+                                    actual.unwrap_or("<absent>")
+                                ),
+                            )
+                            .with_segment(tag)
+                            .with_element_index(element)
+                            .with_component_index(component)
+                            .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
+                            .with_rule_id(id.as_ref()),
+                        );
+                    }
                 }
-            }
-        })
+            },
+        )
     }
 
     /// Return the number of group-scoped rules in this pack.
@@ -715,8 +727,7 @@ impl ProfileRulePack {
         self.rules.append(&mut to_append);
         self.message_types.append(&mut other.message_types);
         // Merge group rules: named overrides replace matching entries; others are appended.
-        let mut group_id_to_index: std::collections::HashMap<Arc<str>, usize> =
-            Default::default();
+        let mut group_id_to_index: std::collections::HashMap<Arc<str>, usize> = Default::default();
         for (idx, rule) in self.group_rules.iter().enumerate() {
             if let Some(id) = &rule.id {
                 group_id_to_index.insert(id.clone(), idx);

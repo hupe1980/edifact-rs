@@ -378,12 +378,12 @@ fn extract_interchange<S: SegmentReader>(
         });
     }
 
-    let declared_message_count: u32 = unz
-        .required_component_field(0, 0)?
-        .parse()
-        .map_err(|_| EdifactError::InvalidText {
-            offset: unz.span_start(),
-        })?;
+    let declared_message_count: u32 =
+        unz.required_component_field(0, 0)?
+            .parse()
+            .map_err(|_| EdifactError::InvalidText {
+                offset: unz.span_start(),
+            })?;
 
     Ok(InterchangeEnvelope {
         syntax_identifier,
@@ -442,12 +442,12 @@ fn extract_messages<S: SegmentReader>(
                 let controlling_agency = unh.required_component_field(1, 3)?.to_owned();
                 let association_code = unh.component(1, 4).unwrap_or("").to_owned();
 
-                let declared_segment_count: u32 =
-                    seg.required_component_field(0, 0)?
-                        .parse()
-                        .map_err(|_| EdifactError::InvalidText {
-                            offset: seg.span_start(),
-                        })?;
+                let declared_segment_count: u32 = seg
+                    .required_component_field(0, 0)?
+                    .parse()
+                    .map_err(|_| EdifactError::InvalidText {
+                        offset: seg.span_start(),
+                    })?;
                 let unt_ref = seg.required_component_field(1, 0)?;
                 if unt_ref != message_ref {
                     return Err(EdifactError::QualifierMismatch {
@@ -459,12 +459,11 @@ fn extract_messages<S: SegmentReader>(
                 }
 
                 // actual count = segments from UNH (inclusive) to UNT (inclusive)
-                let actual_segment_count =
-                    u32::try_from(i - msg_start_idx + 1).map_err(|_| {
-                        EdifactError::InterchangeTooLarge {
-                            count: u64::try_from(i - msg_start_idx + 1).unwrap_or(u64::MAX),
-                        }
-                    })?;
+                let actual_segment_count = u32::try_from(i - msg_start_idx + 1).map_err(|_| {
+                    EdifactError::InterchangeTooLarge {
+                        count: u64::try_from(i - msg_start_idx + 1).unwrap_or(u64::MAX),
+                    }
+                })?;
 
                 in_message = false;
                 messages.push(MessageEnvelope {
