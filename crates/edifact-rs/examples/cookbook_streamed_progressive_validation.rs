@@ -1,5 +1,5 @@
 use edifact_rs::{
-    ProfileRulePack, ValidationContext, ValidationIssue, ValidationSeverity, from_reader_iter,
+    ProfileRulePack, ValidationContext, ValidationIssue, ValidationSeverity, from_reader,
 };
 
 fn main() -> Result<(), edifact_rs::EdifactError> {
@@ -55,7 +55,7 @@ UNT+4+2'";
     let mut in_message = false;
     let mut validated_windows = 0usize;
 
-    for owned in from_reader_iter(std::io::Cursor::new(input.to_vec())) {
+    for owned in from_reader(std::io::Cursor::new(input.to_vec())) {
         let segment = owned?;
 
         if segment.tag == "UNH" {

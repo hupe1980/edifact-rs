@@ -1,0 +1,320 @@
+//! Integration tests for group-scoped validation (F-011 / F-029).
+//!
+//! These tests verify that [`ProfileRulePack`] group rules:
+//! - Only fire for the group they are scoped to.
+//! - Do **not** cross-fire when the same segment tag appears in a different group.
+//! - Correctly auto-stamp `ValidationIssue::segment_group`.
+//! - Work through [`ValidationContext::validate_lenient_grouped`].
+//! - Work through [`ValidationContext::validate_lenient_grouped_owned`].
+
+use edifact_rs::{
+    ProfileRulePack, ValidationContext, ValidationIssue, ValidationSeverity,
+    group::{GroupDef, group_segments_indexed, group_owned_segments_indexed},
+};
+
+// ── Schema shared across tests ────────────────────────────────────────────────
+
+/// Minimal MSCONS-like schema:
+///
+/// ```text
+/// ROOT
+///   SG1 (trigger: RFF) — reference group
+///     (no children)
+///   SG5 (trigger: LOC) — location group
+///     SG6 (trigger: QTY) — quantity sub-group
+/// ```
+static SCHEMA: &[GroupDef] = &[
+    GroupDef {
+        name: "SG1",
+        trigger: "RFF",
+        children: &[],
+    },
+    GroupDef {
+        name: "SG5",
+        trigger: "LOC",
+        children: &[GroupDef {
+            name: "SG6",
+            trigger: "QTY",
+            children: &[],
+        }],
+    },
+];
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Parse ASCII EDIFACT snippet into owned segments.
+fn owned_segs(input: &[u8]) -> Vec<edifact_rs::OwnedSegment> {
+    edifact_rs::from_reader(std::io::Cursor::new(input))
+        .collect::<Result<_, _>>()
+        .expect("fixture should parse")
+}
+
+/// Parse ASCII EDIFACT snippet into borrowed segments (from a String so we own the buffer).
+fn parse_segs(input: &str) -> Vec<edifact_rs::Segment<'static>> {
+    // Leak the string so we get 'static lifetime — acceptable in tests only.
+    let s: &'static str = Box::leak(input.to_owned().into_boxed_str());
+    edifact_rs::from_bytes(s.as_bytes())
+        .collect::<Result<_, _>>()
+        .expect("fixture should parse")
+}
+
+// ── F-029 Test 1: group rule fires only for the scoped group ──────────────────
+
+/// A rule scoped to "SG5" must NOT fire when DTM appears only in SG1.
+#[test]
+fn group_rule_scoped_to_sg5_does_not_fire_when_dtm_only_in_sg1() {
+    // DTM is in SG1 (after RFF), not in SG5 (LOC).  Rule: DTM must be in SG5.
+    let input = "UNH+1+MSCONS:D:04B:UN'RFF+Z13:REF1'DTM+137:20230101:102'LOC+172+LOC1'UNT+5+1'";
+    let segs = parse_segs(input);
+    let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+
+    let pack = ProfileRulePack::new("TEST")
+        .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
+    let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+
+    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    // DTM is present in SG1 but NOT in SG5, so the rule should fire.
+    assert!(
+        report.has_errors(),
+        "expected error: DTM missing from SG5 — got: {report}"
+    );
+    let issue = report.errors().first().expect("at least one error");
+    assert_eq!(issue.segment_group.as_deref(), Some("SG5"));
+    assert_eq!(issue.rule_id.as_deref(), Some("SG5-DTM-M"));
+}
+
+/// A rule scoped to "SG5" must NOT fire when DTM is present in SG5.
+#[test]
+fn group_rule_does_not_fire_when_segment_present_in_scoped_group() {
+    // DTM inside SG5 (after LOC).
+    let input = "UNH+1+MSCONS:D:04B:UN'LOC+172+LOC1'DTM+137:20230101:102'UNT+3+1'";
+    let segs = parse_segs(input);
+    let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+
+    let pack = ProfileRulePack::new("TEST")
+        .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
+    let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+
+    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    assert!(
+        report.is_valid(),
+        "expected no errors (DTM is present in SG5): {report}"
+    );
+}
+
+// ── F-029 Test 2: forbid_segment_in_group ─────────────────────────────────────
+
+#[test]
+fn forbid_segment_in_group_fires_when_segment_present() {
+    // UNS must not appear in SG5.
+    let input = "UNH+1+MSCONS:D:04B:UN'LOC+172+LOC1'UNS+D'UNT+3+1'";
+    let segs = parse_segs(input);
+    let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+
+    let pack = ProfileRulePack::new("TEST")
+        .forbid_segment_in_group("SG5", "UNS", "SG5-UNS-F");
+    let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+
+    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    assert!(report.has_errors(), "expected error: UNS in SG5 — {report}");
+    let issue = report.errors().first().unwrap();
+    assert_eq!(issue.segment_group.as_deref(), Some("SG5"));
+}
+
+#[test]
+fn forbid_segment_in_group_does_not_fire_when_segment_absent() {
+    let input = "UNH+1+MSCONS:D:04B:UN'LOC+172+LOC1'DTM+137:20230101:102'UNT+3+1'";
+    let segs = parse_segs(input);
+    let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+
+    let pack = ProfileRulePack::new("TEST")
+        .forbid_segment_in_group("SG5", "UNS", "SG5-UNS-F");
+    let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+
+    assert!(ctx.validate_lenient_grouped(&tree, &segs).is_valid());
+}
+
+// ── F-029 Test 3: cross-group non-contamination ───────────────────────────────
+
+/// The same segment tag in two different groups must produce independent issues:
+/// a rule on SG5/DTM must not mark the SG1/DTM occurrence and vice-versa.
+#[test]
+fn group_rules_for_different_groups_do_not_cross_contaminate() {
+    // DTM in SG1 (after RFF) but not in SG5 (after LOC), and QTY in SG6 (after QTY trigger).
+    let input = "UNH+1+MSCONS:D:04B:UN'RFF+Z13:R1'DTM+137:20230101:102'LOC+172+L1'QTY+220:100'UNT+5+1'";
+    let segs = parse_segs(input);
+    let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+
+    // SG1 rule: require DTM (present → no error)
+    // SG5 rule: require DTM (absent in SG5 → error)
+    let pack = ProfileRulePack::new("TEST")
+        .require_segment_in_group("SG1", "DTM", "SG1-DTM-M")
+        .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
+    let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+
+    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    // Exactly one error (SG5 missing DTM), not two.
+    assert_eq!(report.errors().len(), 1, "expected 1 error; got {report}");
+    assert_eq!(
+        report.errors()[0].rule_id.as_deref(),
+        Some("SG5-DTM-M"),
+        "the error must be for SG5, not SG1"
+    );
+}
+
+// ── F-029 Test 4: segment_group auto-stamped ──────────────────────────────────
+
+#[test]
+fn group_rule_issues_are_auto_stamped_with_group_name() {
+    let input = "UNH+1+MSCONS:D:04B:UN'LOC+172+L1'UNT+2+1'";
+    let segs = parse_segs(input);
+    let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+
+    let pack = ProfileRulePack::new("TEST")
+        .require_segment_in_group("SG5", "QTY", "SG5-QTY-M");
+    let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+
+    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    assert!(report.has_errors());
+    // Auto-stamp: segment_group must equal the group definition name.
+    for issue in report.errors() {
+        assert_eq!(
+            issue.segment_group.as_deref(),
+            Some("SG5"),
+            "issue must be auto-stamped with SG5"
+        );
+    }
+}
+
+// ── F-029 Test 5: validate_lenient_grouped_owned ──────────────────────────────
+
+#[test]
+fn validate_lenient_grouped_owned_works_with_owned_segments() {
+    let input = b"UNH+1+MSCONS:D:04B:UN'LOC+172+L1'DTM+137:20230101:102'UNT+3+1'";
+    let owned = owned_segs(input);
+    let tree = group_owned_segments_indexed(&owned, SCHEMA, "ROOT");
+
+    let pack = ProfileRulePack::new("TEST")
+        .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
+    let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+
+    let report = ctx.validate_lenient_grouped_owned(&tree, &owned);
+    assert!(report.is_valid(), "DTM present in SG5 — no errors expected: {report}");
+}
+
+// ── F-029 Test 6: multiple group occurrences (repetition) ────────────────────
+
+/// When SG5 repeats, the rule fires per-occurrence.
+#[test]
+fn group_rule_fires_per_occurrence_when_group_repeats() {
+    // Two SG5 groups: first has DTM, second does not.
+    let input = "UNH+1+MSCONS:D:04B:UN'LOC+172+L1'DTM+137:20230101:102'LOC+172+L2'UNT+4+1'";
+    let segs = parse_segs(input);
+    let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+
+    let pack = ProfileRulePack::new("TEST")
+        .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
+    let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+
+    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    // One SG5 is missing DTM → exactly one error.
+    assert_eq!(
+        report.errors().len(),
+        1,
+        "exactly one SG5 missing DTM: {report}"
+    );
+}
+
+// ── F-029 Test 7: with_scoped_group_rule_fn custom closure ───────────────────
+
+#[test]
+fn custom_scoped_group_rule_fn_fires_and_sets_segment_group() {
+    let input = "UNH+1+MSCONS:D:04B:UN'LOC+172+L1'QTY+220:0'UNT+3+1'";
+    let segs = parse_segs(input);
+    let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+
+    let pack = ProfileRulePack::new("TEST").with_scoped_group_rule_fn(
+        "SG6",
+        "SG6-QTY-NONZERO",
+        |_group, group_segs, _ctx, issues| {
+            for s in group_segs.iter().filter(|s| s.tag == "QTY") {
+                let qty_val = s
+                    .get_element(0)
+                    .and_then(|e| e.get_component(1))
+                    .unwrap_or("0");
+                if qty_val == "0" {
+                    issues.push(
+                        ValidationIssue::new(
+                            ValidationSeverity::Warning,
+                            "QTY value is zero in SG6",
+                        )
+                        .with_segment("QTY")
+                        .with_rule_id("SG6-QTY-NONZERO"),
+                    );
+                }
+            }
+        },
+    );
+    let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+
+    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    assert!(!report.warnings().is_empty(), "expected zero-qty warning");
+    assert_eq!(
+        report.warnings()[0].segment_group.as_deref(),
+        Some("SG6"),
+        "warning must be auto-stamped with SG6"
+    );
+}
+
+// ── F-029 Test 8: message-type scoping works with group rules ─────────────────
+
+#[test]
+fn group_rules_respect_message_type_scoping() {
+    // Pack scoped to ORDERS; message is INVOIC → no group rules should fire.
+    let input = "UNH+1+INVOIC:D:96A:UN'LOC+172+L1'UNT+2+1'";
+    let segs = parse_segs(input);
+    let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+
+    let pack = ProfileRulePack::new("ORDERS-ONLY")
+        .for_message_type("ORDERS")
+        .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
+    let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+
+    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    assert!(
+        report.is_valid(),
+        "INVOIC message: ORDERS-scoped group rules must not fire: {report}"
+    );
+}
+
+// ── F-029 Test 9: flat + group phases both run ─────────────────────────────────
+
+#[test]
+fn flat_and_group_validation_both_run_in_grouped_mode() {
+    // Flat rule: BGM must be present (it's absent).
+    // Group rule: DTM must be in SG5 (also absent).
+    let input = "UNH+1+MSCONS:D:04B:UN'LOC+172+L1'UNT+2+1'";
+    let segs = parse_segs(input);
+    let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+
+    let pack = ProfileRulePack::new("TEST")
+        .require_segment("BGM", "BGM-M")
+        .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
+    let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+
+    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    // Both a flat error and a group error should appear.
+    let rule_ids: Vec<Option<&str>> = report
+        .errors()
+        .iter()
+        .map(|i| i.rule_id.as_deref())
+        .collect();
+    assert!(
+        rule_ids.contains(&Some("BGM-M")),
+        "flat rule BGM-M must fire: {report}"
+    );
+    assert!(
+        rule_ids.contains(&Some("SG5-DTM-M")),
+        "group rule SG5-DTM-M must fire: {report}"
+    );
+}

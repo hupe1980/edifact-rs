@@ -25,6 +25,7 @@ quote = "1"
 # redundant bool tag field per SmallVec instance. This is `unsafe`-sound per
 # smallvec's own safety guarantees and provides a measurable reduction in
 # struct size on hot paths (e.g., Element.components).
+serde = { version = "1", features = ["derive", "rc"] }
 smallvec = { version = "1", features = ["union"] }
 syn = { version = "2", features = ["full"] }
 thiserror = "2"

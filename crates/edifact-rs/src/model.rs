@@ -30,21 +30,15 @@ impl Span {
 
     /// Length of the span in bytes.
     ///
-    /// # Note on constness
+    /// # Panics
     ///
-    /// This method is intentionally **not** `const fn` (changed in 0.7.0) so that
-    /// the `debug_assert!` overflow guard is included in debug builds.  If you need
-    /// span arithmetic in a `const` context use `span.end - span.start` directly
-    /// (both fields are `pub`).
+    /// Panics in debug **and** release builds when `end < start` (inverted span).
+    /// Use `saturating_sub` directly if you need a non-panicking variant.
     #[inline]
     pub fn len(self) -> usize {
-        debug_assert!(
-            self.start <= self.end,
-            "Span::len: start ({}) > end ({})",
-            self.start,
-            self.end
-        );
-        self.end - self.start
+        self.end
+            .checked_sub(self.start)
+            .unwrap_or_else(|| panic!("Span::len: end ({}) < start ({})", self.end, self.start))
     }
 
     /// Returns `true` if the span covers zero bytes.

@@ -178,11 +178,12 @@ pub mod ser;
 // ── flat re-exports: core ─────────────────────────────────────────────────────
 pub use envelope::{
     InterchangeEnvelope, MessageEnvelope, MessageIdentifier, parse_unh, validate_envelope,
-    validate_envelope_lenient,
+    validate_envelope_from_owned, validate_envelope_lenient, validate_envelope_lenient_from_owned,
 };
 pub use error::{EdifactError, IoError, ValidationIssue, ValidationReport, ValidationSeverity};
 pub use group::{
-    GroupDef, SegmentGroup, SegmentGroupIndexed, group_segments, group_segments_indexed,
+    GroupDef, SegmentGroup, SegmentGroupIndexed, group_owned_segments,
+    group_owned_segments_indexed, group_segments, group_segments_indexed,
 };
 pub use model::{
     BorrowedElement, BorrowedSegment, Element, OwnedElement, OwnedSegment, Segment, Span,
@@ -332,7 +333,10 @@ impl<'a> Iterator for FromBytesIter<'a> {
                 return None;
             }
         }
-        // max_input_bytes guard
+        // max_input_bytes guard — uses absolute byte offset from the input start.
+        // `bytes_consumed` holds `seg.span.end` of the last yielded segment, which
+        // is an absolute position in the input slice and therefore naturally includes
+        // the 9-byte UNA header and the segment terminator character.
         if let Some(max) = self.bytes_remaining {
             if self.bytes_consumed >= max {
                 self.parser = None;
@@ -345,8 +349,11 @@ impl<'a> Iterator for FromBytesIter<'a> {
             if let Some(ref mut remaining) = self.segments_remaining {
                 *remaining = remaining.saturating_sub(1);
             }
-            // Update byte counter from segment span and eagerly stop if exhausted
-            self.bytes_consumed = self.bytes_consumed.saturating_add(seg.span.len() as u64);
+            // Track the absolute input position at the end of this segment.
+            // `seg.span.end` is the byte offset just past the segment terminator —
+            // a monotonically increasing absolute cursor that automatically accounts
+            // for the UNA header, element/component separators, and terminators.
+            self.bytes_consumed = seg.span.end as u64;
             if let Some(max) = self.bytes_remaining {
                 if self.bytes_consumed >= max {
                     self.parser = None;
@@ -375,9 +382,11 @@ pub fn from_bytes(input: &[u8]) -> FromBytesIter<'_> {
 /// - `max_segment_bytes`: returns [`EdifactError::SegmentTooLong`] if a single segment
 ///   exceeds the threshold.
 /// - `max_segments`: stops the iterator after this many segments have been yielded.
-/// - `max_input_bytes`: stops the iterator once this many bytes have been consumed
-///   (byte count is approximated from segment spans; the last segment that pushes
-///   consumption over the threshold is still returned).
+/// - `max_input_bytes`: stops the iterator once this many bytes have been consumed.
+///   The byte count uses the absolute input position (i.e. `Segment::span.end` after
+///   each segment is yielded), so it correctly accounts for the 9-byte UNA header and
+///   segment terminators.  The last segment whose end position exceeds the limit is still
+///   returned; processing stops before fetching the next one.
 ///
 /// Pass `ReaderConfig::default()` to use the default 64 KiB per-segment limit with
 /// no segment-count or byte-budget cap.
@@ -430,7 +439,9 @@ pub fn from_bytes_with_config<'a>(
 /// segment, `Some(Err(EdifactError))` for a parse or I/O failure, and `None`
 /// when the end of the stream has been reached.
 pub fn from_reader<R: Read>(reader: R) -> FromReaderIter<R> {
-    from_reader_iter(reader)
+    FromReaderIter {
+        inner: parser::from_reader_stream(reader),
+    }
 }
 
 /// Parse a reader into an owned `Vec` of all segments.
@@ -498,7 +509,11 @@ pub fn from_bytes_owned_with_config(
 ///
 /// This keeps memory bounded by yielding segments incrementally instead of
 /// materializing the full interchange up front.
-pub fn from_reader_iter<R: Read>(reader: R) -> FromReaderIter<R> {
+///
+/// # Deprecation
+///
+/// Use [`from_reader`] instead — this function is an alias kept for internal use.
+pub(crate) fn from_reader_iter<R: Read>(reader: R) -> FromReaderIter<R> {
     FromReaderIter {
         inner: parser::from_reader_stream(reader),
     }
@@ -560,24 +575,23 @@ pub fn segments_to_bytes_owned(segments: &[OwnedSegment]) -> Result<Vec<u8>, Edi
 
 /// Validate the envelope structure of an owned-segment slice.
 ///
-/// Convenience wrapper around [`validate_envelope`] that accepts
-/// `&[OwnedSegment]` directly, avoiding a manual `.as_borrowed()` conversion.
+/// Convenience wrapper that accepts `&[OwnedSegment]` without requiring a
+/// manual conversion to borrowed segments.  Unlike the previous implementation,
+/// no intermediate `Vec<Segment<'_>>` is allocated — segments are read directly.
 ///
 /// # Errors
 ///
 /// Returns an error if the envelope is structurally invalid.
 pub fn validate_envelope_owned(segments: &[OwnedSegment]) -> Result<(), EdifactError> {
-    let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
-    envelope::validate_envelope(&borrowed).map(|_| ())
+    envelope::validate_envelope_from_owned(segments).map(|_| ())
 }
 
 /// Lenient envelope validation over owned segments — collects all errors.
 ///
-/// Convenience wrapper around [`validate_envelope_lenient`] that accepts
+/// Convenience wrapper around [`validate_envelope_lenient_from_owned`] that accepts
 /// `&[OwnedSegment]` directly.  Returns an empty `Vec` when the envelope is valid.
 pub fn validate_envelope_lenient_owned(segments: &[OwnedSegment]) -> Vec<EdifactError> {
-    let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
-    envelope::validate_envelope_lenient(&borrowed)
+    envelope::validate_envelope_lenient_from_owned(segments)
 }
 
 #[cfg(test)]

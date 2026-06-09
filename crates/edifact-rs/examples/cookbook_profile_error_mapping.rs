@@ -78,9 +78,9 @@ fn build_orders_pack() -> ProfileRulePack {
         });
 
     ProfileRulePack::new("ORDERS-COMBINED")
-        .merge(function_code_pack)
+        .merge_with_override(function_code_pack)
         .expect("compatible packs")
-        .merge(reference_pack)
+        .merge_with_override(reference_pack)
         .expect("compatible packs")
 }
 

@@ -1,0 +1,5 @@
+[toolchain]
+# Pin the toolchain to the declared MSRV so contributors and CI all use the
+# same version.  Bumping this file is the authoritative MSRV bump.
+channel = "1.85"
+components = ["rustfmt", "clippy"]

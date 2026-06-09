@@ -343,6 +343,7 @@ dependencies = [
  "expect-test",
  "memchr",
  "miette",
+ "serde",
  "smallvec",
  "thiserror",
  "tokio",
