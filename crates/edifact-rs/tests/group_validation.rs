@@ -315,3 +315,48 @@ fn flat_and_group_validation_both_run_in_grouped_mode() {
         "group rule SG5-DTM-M must fire: {report}"
     );
 }
+
+// ── segment_occurrence semantics: occurrence among matching segments, not absolute ─
+
+#[test]
+fn forbid_segment_segment_occurrence_is_relative_not_absolute() {
+    // Three QTY segments at absolute positions 1, 2, 3 in the message.
+    // forbid_segment fires for each; occurrences must be 0, 1, 2 (relative).
+    let segs = parse_segs("UNH+1+ORDERS:D:96A:UN'QTY+21:10'QTY+21:20'QTY+21:30'UNT+4+1'");
+    let pack = ProfileRulePack::new("TEST").forbid_segment("QTY", "TEST-FORBID-QTY");
+    let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+    let report = ctx.validate_lenient(&segs);
+    let mut occurrences: Vec<u16> = report
+        .errors()
+        .iter()
+        .filter_map(|i| i.segment_occurrence)
+        .collect();
+    occurrences.sort_unstable();
+    assert_eq!(
+        occurrences,
+        vec![0, 1, 2],
+        "segment_occurrence must be 0-based relative to matching segments, not absolute positions"
+    );
+}
+
+#[test]
+fn forbid_segment_in_group_occurrence_is_relative_not_absolute() {
+    // SG5 group (trigger: LOC) with two QTY segments at positions 1 and 2 within the group.
+    // LOC is at absolute 0 within the group slice; occurrences for QTY must be 0 and 1.
+    let segs = parse_segs("UNH+1+MSCONS:D:04B:UN'LOC+172+L1'QTY+21:10'QTY+21:20'UNT+4+1'");
+    let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+    let pack = ProfileRulePack::new("TEST").forbid_segment_in_group("SG5", "QTY", "TEST-SG5-QTY");
+    let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    let mut occurrences: Vec<u16> = report
+        .errors()
+        .iter()
+        .filter_map(|i| i.segment_occurrence)
+        .collect();
+    occurrences.sort_unstable();
+    assert_eq!(
+        occurrences,
+        vec![0, 1],
+        "segment_occurrence in group must count only matching segments, not absolute group slice position"
+    );
+}

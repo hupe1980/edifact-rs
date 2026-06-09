@@ -207,7 +207,7 @@ Combine `message_windows_from_reader` with `ValidationContext` to validate each
 message as it arrives, without buffering the whole interchange:
 
 ```rust
-use edifact_rs:{
+use edifact_rs::{
     ValidationContext, ProfileRulePack, ValidationIssue, ValidationSeverity,
     message_windows_from_reader, OwnedSegment,
 };

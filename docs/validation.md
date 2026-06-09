@@ -395,13 +395,27 @@ for a complete example.
 
 Group-aware validation fires `ProfileRulePack` group rules once per segment-group
 occurrence (e.g. once per `SG5` instance) rather than once across the entire
-message. Supply a `GroupDef` schema to describe your group tree:
+message. First define a `&'static [GroupDef]` schema, build a `SegmentGroupIndexed`
+tree with `group_segments_indexed`, then pass the tree to `validate_lenient_grouped`:
 
 ```rust
 use edifact_rs::{
-    ValidationContext, ProfileRulePack, GroupDef,
+    ValidationContext, ProfileRulePack,
+    group::{GroupDef, group_segments_indexed},
     from_bytes,
 };
+
+// Schema: SG5 starts at LIN and contains an SG6 sub-group starting at QTY.
+// GroupDef is a plain struct with &'static [GroupDef] children — use a static.
+static SCHEMA: &[GroupDef] = &[GroupDef {
+    name: "SG5",
+    trigger: "LIN",
+    children: &[GroupDef {
+        name: "SG6",
+        trigger: "QTY",
+        children: &[],
+    }],
+}];
 
 let segs: Vec<_> = from_bytes(
     b"UNH+1+ORDERS:D:96A:UN'\
@@ -410,10 +424,8 @@ let segs: Vec<_> = from_bytes(
       UNT+5+1'"
 ).collect::<Result<_, _>>()?;
 
-// SG5 groups start at LIN and contain a QTY child:
-let schema = GroupDef::new("SG5", "LIN", vec![
-    GroupDef::new("SG6", "QTY", vec![]),
-]);
+// Build the indexed group tree (O(n × schema_depth), no segment clones):
+let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
 let pack = ProfileRulePack::new("ORDERS")
     .for_message_type("ORDERS")
@@ -424,8 +436,8 @@ let ctx = ValidationContext::builder()
     .with_profile_pack(pack)
     .build();
 
-// validate_lenient_grouped runs both the flat pass and the group pass:
-let report = ctx.validate_lenient_grouped(&segs, &schema);
+// validate_lenient_grouped runs the flat pass then the group pass:
+let report = ctx.validate_lenient_grouped(&tree, &segs);
 println!("{} error(s)", report.errors.len());
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
@@ -433,12 +445,12 @@ println!("{} error(s)", report.errors.len());
 For owned segments (e.g. from `message_windows_from_reader`), use the `_owned`
 variants:
 
-| Method | Segment type | Mode |
-|---|---|---|
-| `validate_lenient_grouped(&segs, schema)` | `&[Segment<'_>]` | Collect all issues |
-| `validate_strict_grouped(&segs, schema)` | `&[Segment<'_>]` | `Err` on first error/critical |
-| `validate_lenient_grouped_owned(&segs, schema)` | `&[OwnedSegment]` | Collect all issues |
-| `validate_strict_grouped_owned(&segs, schema)` | `&[OwnedSegment]` | `Err` on first error/critical |
+| Method | Args | Segment type | Mode |
+|---|---|---|---|
+| `validate_lenient_grouped(root, segs)` | `(&SegmentGroupIndexed, &[Segment])` | borrowed | Collect all issues |
+| `validate_strict_grouped(root, segs)` | `(&SegmentGroupIndexed, &[Segment])` | borrowed | `Err` on first error/critical |
+| `validate_lenient_grouped_owned(root, segs)` | `(&SegmentGroupIndexed, &[OwnedSegment])` | owned | Collect all issues |
+| `validate_strict_grouped_owned(root, segs)` | `(&SegmentGroupIndexed, &[OwnedSegment])` | owned | `Err` on first error/critical |
 
 See [Profile Packs — Group-scoped rules](profile-packs.md#group-scoped-rules) for
 how to build group rules.

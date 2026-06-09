@@ -298,7 +298,7 @@ impl ProfileRulePack {
     pub fn forbid_segment(self, tag: &'static str, rule_id: impl Into<Arc<str>>) -> Self {
         let id: Arc<str> = rule_id.into();
         self.with_named_stateless_rule_fn(id.clone(), move |segments, issues| {
-            for (occ, _s) in segments.iter().enumerate().filter(|(_, s)| s.tag == tag) {
+            for (occ, _s) in segments.iter().filter(|s| s.tag == tag).enumerate() {
                 issues.push(
                     ValidationIssue::new(
                         ValidationSeverity::Error,
@@ -324,7 +324,7 @@ impl ProfileRulePack {
     ) -> Self {
         let id: Arc<str> = rule_id.into();
         self.with_named_stateless_rule_fn(id.clone(), move |segments, issues| {
-            for (occ, s) in segments.iter().enumerate().filter(|(_, s)| s.tag == tag) {
+            for (occ, s) in segments.iter().filter(|s| s.tag == tag).enumerate() {
                 let actual = s
                     .get_element(element as usize)
                     .and_then(|e| e.get_component(component as usize));
@@ -493,7 +493,7 @@ impl ProfileRulePack {
             group_scope,
             id.clone(),
             move |_group, segs, _ctx, issues| {
-                for (occ, _s) in segs.iter().enumerate().filter(|(_, s)| s.tag == tag) {
+                for (occ, _s) in segs.iter().filter(|s| s.tag == tag).enumerate() {
                     issues.push(
                         ValidationIssue::new(
                             ValidationSeverity::Error,
@@ -524,7 +524,7 @@ impl ProfileRulePack {
             group_scope,
             id.clone(),
             move |_group, segs, _ctx, issues| {
-                for (occ, s) in segs.iter().enumerate().filter(|(_, s)| s.tag == tag) {
+                for (occ, s) in segs.iter().filter(|s| s.tag == tag).enumerate() {
                     let actual = s
                         .get_element(element as usize)
                         .and_then(|e| e.get_component(component as usize));

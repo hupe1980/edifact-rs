@@ -354,15 +354,26 @@ group instance its own isolated segment list. This lets you enforce intra-group
 invariants (e.g. every `SG5` must contain at least one `LIN`) without writing manual
 tree-walking code.
 
+> **Note on `GroupDef`**: `GroupDef` is a plain struct with `pub name`, `pub trigger`,
+> and `pub children: &'static [GroupDef]` fields — no `new()` constructor exists.
+> Define your schema as a `static` or `const`.
+
 ### Convenience builders
 
 ```rust
-use edifact_rs::{ProfileRulePack, GroupDef};
+use edifact_rs::{ProfileRulePack, group::GroupDef};
 
 // Schema: SG5 contains LIN and zero or more SG6 children.
-let schema = GroupDef::new("SG5", "LIN", vec![
-    GroupDef::new("SG6", "RFF", vec![]),
-]);
+// GroupDef uses &'static [GroupDef] children — must be a static.
+static ORDERS_SCHEMA: &[GroupDef] = &[GroupDef {
+    name: "SG5",
+    trigger: "LIN",
+    children: &[GroupDef {
+        name: "SG6",
+        trigger: "RFF",
+        children: &[],
+    }],
+}];
 
 let pack = ProfileRulePack::new("ORDERS-GROUPS")
     .for_message_type("ORDERS")
@@ -374,26 +385,39 @@ let pack = ProfileRulePack::new("ORDERS-GROUPS")
     .require_qualifier_in_group("SG5", "LIN", 0, 0, "1", "ORDERS-SG5-LIN-Q1");
 ```
 
+Use `group::group_segments_indexed` to build the tree, then pass it to
+`ctx.validate_lenient_grouped(&tree, &segs)`.
+
 ### Custom group rule closure
 
-For full control, supply a closure via `with_scoped_group_rule_fn`:
+For full control, supply a closure via `with_scoped_group_rule_fn(group_scope, rule_id, closure)`.
+The closure receives `(group: &SegmentGroupIndexed, segs: &[Segment], ctx: &ValidationRuleContext, issues: &mut Vec<ValidationIssue>)`:
 
 ```rust
-# use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
+use edifact_rs::{
+    ProfileRulePack, ValidationIssue, ValidationSeverity,
+    group::SegmentGroupIndexed,
+    validator::ValidationRuleContext,
+    Segment,
+};
+
 let pack = ProfileRulePack::new("ORDERS-GROUPS")
     .for_message_type("ORDERS")
     .with_scoped_group_rule_fn(
-        "SG5",                        // fires only inside SG5 occurrences
-        |group_name, segs, issues| {
-            let has_qty = segs.iter().any(|s| s.tag == "QTY");
-            if !has_qty {
+        "SG5",              // fires only inside SG5 occurrences
+        "ORDERS-SG5-QTY-M", // stable rule id
+        |_group: &SegmentGroupIndexed,
+         segs: &[Segment<'_>],
+         _ctx: &ValidationRuleContext<'_>,
+         issues: &mut Vec<ValidationIssue>| {
+            if !segs.iter().any(|s| s.tag == "QTY") {
                 issues.push(
                     ValidationIssue::new(
                         ValidationSeverity::Error,
                         "every SG5 must contain a QTY segment",
                     )
                     .with_rule_id("ORDERS-SG5-QTY-M")
-                    .with_segment_group(group_name),
+                    .with_segment_group("SG5"),
                 );
             }
         },

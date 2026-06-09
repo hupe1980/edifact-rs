@@ -5,7 +5,7 @@
 //!
 //! - Build packs from closures with `.with_rule_fn`
 //! - Restrict a pack to a specific message type with `.for_message_type`
-//! - Merge multiple packs into one with `.merge`
+//! - Merge multiple packs into one with `extend_from` / `merge_with_override`
 //! - Assign stable rule IDs and filter by prefix with `filter_by_rule_prefix`
 //!
 //! Run:
@@ -66,7 +66,10 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
         });
 
     // ── Merge and validate ────────────────────────────────────────────────────
-    // `.merge` combines both packs into one; rules run in declaration order.
+    // `merge_with_override` combines both packs: rules with matching IDs in
+    // `other` replace the corresponding rule in `self`; unmatched rules are
+    // appended.  Use `extend_from` instead when you want the base rules to
+    // always run first without deduplication.
     let pack = ProfileRulePack::new("ORDERS-COMBINED")
         .merge_with_override(document_pack)?
         .merge_with_override(reference_pack)?;
