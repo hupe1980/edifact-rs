@@ -1,8 +1,8 @@
-error: segment tag must be exactly 3 ASCII uppercase letters; got "bgm"
-  --> tests/ui/fail_invalid_segment_tag.rs:16:21
+error: unknown field-level `edifact` key; expected `element`, `component`, `composite`, `group`, `qualifier`, or `required`
+  --> tests/ui/fail_qualifier_from_on_field.rs:23:28
    |
-16 | #[edifact(segment = "bgm")]
-   |                     ^^^^^
+23 |     #[edifact(element = 0, qualifier_from = 1)]
+   |                            ^^^^^^^^^^^^^^
 
 warning: unused imports: `composite_element`, `find_qualified_segment_owned`, `find_qualified_segment`, `find_segment_owned`, `find_segment`, and `find_segments_typed`
  --> tests/ui/support.rs

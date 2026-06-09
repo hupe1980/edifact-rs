@@ -78,7 +78,7 @@ fn merged_packs_accumulate_rules() {
         });
 
     let pack = document_rule
-        .merge(reference_rule)
+        .merge_with_override(reference_rule)
         .expect("compatible packs");
     assert_eq!(pack.rule_count(), 2);
 
@@ -104,7 +104,7 @@ fn merged_packs_accumulate_rules() {
 #[test]
 fn builder_can_merge_existing_packs() {
     let pack = ProfileRulePack::new("COMBINED")
-        .merge(
+        .merge_with_override(
             ProfileRulePack::new("ONE")
                 .for_message_type("ORDERS")
                 .with_stateless_rule_fn(|_, issues| {
@@ -115,7 +115,7 @@ fn builder_can_merge_existing_packs() {
                 }),
         )
         .expect("merge ONE")
-        .merge(
+        .merge_with_override(
             ProfileRulePack::new("TWO")
                 .for_message_type("INVOIC")
                 .with_stateless_rule_fn(|_, issues| {
@@ -243,7 +243,7 @@ fn pack_composition_preserves_compatible_release_scope() {
         .for_message_type("ORDERS")
         .with_stateless_rule_fn(|_, _issues| {});
 
-    let merged = base.merge(delta).expect("compatible scopes");
+    let merged = base.merge_with_override(delta).expect("compatible scopes");
     assert_eq!(merged.release(), Some("5.5.3a"));
 
     let extended = ProfileRulePack::new("EXTENDED")
@@ -259,11 +259,11 @@ fn incompatible_release_scopes_return_err_not_panic() {
     let a = ProfileRulePack::new("A").for_release("5.5.3a");
     let b = ProfileRulePack::new("B").for_release("5.5.4");
 
-    let err = a.merge(b).unwrap_err();
+    let err = a.merge_with_override(b).unwrap_err();
     assert!(
         matches!(
             err,
-            EdifactError::IncompatibleReleaseScopes { ref current, ref incoming }
+            EdifactError::IncompatibleReleaseScopes { ref current, ref incoming, .. }
             if current == "5.5.3a" && incoming == "5.5.4"
         ),
         "expected IncompatibleReleaseScopes, got: {err:?}"

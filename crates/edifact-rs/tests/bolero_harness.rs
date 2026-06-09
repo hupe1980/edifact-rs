@@ -564,3 +564,92 @@ fn fuzz_validate_envelope_lenient_no_panic() {
             let _ = validate_envelope_lenient(&segs);
         });
 }
+
+// ── F-030: ProfileRulePack + group validation never panics ────────────────────
+
+/// Fuzz property: parsing arbitrary bytes and running them through a
+/// `ProfileRulePack` with representative flat and group rules must never panic.
+///
+/// This exercises:
+/// - `validate_batch` (flat rules: require_segment, forbid_segment, require_qualifier)
+/// - `validate_group_batch` (group rules: require_segment_in_group, forbid_segment_in_group)
+/// - `group_segments_indexed` (segment tree construction)
+/// - `validate_lenient_grouped` (combined flat + group pass)
+#[test]
+fn fuzz_profile_rule_pack_no_panic() {
+    use edifact_rs::{
+        ProfileRulePack, ValidationContext,
+        group::{GroupDef, group_segments_indexed},
+    };
+
+    static FUZZ_SCHEMA: &[GroupDef] = &[
+        GroupDef {
+            name: "SG1",
+            trigger: "BGM",
+            children: &[],
+        },
+        GroupDef {
+            name: "SG2",
+            trigger: "NAD",
+            children: &[GroupDef {
+                name: "SG3",
+                trigger: "RFF",
+                children: &[],
+            }],
+        },
+    ];
+
+    check!()
+        .with_type::<Vec<u8>>()
+        .cloned()
+        .for_each(|input: Vec<u8>| {
+            let Ok(segs) = from_bytes(&input).collect::<Result<Vec<_>, _>>() else {
+                return;
+            };
+            // Build a representative pack with flat rules and group-scoped rules.
+            let pack = ProfileRulePack::new("FUZZ")
+                .require_segment("UNH", "UNH-M")
+                .forbid_segment("UNK", "UNK-F")
+                .require_qualifier("UNH", 1, 0, "ORDERS", "UNH-ORDERS")
+                .require_segment_in_group("SG1", "LOC", "SG1-LOC-M")
+                .forbid_segment_in_group("SG2", "UNS", "SG2-UNS-F");
+            let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+            // Flat validation must not panic.
+            let _ = ctx.validate_lenient(&segs);
+            // Build the segment group tree — must not panic.
+            let tree = group_segments_indexed(&segs, FUZZ_SCHEMA, "ROOT");
+            // Grouped validation must not panic.
+            let _ = ctx.validate_lenient_grouped(&tree, &segs);
+        });
+}
+
+/// Fuzz property: group_segments_indexed on arbitrary byte input must never panic.
+#[test]
+fn fuzz_group_segments_indexed_no_panic() {
+    use edifact_rs::group::{GroupDef, group_segments_indexed};
+
+    static DEEP_SCHEMA: &[GroupDef] = &[GroupDef {
+        name: "G1",
+        trigger: "AAA",
+        children: &[GroupDef {
+            name: "G2",
+            trigger: "BBB",
+            children: &[GroupDef {
+                name: "G3",
+                trigger: "CCC",
+                children: &[],
+            }],
+        }],
+    }];
+
+    check!()
+        .with_type::<Vec<u8>>()
+        .cloned()
+        .for_each(|input: Vec<u8>| {
+            let Ok(segs) = from_bytes(&input).collect::<Result<Vec<_>, _>>() else {
+                return;
+            };
+            // Must not panic regardless of segment content.
+            let _ = group_segments_indexed(&segs, DEEP_SCHEMA, "ROOT");
+        });
+}

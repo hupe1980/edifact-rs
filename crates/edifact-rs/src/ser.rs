@@ -126,48 +126,6 @@ impl_serialize_int!(
     u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize, bool
 );
 
-// Rust's float Display picks the shortest round-trip decimal representation,
-// which may be fixed-point or scientific notation depending on the magnitude.
-// A 320-byte stack buffer covers all known finite f32/f64 Display forms;
-// if the buffer is somehow exceeded we fall back to a heap-allocated String
-// so no panic ever escapes to the caller.
-macro_rules! impl_serialize_float {
-    ($($t:ty),+ $(,)?) => {
-        $(
-            impl EdifactSerialize for $t {
-                fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
-                    use std::io::Write as _;
-                    let mut buf = [0u8; 320];
-                    let mut w: &mut [u8] = &mut buf;
-                    if write!(w, "{self}").is_ok() {
-                        let written = 320 - w.len();
-                        // SAFETY: float Display only emits ASCII digits and punctuation.
-                        let s = std::str::from_utf8(&buf[..written]).map_err(|_| EdifactError::InvalidUtf8)?;
-                        emitter.emit(EdifactEvent::Element { value: s })
-                    } else {
-                        // Extraordinary case: format via heap to avoid any panic.
-                        let s = format!("{self}");
-                        emitter.emit(EdifactEvent::Element { value: &s })
-                    }
-                }
-            }
-        )+
-    };
-}
-
-impl_serialize_float!(f32, f64);
-
-// ── decimal-mark-aware bare float wrappers ────────────────────────────────────
-//
-// The bare f32/f64 impls above always use `.` as the decimal separator
-// (Rust's standard Display).  They are intentionally kept as the default to
-// avoid a performance penalty on the common case.  If your interchange
-// declares a different decimal mark in UNA byte 5 (e.g. `,`), you MUST wrap
-// the value in `DecimalFloat` — the bare impls will produce **silent data
-// corruption** for non-`.` interchanges.
-//
-// See also: the `DecimalFloat` / `DecimalFloatDisplay` section below.
-
 // ── decimal-mark-aware float wrapper ─────────────────────────────────────────
 
 /// Decimal-mark-aware wrapper for `f32` or `f64` serialization.
@@ -176,12 +134,10 @@ impl_serialize_float!(f32, f64);
 /// decimal separator.  EDIFACT interchanges can declare a different decimal mark
 /// in the UNA service string — most commonly `,` in German EDI\@Energy messages.
 ///
-/// # Why you need this
+/// # Required for float serialization
 ///
-/// The bare `f32`/`f64` [`EdifactSerialize`] impls are correct for standard (`.`)
-/// interchanges **but produce silent data corruption for any interchange that
-/// declares `decimal_mark != b'.'`**.  Wrap the value in `DecimalFloat` whenever
-/// the interchange may use a non-`.` decimal mark:
+/// `edifact-rs` intentionally provides **no** blanket `EdifactSerialize` impl for
+/// `f32`/`f64`.  This forces callers to make the decimal-mark intent explicit:
 ///
 /// ```
 /// use edifact_rs::ser::DecimalFloat;
@@ -401,9 +357,12 @@ mod tests {
 
     #[test]
     fn float_extremes_do_not_panic() {
+        use super::DecimalFloat;
         // Rust Display for f64 picks the shortest round-trip form; a 320-byte buffer covers all values.
         let mut emitter = VecEmitter::default();
-        f64::MAX.edifact_serialize(&mut emitter).unwrap();
+        DecimalFloat(f64::MAX)
+            .edifact_serialize(&mut emitter)
+            .unwrap();
         let s = match &emitter.events[0] {
             OwnedEdifactEvent::Element { value } => value.clone(),
             _ => panic!("expected Element event"),
@@ -411,7 +370,9 @@ mod tests {
         assert!(!s.is_empty());
         // f32::MAX too
         let mut emitter2 = VecEmitter::default();
-        f32::MAX.edifact_serialize(&mut emitter2).unwrap();
+        DecimalFloat(f32::MAX)
+            .edifact_serialize(&mut emitter2)
+            .unwrap();
         assert!(matches!(
             &emitter2.events[0],
             OwnedEdifactEvent::Element { .. }

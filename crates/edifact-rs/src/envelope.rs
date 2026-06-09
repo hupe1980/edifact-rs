@@ -3,7 +3,70 @@
 //! Validates UNB / UNH / UNT / UNZ envelope segment structure and count
 //! consistency — independently of business-rule (AHB) validation.
 
-use crate::{error::EdifactError, model::Segment};
+use crate::{OwnedSegment, error::EdifactError, model::Segment};
+
+// ── Sealed segment-access trait ──────────────────────────────────────────────
+
+/// Minimal read-only view over an EDIFACT segment, implemented by both
+/// [`Segment`] and [`OwnedSegment`].
+///
+/// Sealed so external crates cannot implement it; internal only.
+pub(crate) trait SegmentReader: sealed::Sealed {
+    fn tag(&self) -> &str;
+    fn span_start(&self) -> usize;
+    /// Extract `segments[elem_idx].components[comp_idx]`, or `None`.
+    fn component(&self, elem_idx: usize, comp_idx: usize) -> Option<&str>;
+
+    fn required_component_field(
+        &self,
+        elem_idx: usize,
+        comp_idx: usize,
+    ) -> Result<&str, EdifactError> {
+        self.component(elem_idx, comp_idx)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| EdifactError::MissingRequiredComponent {
+                tag: self.tag().to_owned(),
+                element_index: elem_idx,
+                component_index: comp_idx,
+            })
+    }
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for crate::model::Segment<'_> {}
+    impl Sealed for crate::OwnedSegment {}
+}
+
+impl SegmentReader for Segment<'_> {
+    #[inline]
+    fn tag(&self) -> &str {
+        self.tag
+    }
+    #[inline]
+    fn span_start(&self) -> usize {
+        self.span.start
+    }
+    #[inline]
+    fn component(&self, elem_idx: usize, comp_idx: usize) -> Option<&str> {
+        self.get_element(elem_idx)?.get_component(comp_idx)
+    }
+}
+
+impl SegmentReader for OwnedSegment {
+    #[inline]
+    fn tag(&self) -> &str {
+        &self.tag
+    }
+    #[inline]
+    fn span_start(&self) -> usize {
+        self.span.start
+    }
+    #[inline]
+    fn component(&self, elem_idx: usize, comp_idx: usize) -> Option<&str> {
+        self.component_str(elem_idx, comp_idx)
+    }
+}
 
 /// Extracted data from the `UNB` / `UNZ` interchange envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,12 +181,31 @@ pub fn parse_unh<'a>(unh: &'a Segment<'a>) -> Result<MessageIdentifier<'a>, Edif
 pub fn validate_envelope(
     segments: &[Segment<'_>],
 ) -> Result<(InterchangeEnvelope, Vec<MessageEnvelope>), EdifactError> {
+    validate_envelope_impl(segments)
+}
+
+/// Validate the EDIFACT interchange envelope for an owned-segment slice.
+///
+/// Identical to [`validate_envelope`] but accepts `&[OwnedSegment]` directly,
+/// eliminating the intermediate `Vec<Segment<'_>>` conversion.
+pub fn validate_envelope_from_owned(
+    segments: &[OwnedSegment],
+) -> Result<(InterchangeEnvelope, Vec<MessageEnvelope>), EdifactError> {
+    validate_envelope_impl(segments)
+}
+
+fn validate_envelope_impl<S: SegmentReader>(
+    segments: &[S],
+) -> Result<(InterchangeEnvelope, Vec<MessageEnvelope>), EdifactError> {
     // Functional group segments are not supported.  Detect them early so the
     // caller gets a clear diagnostic rather than a misleading segment-count
     // mismatch or `InvalidSegmentForMessage` buried deep in the parse.
-    if let Some(ung_or_une) = segments.iter().find(|s| s.tag == "UNG" || s.tag == "UNE") {
+    if let Some(ung_or_une) = segments
+        .iter()
+        .find(|s| s.tag() == "UNG" || s.tag() == "UNE")
+    {
         return Err(EdifactError::FunctionalGroupNotSupported {
-            offset: ung_or_une.span.start,
+            offset: ung_or_une.span_start(),
         });
     }
 
@@ -177,19 +259,34 @@ pub fn validate_envelope(
 /// returns immediately with only that error — the remaining structure is
 /// ambiguous and running further checks would produce misleading results.
 pub fn validate_envelope_lenient(segments: &[Segment<'_>]) -> Vec<EdifactError> {
+    validate_envelope_lenient_impl(segments)
+}
+
+/// Lenient validation over an owned-segment slice — collects all errors.
+///
+/// Identical to [`validate_envelope_lenient`] but accepts `&[OwnedSegment]`
+/// directly, eliminating the intermediate `Vec<Segment<'_>>` conversion.
+pub fn validate_envelope_lenient_from_owned(segments: &[OwnedSegment]) -> Vec<EdifactError> {
+    validate_envelope_lenient_impl(segments)
+}
+
+fn validate_envelope_lenient_impl<S: SegmentReader>(segments: &[S]) -> Vec<EdifactError> {
     let mut errors: Vec<EdifactError> = Vec::new();
 
     // Functional group check is always independent.
-    if let Some(ung_or_une) = segments.iter().find(|s| s.tag == "UNG" || s.tag == "UNE") {
+    if let Some(ung_or_une) = segments
+        .iter()
+        .find(|s| s.tag() == "UNG" || s.tag() == "UNE")
+    {
         errors.push(EdifactError::FunctionalGroupNotSupported {
-            offset: ung_or_une.span.start,
+            offset: ung_or_une.span_start(),
         });
         // UNG/UNE makes the rest of the envelope ambiguous — stop early.
         return errors;
     }
 
     // Run the normal path and, if it succeeds, we're done.
-    match validate_envelope(segments) {
+    match validate_envelope_impl(segments) {
         Ok(_) => {}
         Err(first) => {
             errors.push(first);
@@ -238,15 +335,16 @@ pub fn validate_envelope_lenient(segments: &[Segment<'_>]) -> Vec<EdifactError> 
     errors
 }
 
-fn extract_interchange(segments: &[Segment<'_>]) -> Result<InterchangeEnvelope, EdifactError> {
-    if segments.first().map(|segment| segment.tag) != Some("UNB") {
+fn extract_interchange<S: SegmentReader>(
+    segments: &[S],
+) -> Result<InterchangeEnvelope, EdifactError> {
+    if segments.first().map(|s| s.tag()) != Some("UNB") {
         return Err(EdifactError::MissingSegment {
             tag: "UNB".to_owned(),
             expected_position: "first segment of interchange".to_owned(),
         });
     }
-
-    if segments.last().map(|segment| segment.tag) != Some("UNZ") {
+    if segments.last().map(|s| s.tag()) != Some("UNZ") {
         return Err(EdifactError::MissingSegment {
             tag: "UNZ".to_owned(),
             expected_position: "last segment of interchange".to_owned(),
@@ -256,40 +354,35 @@ fn extract_interchange(segments: &[Segment<'_>]) -> Result<InterchangeEnvelope, 
     let unb = &segments[0];
     let unz = &segments[segments.len() - 1];
 
-    let syntax_identifier = required_component(unb, 0, 0)?.to_owned();
-
-    let sender_id = required_component(unb, 1, 0)?.to_owned();
-
-    let recipient_id = required_component(unb, 2, 0)?.to_owned();
+    let syntax_identifier = unb.required_component_field(0, 0)?.to_owned();
+    let sender_id = unb.required_component_field(1, 0)?.to_owned();
+    let recipient_id = unb.required_component_field(2, 0)?.to_owned();
 
     // Element 3: date/time composite
-    let date = required_component(unb, 3, 0)?;
-    let time = unb
-        .get_element(3)
-        .and_then(|e| e.get_component(1))
-        .unwrap_or("");
+    let date = unb.required_component_field(3, 0)?;
+    let time = unb.component(3, 1).unwrap_or("");
     let datetime = if time.is_empty() {
         date.to_owned()
     } else {
         format!("{date}:{time}")
     };
 
-    let control_ref = required_component(unb, 4, 0)?.to_owned();
-    let unz_control_ref = required_component(unz, 1, 0)?;
+    let control_ref = unb.required_component_field(4, 0)?.to_owned();
+    let unz_control_ref = unz.required_component_field(1, 0)?;
     if unz_control_ref != control_ref {
         return Err(EdifactError::QualifierMismatch {
             tag: "UNZ".to_owned(),
             actual: unz_control_ref.to_owned(),
             expected: control_ref,
-            offset: unz.span.start,
+            offset: unz.span_start(),
         });
     }
 
     let declared_message_count: u32 =
-        required_component(unz, 0, 0)?
+        unz.required_component_field(0, 0)?
             .parse()
             .map_err(|_| EdifactError::InvalidText {
-                offset: unz.span.start,
+                offset: unz.span_start(),
             })?;
 
     Ok(InterchangeEnvelope {
@@ -303,78 +396,71 @@ fn extract_interchange(segments: &[Segment<'_>]) -> Result<InterchangeEnvelope, 
     })
 }
 
-/// Thin shim that forwards to [`crate::de::required_component`].
-#[inline]
-fn required_component<'a>(
-    segment: &'a Segment<'_>,
-    element_index: usize,
-    component_index: usize,
-) -> Result<&'a str, EdifactError> {
-    crate::de::required_component(segment, element_index, component_index)
-}
-
-fn extract_messages(segments: &[Segment<'_>]) -> Result<Vec<MessageEnvelope>, EdifactError> {
+fn extract_messages<S: SegmentReader>(
+    segments: &[S],
+) -> Result<Vec<MessageEnvelope>, EdifactError> {
     let mut messages: Vec<MessageEnvelope> = Vec::new();
     let mut in_message = false;
     let mut msg_start_idx: usize = 0;
-    let mut current_unh: Option<&Segment<'_>> = None;
+    let mut current_unh_idx: Option<usize> = None;
 
-    for (i, seg) in segments[1..segments.len() - 1].iter().enumerate() {
-        match seg.tag {
+    // Skip UNB (index 0) and UNZ (last index) — iterate only message content
+    let inner = if segments.len() >= 2 {
+        &segments[1..segments.len() - 1]
+    } else {
+        return Ok(messages);
+    };
+
+    for (i, seg) in inner.iter().enumerate() {
+        match seg.tag() {
             "UNH" => {
                 if in_message {
                     return Err(EdifactError::InvalidSegmentForMessage {
                         tag: "UNH".to_owned(),
                         message_type: "ENVELOPE".to_owned(),
-                        offset: seg.span.start,
+                        offset: seg.span_start(),
                     });
                 }
                 in_message = true;
                 msg_start_idx = i;
-                current_unh = Some(seg);
+                current_unh_idx = Some(i);
             }
             "UNT" if in_message => {
-                let unh = current_unh
-                    .take()
-                    .ok_or(EdifactError::InvalidSegmentForMessage {
+                let unh_idx = current_unh_idx.take().ok_or_else(|| {
+                    EdifactError::InvalidSegmentForMessage {
                         tag: "UNT".to_owned(),
                         message_type: "ENVELOPE".to_owned(),
-                        offset: seg.span.start,
+                        offset: seg.span_start(),
+                    }
+                })?;
+                let unh = &inner[unh_idx];
+
+                let message_ref = unh.required_component_field(0, 0)?.to_owned();
+                let message_type = unh.required_component_field(1, 0)?.to_owned();
+                let version = unh.required_component_field(1, 1)?.to_owned();
+                let release = unh.required_component_field(1, 2)?.to_owned();
+                let controlling_agency = unh.required_component_field(1, 3)?.to_owned();
+                let association_code = unh.component(1, 4).unwrap_or("").to_owned();
+
+                let declared_segment_count: u32 = seg
+                    .required_component_field(0, 0)?
+                    .parse()
+                    .map_err(|_| EdifactError::InvalidText {
+                        offset: seg.span_start(),
                     })?;
-
-                let message_ref = required_component(unh, 0, 0)?.to_owned();
-
-                let message_type = required_component(unh, 1, 0)?.to_owned();
-                let version = required_component(unh, 1, 1)?.to_owned();
-                let release = required_component(unh, 1, 2)?.to_owned();
-                let controlling_agency = required_component(unh, 1, 3)?.to_owned();
-                let association_code = unh
-                    .get_element(1)
-                    .and_then(|e| e.get_component(4))
-                    .unwrap_or("")
-                    .to_owned();
-
-                let declared_segment_count: u32 =
-                    required_component(seg, 0, 0)?.parse().map_err(|_| {
-                        EdifactError::InvalidText {
-                            offset: seg.span.start,
-                        }
-                    })?;
-                let unt_ref = required_component(seg, 1, 0)?;
+                let unt_ref = seg.required_component_field(1, 0)?;
                 if unt_ref != message_ref {
                     return Err(EdifactError::QualifierMismatch {
                         tag: "UNT".to_owned(),
                         actual: unt_ref.to_owned(),
                         expected: message_ref.clone(),
-                        offset: seg.span.start,
+                        offset: seg.span_start(),
                     });
                 }
 
                 // actual count = segments from UNH (inclusive) to UNT (inclusive)
                 let actual_segment_count = u32::try_from(i - msg_start_idx + 1).map_err(|_| {
                     EdifactError::InterchangeTooLarge {
-                        // INVARIANT: usize ≤ u64::MAX on all supported targets; unwrap_or is
-                        // unreachable but prevents a panic on hypothetical exotic platforms.
                         count: u64::try_from(i - msg_start_idx + 1).unwrap_or(u64::MAX),
                     }
                 })?;
@@ -395,21 +481,21 @@ fn extract_messages(segments: &[Segment<'_>]) -> Result<Vec<MessageEnvelope>, Ed
                 return Err(EdifactError::InvalidSegmentForMessage {
                     tag: "UNT".to_owned(),
                     message_type: "ENVELOPE".to_owned(),
-                    offset: seg.span.start,
+                    offset: seg.span_start(),
                 });
             }
             "UNB" | "UNZ" if in_message => {
                 return Err(EdifactError::InvalidSegmentForMessage {
-                    tag: seg.tag.to_owned(),
+                    tag: seg.tag().to_owned(),
                     message_type: "ENVELOPE".to_owned(),
-                    offset: seg.span.start,
+                    offset: seg.span_start(),
                 });
             }
             _ if !in_message => {
                 return Err(EdifactError::InvalidSegmentForMessage {
-                    tag: seg.tag.to_owned(),
+                    tag: seg.tag().to_owned(),
                     message_type: "ENVELOPE".to_owned(),
-                    offset: seg.span.start,
+                    offset: seg.span_start(),
                 });
             }
             _ => {}
@@ -435,13 +521,20 @@ mod tests {
         crate::from_reader_collect(std::io::Cursor::new(input)).expect("parse failed")
     }
 
-    /// Parse then validate: convenience wrapper for tests that only need the result.
+    /// Parse then validate using the borrowed-segment path.
     fn parse_and_validate(
         input: &[u8],
     ) -> Result<(InterchangeEnvelope, Vec<MessageEnvelope>), EdifactError> {
         let owned = parse(input);
         let segs: Vec<Segment<'_>> = owned.iter().map(crate::OwnedSegment::as_borrowed).collect();
         validate_envelope(&segs)
+    }
+
+    /// Parse then validate using the owned-segment path (exercises the generic path).
+    fn parse_and_validate_owned(
+        input: &[u8],
+    ) -> Result<(InterchangeEnvelope, Vec<MessageEnvelope>), EdifactError> {
+        validate_envelope_from_owned(&parse(input))
     }
 
     const VALID_INTERCHANGE: &[u8] =
@@ -461,6 +554,16 @@ mod tests {
         assert_eq!(messages[0].association_code, "EAN010");
         assert_eq!(messages[0].declared_segment_count, 4);
         assert_eq!(messages[0].actual_segment_count, 4); // UNH + BGM + DTM + UNT
+    }
+
+    #[test]
+    fn valid_envelope_parses_ok_owned_path() {
+        // Verify that the owned-segment path produces identical results to the borrowed path.
+        let (interchange, messages) =
+            parse_and_validate_owned(VALID_INTERCHANGE).expect("envelope should be valid");
+        assert_eq!(interchange.sender_id, "SENDER");
+        assert_eq!(interchange.actual_message_count, 1);
+        assert_eq!(messages[0].declared_segment_count, 4);
     }
 
     #[test]

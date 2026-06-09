@@ -334,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "edifact-rs"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "bolero",
  "criterion",
@@ -343,6 +343,7 @@ dependencies = [
  "expect-test",
  "memchr",
  "miette",
+ "serde",
  "smallvec",
  "thiserror",
  "tokio",
@@ -350,7 +351,7 @@ dependencies = [
 
 [[package]]
 name = "edifact-rs-derive"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "proc-macro2",
  "quote",

@@ -37,7 +37,7 @@
 //! }
 //! ```
 
-use crate::Segment;
+use crate::{OwnedSegment, Segment};
 use smallvec::SmallVec;
 use std::ops::Range;
 
@@ -341,18 +341,78 @@ impl SegmentGroupIndexed {
 /// This is the zero-allocation counterpart to [`group_segments`]: instead of
 /// copying each [`Segment`] into the tree, it records `Range<usize>` indices
 /// into the original flat slice.  Use the original slice together with
-/// [`SegmentGroupIndexed::total_span`] to access segments:
+/// [`SegmentGroupIndexed::total_span`] to access segments.
+///
+/// # Worked Example
+///
+/// Consider a simplified 3-level MSCONS-like schema:
+///
+/// ```rust
+/// use edifact_rs::group::{GroupDef, group_segments_indexed};
+/// use edifact_rs::from_bytes;
+///
+/// // Schema: ROOT → SG1 (trigger: RFF) → SG5 (trigger: LOC) → SG6 (trigger: QTY)
+/// static SCHEMA: &[GroupDef] = &[
+///     GroupDef { name: "SG1", trigger: "RFF", children: &[] },
+///     GroupDef {
+///         name: "SG5",
+///         trigger: "LOC",
+///         children: &[
+///             GroupDef { name: "SG6", trigger: "QTY", children: &[] },
+///         ],
+///     },
+/// ];
+///
+/// // A small MSCONS-like message fragment (no envelope for clarity).
+/// let input = b"RFF+Z13:REF1'LOC+172+DE123'DTM+163:20230101:102'QTY+220:100:KWH'";
+/// let segments: Vec<_> = from_bytes(input)
+///     .collect::<Result<_, _>>()
+///     .unwrap();
+///
+/// let tree = group_segments_indexed(&segments, SCHEMA, "ROOT");
+///
+/// // The root contains no direct segments (all consumed by SG1 / SG5).
+/// assert!(tree.direct_segment_indices().next().is_none());
+///
+/// // One SG1 group and one SG5 group at root level.
+/// let sg1 = tree.children.iter().find(|g| g.definition == "SG1").unwrap();
+/// let sg5 = tree.children.iter().find(|g| g.definition == "SG5").unwrap();
+///
+/// // SG1 spans the RFF segment only.
+/// assert_eq!(&segments[sg1.total_span.clone()].iter().map(|s| s.tag).collect::<Vec<_>>(),
+///            &["RFF"]);
+///
+/// // SG5 spans LOC + DTM + QTY (all three segments, including the SG6 child).
+/// let sg5_tags: Vec<_> = segments[sg5.total_span.clone()].iter().map(|s| s.tag).collect();
+/// assert_eq!(sg5_tags, &["LOC", "DTM", "QTY"]);
+///
+/// // SG5's direct segments (LOC + DTM) exclude the SG6 child (QTY).
+/// let sg5_direct: Vec<_> = sg5.direct_segment_indices()
+///     .map(|i| segments[i].tag)
+///     .collect();
+/// assert_eq!(sg5_direct, &["LOC", "DTM"]);
+///
+/// // SG6 contains only QTY.
+/// let sg6 = sg5.children.iter().find(|g| g.definition == "SG6").unwrap();
+/// assert_eq!(segments[sg6.total_span.clone()].iter().map(|s| s.tag).collect::<Vec<_>>(),
+///            &["QTY"]);
+/// ```
+///
+/// # Group validation
+///
+/// `group_segments_indexed` pairs naturally with
+/// [`crate::validator::ValidationContext::validate_lenient_grouped`] to enforce group-presence rules:
 ///
 /// ```rust,ignore
-/// let tree = group_segments_indexed(&segments, MY_SCHEMA, "ORDERS");
-/// for sg2 in tree.children.iter().filter(|g| g.definition == "SG2") {
-///     let segs = &segments[sg2.total_span.clone()];
-///     println!("first segment: {:?}", segs.first().map(|s| s.tag));
-///     // Direct segments only (excluding nested SG3, SG4 …):
-///     for idx in sg2.direct_segment_indices() {
-///         println!("  direct: {:?}", segments[idx].tag);
-///     }
-/// }
+/// use edifact_rs::{ProfileRulePack, ValidationContext};
+///
+/// let pack = ProfileRulePack::new("MY-AHB")
+///     .require_segment_in_group("SG5", "DTM", "SG5-DTM-M")
+///     .forbid_segment_in_group("SG1", "LOC", "SG1-LOC-F");
+/// let ctx = ValidationContext::builder().with_profile_pack(pack).build();
+///
+/// let tree = group_segments_indexed(&segments, SCHEMA, "MSCONS");
+/// let report = ctx.validate_lenient_grouped(&tree, &segments);
 /// ```
 ///
 /// # Complexity
@@ -370,6 +430,34 @@ pub fn group_segments_indexed<'a>(
     };
     group_recursive_indexed(segments, &mut root, schema, &[], 0);
     root
+}
+
+/// Partition an owned-segment slice into a [`SegmentGroup`] tree according to `schema`.
+///
+/// Equivalent to [`group_segments`] but accepts `&[OwnedSegment]` for use with
+/// the reader-based API ([`crate::from_reader`] → [`crate::FromReaderIter`]).
+///
+/// Internally borrows each `OwnedSegment` as a `Segment<'_>` and delegates to
+/// [`group_segments`], so all grouping logic is shared.
+pub fn group_owned_segments<'a>(
+    segments: &'a [OwnedSegment],
+    schema: &'static [GroupDef],
+    root_name: &'static str,
+) -> SegmentGroup<'a> {
+    let borrowed: Vec<Segment<'a>> = segments.iter().map(|s| s.as_borrowed()).collect();
+    group_segments(&borrowed, schema, root_name)
+}
+
+/// Partition an owned-segment slice into a [`SegmentGroupIndexed`] tree according to `schema`.
+///
+/// Equivalent to [`group_segments_indexed`] but accepts `&[OwnedSegment]`.
+pub fn group_owned_segments_indexed(
+    segments: &[OwnedSegment],
+    schema: &'static [GroupDef],
+    root_name: &'static str,
+) -> SegmentGroupIndexed {
+    let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
+    group_segments_indexed(&borrowed, schema, root_name)
 }
 
 /// Internal recursive indexed grouping.  Returns the number of segments consumed.

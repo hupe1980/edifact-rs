@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use thiserror::Error;
 
 /// Wrapper around [`std::io::Error`] that implements [`PartialEq`] by comparing [`std::io::ErrorKind`].
@@ -375,11 +376,11 @@ pub enum EdifactError {
 
     /// Two [`crate::ProfileRulePack`] values with incompatible release scopes were composed.
     ///
-    /// When composing packs via [`crate::ProfileRulePack::merge`],
-    /// [`crate::ProfileRulePack::extend_from`], or
+    /// When composing packs via [`crate::ProfileRulePack::extend_from`] or
     /// [`crate::ProfileRulePack::merge_with_override`], both packs must either
     /// share the same release scope or at most one may carry a scope.
     #[error("incompatible release scopes: cannot compose {current:?} with {incoming:?}")]
+    #[non_exhaustive]
     IncompatibleReleaseScopes {
         /// Release scope of the pack being composed into.
         current: String,
@@ -741,6 +742,7 @@ impl miette::Diagnostic for EdifactError {
 /// releases is not a breaking change for downstream match arms.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ValidationSeverity {
     /// Structural parse failure; processing cannot continue.
     Critical,
@@ -752,19 +754,55 @@ pub enum ValidationSeverity {
     Info,
 }
 
-impl std::fmt::Display for ValidationSeverity {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl ValidationSeverity {
+    /// Return a lowercase ASCII string for this severity level.
+    ///
+    /// Stable for the four known variants.  Because the enum is
+    /// `#[non_exhaustive]`, new variants added in future releases are
+    /// handled by a catch-all arm that returns `"unknown"` so that
+    /// existing code keeps compiling and serialising gracefully.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
         match self {
-            Self::Critical => f.write_str("critical"),
-            Self::Error => f.write_str("error"),
-            Self::Warning => f.write_str("warning"),
-            Self::Info => f.write_str("info"),
+            Self::Critical => "critical",
+            Self::Error => "error",
+            Self::Warning => "warning",
+            Self::Info => "info",
+            #[allow(unreachable_patterns)]
+            _ => "unknown",
+        }
+    }
+
+    /// Return a numeric priority for this severity level.
+    ///
+    /// Higher values indicate higher severity: `Critical = 3`, `Error = 2`,
+    /// `Warning = 1`, `Info = 0`.
+    #[must_use]
+    pub fn numeric_level(self) -> u8 {
+        match self {
+            Self::Info => 0,
+            Self::Warning => 1,
+            Self::Error => 2,
+            Self::Critical => 3,
         }
     }
 }
 
+impl std::fmt::Display for ValidationSeverity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A structured validation issue.
+///
+/// Marked `#[non_exhaustive]` so that new diagnostic fields (e.g. `segment_group`)
+/// can be added in future releases without breaking downstream code that constructs
+/// issues via struct literals.  Always use [`ValidationIssue::new`] + builder
+/// methods (`with_*`) rather than constructing directly.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ValidationIssue {
     /// Stable error code, if known.
     pub error_code: Option<&'static str>,
@@ -803,6 +841,12 @@ pub struct ValidationIssue {
     pub message_ref: Option<String>,
     /// Suggested remediation (if available).
     pub suggestion: Option<String>,
+    /// Segment group (e.g. `"SG6"`) in which the issue occurred, if known.
+    ///
+    /// Populated by group-aware rule functions when they evaluate sub-slices of a
+    /// [`crate::group::SegmentGroupIndexed`] tree.  `None` for flat-segment rules
+    /// that do not have group context.
+    pub segment_group: Option<Arc<str>>,
 }
 
 impl ValidationIssue {
@@ -820,6 +864,7 @@ impl ValidationIssue {
             segment_occurrence: None,
             message_ref: None,
             suggestion: None,
+            segment_group: None,
         }
     }
 
@@ -880,6 +925,16 @@ impl ValidationIssue {
     /// multi-message interchange.
     pub fn with_message_ref(mut self, message_ref: impl Into<String>) -> Self {
         self.message_ref = Some(message_ref.into());
+        self
+    }
+
+    /// Set the segment group (e.g. `"SG6"`) in which this issue occurred.
+    ///
+    /// Use this from group-aware rule functions that evaluate a sub-slice of a
+    /// [`crate::group::SegmentGroupIndexed`] tree so that consumers can identify
+    /// the exact group occurrence without re-reading the raw message.
+    pub fn with_segment_group(mut self, group: impl Into<Arc<str>>) -> Self {
+        self.segment_group = Some(group.into());
         self
     }
 
@@ -958,6 +1013,13 @@ impl ValidationIssue {
     pub fn suggestion(&self) -> Option<&str> {
         self.suggestion.as_deref()
     }
+
+    /// Segment group (e.g. `"SG6"`) in which the issue occurred, if known.
+    #[must_use]
+    #[inline]
+    pub fn segment_group(&self) -> Option<&str> {
+        self.segment_group.as_deref()
+    }
 }
 
 impl std::fmt::Display for ValidationIssue {
@@ -972,6 +1034,7 @@ impl std::error::Error for ValidationIssue {}
 ///
 /// Enables batch validation where all issues are collected instead of failing on the first error.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct ValidationReport {
     /// Critical and error-level issues.
     pub(crate) errors: Vec<ValidationIssue>,

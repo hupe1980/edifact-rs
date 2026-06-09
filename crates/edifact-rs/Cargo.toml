@@ -17,13 +17,15 @@ categories = ["parser-implementations", "encoding"]
 default = ["derive"]
 derive = ["dep:edifact-rs-derive"]
 diagnostics = ["dep:miette"]
+serde = ["dep:serde"]
 
 [dependencies]
 memchr    = { workspace = true }
 smallvec  = { workspace = true }
 thiserror = { workspace = true }
 miette    = { workspace = true, optional = true }
-edifact-rs-derive = { version = "0.8.0", path = "../edifact-rs-derive", optional = true }
+serde     = { workspace = true, optional = true }
+edifact-rs-derive = { version = "0.9.0", path = "../edifact-rs-derive", optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

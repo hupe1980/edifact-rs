@@ -12,7 +12,6 @@ custom delimiter configuration, and envelope-level helpers.
 | `from_bytes(input)` | `&[u8]` | `impl Iterator<Item = Result<Segment<'_>, _>>` | In-memory buffer (fastest path) |
 | `from_reader_collect(reader)` | `impl Read` | `Result<Vec<OwnedSegment>, _>` | Eagerly collect all segments from a reader |
 | `from_reader(reader)` | `impl Read` | `FromReaderIter<R>` | Lazy iterator — one segment at a time |
-| `from_reader_iter(reader)` | `impl Read` | `FromReaderIter<R>` | Alias for `from_reader` |
 | `from_bufread_stream_with_config(reader, config)` | `impl BufRead` | `Result<Vec<OwnedSegment>, _>` | DOS guard, custom limits |
 
 ---
@@ -137,21 +136,21 @@ let segments = from_reader_collect(f)?; // Vec<OwnedSegment>
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-### `from_reader` / `from_reader_iter` — streaming, one segment at a time
+### `from_reader` — streaming, one segment at a time
 
 ```rust
-use edifact_rs::from_reader_iter;
+use edifact_rs::from_reader;
 use std::fs::File;
 
 let f = File::open("large_interchange.edi")?;
-for result in from_reader_iter(f) {
+for result in from_reader(f) {
     let seg = result?;               // OwnedSegment
     println!("{}", seg.tag);
 }
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-`from_reader_iter` is O(1) memory — it yields one `OwnedSegment` and then
+`from_reader` is O(1) memory — it yields one `OwnedSegment` and then
 immediately drops the internal buffer before reading the next segment.
 
 ---

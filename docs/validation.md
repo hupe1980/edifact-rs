@@ -53,8 +53,6 @@ impl Validator for BgmCodeValidator {
             Ok(())
         });
     }
-
-    fn set_message_type(&mut self, _msg_type: Option<&str>) {}
 }
 ```
 
@@ -64,6 +62,10 @@ the context is driven).
 
 `validate_each` is a helper that iterates segments and maps each `Err` result to a
 `ValidationIssue` appended to `report`.
+
+The trait also provides `validate_group_batch` (default: no-op) which is called once
+per segment-group occurrence when using the group-aware validation path. Override it
+to access the isolated segment list for each group instance.
 
 ---
 
@@ -101,13 +103,49 @@ let report = ctx.validate_lenient(&segs);
 ### Disabling layers
 
 ```rust
-use edifact_rs::ValidationContextBuilder;
+use edifact_rs::{ValidationContext, ValidationLayer};
 
 let ctx = ValidationContext::builder()
-    .disable_layer(ValidationLayer::CodeList) // skip code list checks
-    .with_validator(ValidationLayer::Structure, my_struct_validator)
+    .code_list(false)    // skip code list checks
+    .structure(false)    // skip structural checks
     .build();
-# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+Builder toggles: `.structure(bool)`, `.code_list(bool)`, `.profile(bool)`, `.envelope(bool)`.
+
+### Shared `Arc<ProfileRulePack>` (efficient multi-context reuse)
+
+When the same pack is used across many `ValidationContext` instances (e.g. in a
+server hot-path), share it via `Arc` to avoid cloning the rule closures:
+
+```rust
+use edifact_rs::{ValidationContext, ProfileRulePack};
+use std::sync::Arc;
+
+let pack = Arc::new(
+    ProfileRulePack::new("ORDERS-RULES")
+        .for_message_type("ORDERS")
+        .with_stateless_rule_fn(|_segs, _issues| {}),
+);
+
+// Lightweight clone — closures are not duplicated:
+let ctx1 = ValidationContext::builder()
+    .with_profile_pack_arc(Arc::clone(&pack))
+    .build();
+
+let ctx2 = ValidationContext::builder()
+    .with_profile_pack_arc(Arc::clone(&pack))
+    .build();
+```
+
+### Early abort on first critical issue
+
+```rust
+use edifact_rs::ValidationContext;
+
+let ctx = ValidationContext::builder()
+    .bail_on_first_critical(true)  // stop after the first Critical-severity issue
+    .build();
 ```
 
 ### Built-in envelope validation
@@ -249,6 +287,7 @@ let issue = ValidationIssue::new(
 | `.with_suggestion(text)` | `&str` | Human-friendly remediation hint |
 | `.with_offset(n)` | `usize` | Byte offset of the issue in the input |
 | `.with_segment_occurrence(n)` | `u16` | Zero-based occurrence among segments with the same tag |
+| `.with_segment_group(name)` | `impl Into<String>` | Name of the segment group instance (e.g. `"SG5"`) — set automatically by group-scoped rules |
 | `.with_message_ref(r)` | `impl Into<String>` | `UNH` reference (DE 0062) — usually set automatically via `ValidationContextBuilder::with_message_ref` |
 
 ---
@@ -261,15 +300,9 @@ counting, cross-segment consistency), implement `Validator` as a struct:
 ```rust
 use edifact_rs::{Validator, ValidationReport, ValidationRuleContext, ValidationIssue, ValidationSeverity, Segment};
 
-struct ReferenceConsistencyValidator {
-    message_type: Option<String>,
-}
+struct ReferenceConsistencyValidator;
 
 impl Validator for ReferenceConsistencyValidator {
-    fn set_message_type(&mut self, mt: Option<&str>) {
-        self.message_type = mt.map(str::to_owned);
-    }
-
     fn validate_batch(
         &self,
         segments: &[Segment<'_>],
@@ -355,6 +388,72 @@ for result in message_windows_from_reader(input) {
 
 See [`cookbook_streamed_progressive_validation.rs`](../crates/edifact-rs/examples/cookbook_streamed_progressive_validation.rs)
 for a complete example.
+
+---
+
+## Group-aware validation
+
+Group-aware validation fires `ProfileRulePack` group rules once per segment-group
+occurrence (e.g. once per `SG5` instance) rather than once across the entire
+message. First define a `&'static [GroupDef]` schema, build a `SegmentGroupIndexed`
+tree with `group_segments_indexed`, then pass the tree to `validate_lenient_grouped`:
+
+```rust
+use edifact_rs::{
+    ValidationContext, ProfileRulePack,
+    group::{GroupDef, group_segments_indexed},
+    from_bytes,
+};
+
+// Schema: SG5 starts at LIN and contains an SG6 sub-group starting at QTY.
+// GroupDef is a plain struct with &'static [GroupDef] children — use a static.
+static SCHEMA: &[GroupDef] = &[GroupDef {
+    name: "SG5",
+    trigger: "LIN",
+    children: &[GroupDef {
+        name: "SG6",
+        trigger: "QTY",
+        children: &[],
+    }],
+}];
+
+let segs: Vec<_> = from_bytes(
+    b"UNH+1+ORDERS:D:96A:UN'\
+      LIN+1'QTY+21:10'\
+      LIN+2'\
+      UNT+5+1'"
+).collect::<Result<_, _>>()?;
+
+// Build the indexed group tree (O(n × schema_depth), no segment clones):
+let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+
+let pack = ProfileRulePack::new("ORDERS")
+    .for_message_type("ORDERS")
+    // Require QTY inside every SG5 occurrence:
+    .require_segment_in_group("SG5", "QTY", "ORDERS-SG5-QTY-M");
+
+let ctx = ValidationContext::builder()
+    .with_profile_pack(pack)
+    .build();
+
+// validate_lenient_grouped runs the flat pass then the group pass:
+let report = ctx.validate_lenient_grouped(&tree, &segs);
+println!("{} error(s)", report.errors.len());
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+For owned segments (e.g. from `message_windows_from_reader`), use the `_owned`
+variants:
+
+| Method | Args | Segment type | Mode |
+|---|---|---|---|
+| `validate_lenient_grouped(root, segs)` | `(&SegmentGroupIndexed, &[Segment])` | borrowed | Collect all issues |
+| `validate_strict_grouped(root, segs)` | `(&SegmentGroupIndexed, &[Segment])` | borrowed | `Err` on first error/critical |
+| `validate_lenient_grouped_owned(root, segs)` | `(&SegmentGroupIndexed, &[OwnedSegment])` | owned | Collect all issues |
+| `validate_strict_grouped_owned(root, segs)` | `(&SegmentGroupIndexed, &[OwnedSegment])` | owned | `Err` on first error/critical |
+
+See [Profile Packs — Group-scoped rules](profile-packs.md#group-scoped-rules) for
+how to build group rules.
 
 ---
 
