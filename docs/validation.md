@@ -289,6 +289,43 @@ let issue = ValidationIssue::new(
 | `.with_segment_occurrence(n)` | `u16` | Zero-based occurrence among segments with the same tag |
 | `.with_segment_group(name)` | `impl Into<String>` | Name of the segment group instance (e.g. `"SG5"`) — set automatically by group-scoped rules |
 | `.with_message_ref(r)` | `impl Into<String>` | `UNH` reference (DE 0062) — usually set automatically via `ValidationContextBuilder::with_message_ref` |
+| `.with_context_entry(k, v)` | `(impl Into<String>, impl Into<String>)` | Insert a single key-value pair into the domain metadata map |
+| `.with_context_entries(iter)` | `impl IntoIterator<Item=(K,V)>` | Bulk-insert domain metadata; duplicate keys overwrite |
+
+### Rule ID prefix convention
+
+`rule_id` doubles as a lightweight metadata carrier. Use a structured,
+namespaced prefix so downstream code can extract domain identifiers without
+parsing the human-readable message:
+
+```text
+"<PACK>-<PID>-<TAG>-<STATUS>"
+ ^^^^^^^^              — pack/profile name (e.g. "AHB-13001")
+         ^^^^^         — affected segment tag
+               ^^^^^^^  — mandatory/conditional status or discriminator
+```
+
+Example: `"AHB-13001-BGM-M"` — pack `AHB`, process ID `13001`, segment `BGM`,
+mandatory (`M`). Extract the PID:
+
+```rust
+let rule_id = "AHB-13001-BGM-M";
+let pid = rule_id.strip_prefix("AHB-").and_then(|s| s.splitn(2, '-').next());
+assert_eq!(pid, Some("13001"));
+```
+
+For arbitrary domain metadata use `with_context_entry` instead:
+
+```rust
+use edifact_rs::{ValidationIssue, ValidationSeverity};
+
+let issue = ValidationIssue::new(ValidationSeverity::Error, "BGM code invalid")
+    .with_rule_id("AHB-13001-BGM-M")
+    .with_context_entry("pid", "13001")
+    .with_context_entry("partner", "9900123456789");
+
+assert_eq!(issue.context_get("pid"), Some("13001"));
+```
 
 ---
 

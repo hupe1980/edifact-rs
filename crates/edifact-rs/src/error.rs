@@ -800,6 +800,34 @@ impl std::fmt::Display for ValidationSeverity {
 /// can be added in future releases without breaking downstream code that constructs
 /// issues via struct literals.  Always use [`ValidationIssue::new`] + builder
 /// methods (`with_*`) rather than constructing directly.
+///
+/// ## Rule ID prefix convention
+///
+/// The `rule_id` field doubles as a lightweight metadata carrier when no full
+/// `context` map is needed.  Use a namespaced, structured prefix so consumers can
+/// extract domain-specific information without parsing the human-readable message:
+///
+/// ```text
+/// "<PACK>-<SCOPE>-<TAG>-<STATUS>"
+///  ^^^^^^^^                        — identifies the pack / profile (e.g. "AHB-13001")
+///              ^^^^^^^             — identifies the rule scope (e.g. "SG5", "BGM")
+///                      ^^^         — identifies the affected segment
+///                          ^^^^^^^  — M/C/... status or short discriminator
+/// ```
+///
+/// Example: `"AHB-13001-BGM-M"` encodes the AHB process identifier (`13001`),
+/// the affected segment (`BGM`), and the mandatory status (`M`).  Downstream code
+/// can extract the PID with a simple string split:
+///
+/// ```rust
+/// # let rule_id = "AHB-13001-BGM-M";
+/// if let Some(pid) = rule_id.strip_prefix("AHB-").and_then(|s| s.splitn(2, '-').next()) {
+///     println!("process identifier: {pid}"); // "13001"
+/// }
+/// ```
+///
+/// For truly arbitrary domain metadata, use the [`context`](Self::context) map and
+/// `with_context_entry`.
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
@@ -815,6 +843,11 @@ pub struct ValidationIssue {
     /// Segment tag involved (if known).
     pub segment_tag: Option<String>,
     /// Profile/MIG rule identifier, if applicable.
+    ///
+    /// By convention, rule IDs are namespaced hierarchically so that downstream
+    /// code can extract domain-specific metadata (pack name, process ID, rule scope)
+    /// from the string.  See the [`ValidationIssue`] type-level docs for the
+    /// recommended naming convention.
     pub rule_id: Option<String>,
     /// Element index (0-based), if known.
     ///
@@ -847,6 +880,28 @@ pub struct ValidationIssue {
     /// [`crate::group::SegmentGroupIndexed`] tree.  `None` for flat-segment rules
     /// that do not have group context.
     pub segment_group: Option<Arc<str>>,
+    /// Arbitrary domain-specific key-value metadata attached to this issue.
+    ///
+    /// Use this for information that does not fit into the structured fields above
+    /// — for example the PID a downstream MIG crate is validating against, a
+    /// trading-partner identifier, or a document UUID:
+    ///
+    /// ```rust
+    /// # use edifact_rs::{ValidationIssue, ValidationSeverity};
+    /// let issue = ValidationIssue::new(ValidationSeverity::Error, "BGM code invalid")
+    ///     .with_rule_id("AHB-13001-BGM-M")
+    ///     .with_context_entry("pid", "13001")
+    ///     .with_context_entry("partner", "9900123456789");
+    /// assert_eq!(issue.context_get("pid"), Some("13001"));
+    /// ```
+    ///
+    /// The map is empty by default and is never populated by the built-in rules;
+    /// it is reserved exclusively for caller-supplied metadata.
+    #[cfg_attr(
+        feature = "serde",
+        serde(skip_serializing_if = "std::collections::HashMap::is_empty")
+    )]
+    pub context: std::collections::HashMap<String, String>,
 }
 
 impl ValidationIssue {
@@ -865,6 +920,7 @@ impl ValidationIssue {
             message_ref: None,
             suggestion: None,
             segment_group: None,
+            context: std::collections::HashMap::new(),
         }
     }
 
@@ -936,6 +992,59 @@ impl ValidationIssue {
     pub fn with_segment_group(mut self, group: impl Into<Arc<str>>) -> Self {
         self.segment_group = Some(group.into());
         self
+    }
+
+    /// Insert a single key-value entry into the domain-specific [`context`](Self::context) map.
+    ///
+    /// Calling this multiple times accumulates entries; duplicate keys overwrite
+    /// the previous value.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use edifact_rs::{ValidationIssue, ValidationSeverity};
+    /// let issue = ValidationIssue::new(ValidationSeverity::Error, "BGM code invalid")
+    ///     .with_rule_id("AHB-13001-BGM-M")
+    ///     .with_context_entry("pid", "13001")
+    ///     .with_context_entry("partner", "9900123456789");
+    ///
+    /// assert_eq!(issue.context_get("pid"), Some("13001"));
+    /// assert_eq!(issue.context_get("partner"), Some("9900123456789"));
+    /// ```
+    pub fn with_context_entry(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.context.insert(key.into(), value.into());
+        self
+    }
+
+    /// Extend the domain-specific [`context`](Self::context) map from an iterator of
+    /// `(key, value)` pairs.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use edifact_rs::{ValidationIssue, ValidationSeverity};
+    /// let meta = [("pid", "13001"), ("partner", "9900123456789")];
+    /// let issue = ValidationIssue::new(ValidationSeverity::Error, "test")
+    ///     .with_context_entries(meta);
+    ///
+    /// assert_eq!(issue.context_get("pid"), Some("13001"));
+    /// ```
+    pub fn with_context_entries<K, V, I>(mut self, entries: I) -> Self
+    where
+        K: Into<String>,
+        V: Into<String>,
+        I: IntoIterator<Item = (K, V)>,
+    {
+        self.context
+            .extend(entries.into_iter().map(|(k, v)| (k.into(), v.into())));
+        self
+    }
+
+    /// Look up a value in the domain-specific [`context`](Self::context) map.
+    #[must_use]
+    #[inline]
+    pub fn context_get(&self, key: &str) -> Option<&str> {
+        self.context.get(key).map(String::as_str)
     }
 
     /// Short label for the severity level, suitable for display.
@@ -1508,5 +1617,52 @@ mod tests {
         let exact: Vec<_> = report.issues_for_rule_id("INVOIC-P001").collect();
         assert_eq!(exact.len(), 1);
         assert_eq!(exact[0].message, "invoic policy warning");
+    }
+
+    #[test]
+    fn validation_issue_context_map_builder() {
+        let issue = ValidationIssue::new(ValidationSeverity::Error, "BGM code invalid")
+            .with_rule_id("AHB-13001-BGM-M")
+            .with_context_entry("pid", "13001")
+            .with_context_entry("partner", "9900123456789");
+
+        assert_eq!(issue.context_get("pid"), Some("13001"));
+        assert_eq!(issue.context_get("partner"), Some("9900123456789"));
+        assert_eq!(issue.context_get("missing"), None);
+    }
+
+    #[test]
+    fn validation_issue_context_map_extend() {
+        let meta = [("pid", "13001"), ("partner", "9900123456789")];
+        let issue =
+            ValidationIssue::new(ValidationSeverity::Error, "test").with_context_entries(meta);
+
+        assert_eq!(issue.context_get("pid"), Some("13001"));
+        assert_eq!(issue.context_get("partner"), Some("9900123456789"));
+    }
+
+    #[test]
+    fn validation_issue_context_overwrite() {
+        let issue = ValidationIssue::new(ValidationSeverity::Warning, "demo")
+            .with_context_entry("pid", "old")
+            .with_context_entry("pid", "new");
+        assert_eq!(issue.context_get("pid"), Some("new"));
+    }
+
+    #[test]
+    fn validation_issue_empty_context_not_cloned_into_severity_display() {
+        // Ensure that a default-constructed issue has an empty context map.
+        let issue = ValidationIssue::new(ValidationSeverity::Info, "no context");
+        assert!(issue.context.is_empty());
+    }
+
+    #[test]
+    fn rule_id_prefix_convention_pid_extraction() {
+        // Validate the documented rule_id prefix convention: "AHB-<pid>-<tag>-<status>"
+        let rule_id = "AHB-13001-BGM-M";
+        let pid = rule_id
+            .strip_prefix("AHB-")
+            .and_then(|s| s.splitn(2, '-').next());
+        assert_eq!(pid, Some("13001"));
     }
 }
