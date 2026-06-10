@@ -129,10 +129,9 @@ fn builder_can_merge_existing_packs() {
 
     assert_eq!(pack.name(), "COMBINED");
     assert_eq!(pack.rule_count(), 2);
-    assert_eq!(
-        pack.message_types().collect::<Vec<_>>(),
-        ["INVOIC", "ORDERS"]
-    );
+    let mut types: Vec<_> = pack.message_types().collect();
+    types.sort();
+    assert_eq!(types, ["INVOIC", "ORDERS"]);
 }
 
 #[test]

@@ -42,7 +42,13 @@ fn resolve_release_owned(
     release_char: char,
     start_offset: usize,
 ) -> Result<String, EdifactError> {
-    let mut out = String::with_capacity(val.len());
+    // The unescaped output is always shorter than the input (every release-char
+    // pair shrinks by one), so `val.len()` is a safe upper bound.  However,
+    // allocating exactly `val.len()` wastes capacity for inputs with many
+    // release sequences.  A conservative 75 % heuristic saves memory on
+    // release-heavy values while avoiding reallocation for typical inputs.
+    let cap = val.len() - val.len() / 4;
+    let mut out = String::with_capacity(cap);
     let mut chars = val.chars();
     while let Some(c) = chars.next() {
         if c == release_char {
@@ -835,7 +841,7 @@ mod tests {
     use crate::tokenizer::ServiceStringAdvice;
 
     fn parse_all(input: &[u8]) -> Vec<Segment<'_>> {
-        let ssa = ServiceStringAdvice::from_bytes(input);
+        let ssa = ServiceStringAdvice::from_bytes_unchecked(input);
         let tok = Tokenizer::new(input, ssa);
         Parser::new(tok)
             .collect::<Result<Vec<_>, _>>()

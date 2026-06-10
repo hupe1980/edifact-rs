@@ -55,7 +55,7 @@ pub enum OwnedEdifactEvent {
     EndSegment,
 }
 
-impl<'a> EdifactEvent<'a> {
+impl EdifactEvent<'_> {
     /// Convert to an owned event, cloning string data.
     pub fn into_owned(self) -> OwnedEdifactEvent {
         match self {

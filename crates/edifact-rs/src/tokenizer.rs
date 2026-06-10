@@ -37,12 +37,38 @@ impl Default for ServiceStringAdvice {
 }
 
 impl ServiceStringAdvice {
-    /// Parse a UNA header from the beginning of an EDIFACT interchange.
+    /// Parse a UNA header and validate that the five active service characters
+    /// (`element_sep`, `component_sep`, `decimal_mark`, `release_char`, `segment_term`) are all
+    /// mutually distinct and in the printable ASCII range `0x21–0x7E`.
+    ///
+    /// Returns [`EdifactError::InvalidUna`] if the invariant is violated.
+    /// Falls back to [`ServiceStringAdvice::default`] when no UNA is present.
+    ///
+    /// This is the **safe, default constructor** — always use this for input from
+    /// an external source.  For trusted or internal use where delimiter uniqueness
+    /// is already guaranteed, use [`from_bytes_unchecked`](Self::from_bytes_unchecked).
+    pub fn from_bytes(input: &[u8]) -> Result<Self, crate::error::EdifactError> {
+        let ssa = Self::from_bytes_unchecked(input);
+        if !ssa.is_valid() {
+            return Err(crate::error::EdifactError::InvalidUna);
+        }
+        Ok(ssa)
+    }
+
+    /// Parse a UNA header from the beginning of an EDIFACT interchange **without**
+    /// validating delimiter uniqueness or printability.
     ///
     /// If no UNA is present, returns [`ServiceStringAdvice::default`].
-    /// Does not validate that the 6 service characters are mutually distinct;
-    /// use [`ServiceStringAdvice::from_bytes_strict`] when that matters.
-    pub fn from_bytes(input: &[u8]) -> Self {
+    ///
+    /// # When to use
+    ///
+    /// Use this only for trusted internal data (e.g. round-tripping data where
+    /// the UNA invariant is already guaranteed) or in fuzz/property tests that
+    /// intentionally explore degenerate delimiter combinations.
+    ///
+    /// For any external or user-provided input, prefer [`from_bytes`](Self::from_bytes)
+    /// which validates delimiter uniqueness and rejects invalid bytes.
+    pub fn from_bytes_unchecked(input: &[u8]) -> Self {
         // UNA is 9 bytes: "UNA" + 6 service chars
         if input.len() >= 9 && &input[..3] == b"UNA" {
             Self {
@@ -56,20 +82,6 @@ impl ServiceStringAdvice {
         } else {
             Self::default()
         }
-    }
-
-    /// Parse a UNA header and validate that the five active service characters
-    /// (`element_sep`, `component_sep`, `decimal_mark`, `release_char`, `segment_term`) are all
-    /// mutually distinct and in the printable ASCII range `0x21–0x7E`.
-    ///
-    /// Returns [`EdifactError::InvalidUna`] if the invariant is violated.
-    /// Falls back to [`ServiceStringAdvice::default`] when no UNA is present.
-    pub fn from_bytes_strict(input: &[u8]) -> Result<Self, crate::error::EdifactError> {
-        let ssa = Self::from_bytes(input);
-        if !ssa.is_valid() {
-            return Err(crate::error::EdifactError::InvalidUna);
-        }
-        Ok(ssa)
     }
 
     /// Return `true` if all five active service characters are mutually distinct
@@ -93,7 +105,7 @@ impl ServiceStringAdvice {
         ];
         // All five must be printable ASCII 0x21–0x7E (excludes high-bytes, control chars,
         // whitespace, and DEL 0x7F) and mutually distinct (10 pairwise checks).
-        let printable_ascii = |b: u8| b >= 0x21 && b <= 0x7E;
+        let printable_ascii = |b: u8| (0x21..=0x7E).contains(&b);
         printable_ascii(e)
             && printable_ascii(c)
             && printable_ascii(d)
@@ -212,13 +224,14 @@ impl<'a> Tokenizer<'a> {
 
     /// Construct a tokenizer with **no** segment-size limit.
     ///
-    /// # Security
+    /// # Security warning
     ///
     /// This constructor imposes **no upper bound** on how many bytes a single
     /// segment may consume.  For untrusted or adversarially crafted input a
     /// missing segment terminator can cause the tokenizer to scan the entire
     /// input before returning an error.  Prefer [`Tokenizer::new`] (64 KiB
     /// limit) or [`Tokenizer::with_limit`] for untrusted sources.
+    #[must_use]
     pub fn unlimited(input: &'a [u8], ssa: ServiceStringAdvice) -> Self {
         Self {
             input,
@@ -475,7 +488,7 @@ mod tests {
     use super::*;
 
     fn tokens(input: &[u8]) -> Vec<Token<'_>> {
-        let ssa = ServiceStringAdvice::from_bytes(input);
+        let ssa = ServiceStringAdvice::from_bytes_unchecked(input);
         Tokenizer::new(input, ssa)
             .collect::<Result<Vec<_>, _>>()
             .expect("tokenize failed")

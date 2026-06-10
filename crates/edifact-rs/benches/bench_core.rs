@@ -20,7 +20,7 @@ fn main() {
 #[divan::bench]
 fn bench_tokenize_small(b: Bencher) {
     b.bench(|| {
-        let ssa = edifact_rs::ServiceStringAdvice::from_bytes(sample_msg());
+        let ssa = edifact_rs::ServiceStringAdvice::from_bytes_unchecked(sample_msg());
         let _: Vec<_> = edifact_rs::Tokenizer::new(sample_msg(), ssa).collect();
     });
 }
@@ -29,7 +29,7 @@ fn bench_tokenize_small(b: Bencher) {
 fn bench_tokenize_1mb(b: Bencher) {
     let data = one_mb();
     b.bench(|| {
-        let ssa = edifact_rs::ServiceStringAdvice::from_bytes(data);
+        let ssa = edifact_rs::ServiceStringAdvice::from_bytes_unchecked(data);
         let _: Vec<_> = edifact_rs::Tokenizer::new(data, ssa).collect();
     });
 }

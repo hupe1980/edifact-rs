@@ -383,7 +383,7 @@ fn bail_on_first_error_does_not_skip_sibling_groups_due_to_earlier_flat_errors()
     let pack = ProfileRulePack::new("TEST")
         .require_segment("BGM", "BGM-M")
         .require_segment_in_group("SG5", "DTM", "SG5-DTM-M")
-        .bail_on_first_error(true);
+        .with_bail_on_first_error(true);
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
     let report = ctx.validate_lenient_grouped(&tree, &segs);

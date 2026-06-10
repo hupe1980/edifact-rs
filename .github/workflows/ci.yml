@@ -17,7 +17,7 @@ jobs:
           toolchain: 1.85.0
       - uses: Swatinem/rust-cache@v2
       - name: Verify workspace builds on MSRV
-        run: cargo check --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
 
   docsrs-check:
     runs-on: ubuntu-latest

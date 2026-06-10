@@ -55,7 +55,12 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io to index edifact-rs-derive
-        run: sleep 30
+        run: |
+          for i in $(seq 1 10); do
+            cargo search edifact-rs-derive 2>/dev/null | grep -q "^edifact-rs-derive" && echo "Indexed." && break
+            echo "Waiting for crates.io to index edifact-rs-derive... ($i/10)"
+            sleep 15
+          done
 
       - name: Publish edifact-rs
         run: cargo publish -p edifact-rs

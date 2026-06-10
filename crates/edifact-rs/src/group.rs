@@ -1,8 +1,8 @@
 //! Segment group tree model for structured EDIFACT message navigation.
 //!
 //! Provides a recursive group schema ([`GroupDef`]) and a segment-slice-to-tree
-//! function ([`group_segments`]) that partitions a flat segment slice into a
-//! [`SegmentGroup`] tree according to the schema.
+//! function ([`group_segments_indexed`]) that partitions a flat segment slice into a
+//! [`SegmentGroupIndexed`] tree according to the schema.
 //!
 //! # Model overview
 //!
@@ -18,7 +18,7 @@
 //! # Example
 //!
 //! ```rust,ignore
-//! use edifact_rs::group::{GroupDef, group_segments};
+//! use edifact_rs::group::{GroupDef, group_segments_indexed};
 //!
 //! static ORDERS_GROUPS: &[GroupDef] = &[
 //!     GroupDef { name: "SG2", trigger: "NAD", children: &[] },
@@ -31,9 +31,10 @@
 //!     },
 //! ];
 //!
-//! let root = group_segments(&segments, ORDERS_GROUPS, "ROOT");
+//! let root = group_segments_indexed(&segments, ORDERS_GROUPS, "ROOT");
 //! for child in &root.children {
-//!     println!("{}: {} segments", child.definition, child.segments.len());
+//!     let child_segs = &segments[child.total_span.clone()];
+//!     println!("{} #{}: {} segments", child.definition, child.occurrence_index, child_segs.len());
 //! }
 //! ```
 
@@ -62,225 +63,10 @@ pub struct GroupDef {
     pub children: &'static [GroupDef],
 }
 
-// ── SegmentGroup ──────────────────────────────────────────────────────────────
-
-/// A populated segment group produced by [`group_segments`].
-///
-/// Each segment is cloned (shallow copy) from the input slice: the `Vec` of
-/// elements is heap-allocated per segment, but the string data inside each
-/// element still borrows from the original input buffer via the `'a` lifetime.
-///
-/// # Memory note
-///
-/// `group_segments` clones each [`Segment`] into the tree.  For large messages
-/// or deeply nested schemas where minimal allocation is critical, consider
-/// working with the original flat segment slice and deriving group boundaries
-/// yourself based on the schema's trigger tags.
-#[derive(Debug)]
-pub struct SegmentGroup<'a> {
-    /// Group name from the schema, e.g. `"SG2"`, or `"ROOT"` for the envelope.
-    pub definition: &'static str,
-    /// Segments that belong directly to this group instance.
-    ///
-    /// Segment values are cloned from the input slice, but the string data
-    /// inside each segment borrows from the original input for `'a`.
-    pub segments: Vec<Segment<'a>>,
-    /// Child group instances, in the order they appear in the message.
-    pub children: Vec<SegmentGroup<'a>>,
-}
-
-impl<'a> SegmentGroup<'a> {
-    fn new(definition: &'static str) -> Self {
-        Self {
-            definition,
-            segments: Vec::new(),
-            children: Vec::new(),
-        }
-    }
-
-    /// Iterate over all segments in this group and all descendant groups,
-    /// depth-first.
-    pub fn all_segments(&self) -> impl Iterator<Item = &Segment<'a>> + '_ {
-        AllSegmentsIter::new(self)
-    }
-
-    /// Find the first segment with the given `tag` in this group (not children).
-    ///
-    /// # Shallow search
-    ///
-    /// This method searches only the segments directly owned by **this** group
-    /// instance — it does **not** recurse into child groups.  To search the
-    /// entire subtree use [`SegmentGroup::all_segments`] with [`Iterator::find`]:
-    ///
-    /// ```ignore
-    /// group.all_segments().find(|s| s.tag == "LIN")
-    /// ```
-    pub fn find_segment(&self, tag: &str) -> Option<&Segment<'a>> {
-        self.segments.iter().find(|s| s.tag == tag)
-    }
-}
-
-// ── AllSegmentsIter ───────────────────────────────────────────────────────────
-
-struct AllSegmentsIter<'g, 'a> {
-    // Stack of (current_group, current_seg_idx, current_child_idx)
-    stack: SmallVec<[(&'g SegmentGroup<'a>, usize, usize); 8]>,
-}
-
-impl<'g, 'a> AllSegmentsIter<'g, 'a> {
-    fn new(root: &'g SegmentGroup<'a>) -> Self {
-        Self {
-            stack: smallvec::smallvec![(root, 0, 0)],
-        }
-    }
-}
-
-impl<'g, 'a> Iterator for AllSegmentsIter<'g, 'a> {
-    type Item = &'g Segment<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let (group, seg_idx, child_idx) = self.stack.last_mut()?;
-            // Yield segments first.
-            if *seg_idx < group.segments.len() {
-                let seg = &group.segments[*seg_idx];
-                *seg_idx += 1;
-                return Some(seg);
-            }
-            // Then recurse into children
-            if *child_idx < group.children.len() {
-                let child = &group.children[*child_idx];
-                *child_idx += 1;
-                self.stack.push((child, 0, 0));
-                continue;
-            }
-            // Done with this group
-            self.stack.pop();
-        }
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        // Conservative lower bound: count remaining direct segments in all
-        // frames on the stack.  Children not yet pushed are not counted, so
-        // the true total may be higher, but this is still a valid lower bound.
-        let lower: usize = self
-            .stack
-            .iter()
-            .map(|(g, seg_idx, _)| g.segments.len().saturating_sub(*seg_idx))
-            .sum();
-        (lower, None)
-    }
-}
-
-// ── group_segments ────────────────────────────────────────────────────────────
-
-/// Partition `segments` into a [`SegmentGroup`] tree according to `schema`.
-///
-/// # Algorithm
-///
-/// The algorithm is a single-pass linear scan:
-///
-/// 1. Segments that do not match any group trigger in `schema` are added to
-///    the current group's `segments`.
-/// 2. When a trigger matching a group in `schema` is encountered:
-///    - If an open child with the same trigger already exists it is closed and
-///      a new instance is started (repetition).
-///    - If the trigger belongs to a *sibling* or *ancestor* group the current
-///      group is closed first (the caller handles restart).
-///    - Nested schemas recurse: child group triggers follow the same rules
-///      within their parent.
-///
-/// # Root group
-///
-/// The returned root group has `definition` set to `root_name` (typically
-/// `"ROOT"` or the message type string).  Segments before the first matching
-/// trigger land in the root's own `segments` vec.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let tree = group_segments(&segments, MY_SCHEMA, "ORDERS");
-/// for sg2 in tree.children.iter().filter(|g| g.definition == "SG2") {
-///     println!("NAD group: {:?}", sg2.segments.iter().map(|s| s.tag).collect::<Vec<_>>());
-/// }
-/// ```
-pub fn group_segments<'a>(
-    segments: &[Segment<'a>],
-    schema: &'static [GroupDef],
-    root_name: &'static str,
-) -> SegmentGroup<'a> {
-    let mut root = SegmentGroup::new(root_name);
-    group_recursive(segments, &mut root, schema);
-    root
-}
-
-/// Internal recursive grouping.  Returns the number of segments consumed.
-fn group_recursive<'a>(
-    segments: &[Segment<'a>],
-    parent: &mut SegmentGroup<'a>,
-    schema: &'static [GroupDef],
-) -> usize {
-    group_recursive_inner(segments, parent, schema, &[])
-}
-
-fn group_recursive_inner<'a>(
-    segments: &[Segment<'a>],
-    parent: &mut SegmentGroup<'a>,
-    schema: &'static [GroupDef],
-    stop_triggers: &[&'static str],
-) -> usize {
-    // Pre-compute the combined stop set for all children of this schema level.
-    // This is computed once per schema level, not once per segment, so the
-    // SmallVec is allocated at most O(depth) times rather than O(depth × n).
-    let combined_stop: SmallVec<[&'static str; 16]> = {
-        let mut v: SmallVec<[&'static str; 16]> = SmallVec::from_slice(stop_triggers);
-        for d in schema {
-            if !v.contains(&d.trigger) {
-                v.push(d.trigger);
-            }
-        }
-        v
-    };
-
-    let mut i = 0;
-    while i < segments.len() {
-        let tag = segments[i].tag;
-
-        // A trigger matching a stop tag means we must return control to the parent group.
-        if stop_triggers.iter().copied().any(|t| t == tag) {
-            break;
-        }
-
-        // Does this tag trigger a group in the schema?
-        if let Some(def) = schema.iter().find(|d| d.trigger == tag) {
-            // Start a new child group instance
-            let mut child = SegmentGroup::new(def.name);
-            // The trigger segment belongs to the new child
-            child.segments.push(segments[i].clone());
-            i += 1;
-
-            // Recurse into children of this group — pass the pre-computed stop set.
-            let consumed =
-                group_recursive_inner(&segments[i..], &mut child, def.children, &combined_stop);
-            i += consumed;
-
-            parent.children.push(child);
-        } else {
-            // Segment doesn't match any group trigger in this schema — it
-            // belongs to the parent group's own segments.  This also covers
-            // leaf groups (empty schema): all non-stop-trigger segments after
-            // the trigger are accumulated into the current group.
-            parent.segments.push(segments[i].clone());
-            i += 1;
-        }
-    }
-    i
-}
-
 // ── SegmentGroupIndexed ───────────────────────────────────────────────────────
 
-/// A zero-clone counterpart to [`SegmentGroup`] that stores index ranges into
-/// the original flat segment slice rather than cloning each segment.
+/// Zero-copy segment group tree.  Stores index ranges into the original flat
+/// segment slice rather than cloning each segment.
 ///
 /// Produced by [`group_segments_indexed`].  To access the actual segments use
 /// the original `&[Segment<'a>]` together with [`total_span`]:
@@ -315,6 +101,16 @@ pub struct SegmentGroupIndexed {
     pub total_span: Range<usize>,
     /// Child group instances, in message order.
     pub children: Vec<SegmentGroupIndexed>,
+    /// Zero-based occurrence index of this group instance among all siblings
+    /// with the same `definition` at this level.
+    ///
+    /// For example, the first `SG5` child at a given level has `occurrence_index = 0`,
+    /// the second `SG5` has `occurrence_index = 1`, etc.  Siblings with a
+    /// *different* definition have independent counters.
+    ///
+    /// This field is essential for producing unambiguous rule-violation IDs
+    /// (e.g. `"SG5[2]/DTM"`) when the same group type repeats.
+    pub occurrence_index: usize,
 }
 
 impl SegmentGroupIndexed {
@@ -338,10 +134,9 @@ impl SegmentGroupIndexed {
 
 /// Partition `segments` into a [`SegmentGroupIndexed`] tree without cloning.
 ///
-/// This is the zero-allocation counterpart to [`group_segments`]: instead of
-/// copying each [`Segment`] into the tree, it records `Range<usize>` indices
-/// into the original flat slice.  Use the original slice together with
-/// [`SegmentGroupIndexed::total_span`] to access segments.
+/// Stores `Range<usize>` indices into the original flat slice rather than
+/// copying each [`Segment`] into the tree.  Use the original slice together
+/// with [`SegmentGroupIndexed::total_span`] to access segments.
 ///
 /// # Worked Example
 ///
@@ -418,8 +213,8 @@ impl SegmentGroupIndexed {
 /// # Complexity
 ///
 /// `O(n × schema_depth)` time, `O(tree_nodes)` space.  No `Segment` clones.
-pub fn group_segments_indexed<'a>(
-    segments: &[Segment<'a>],
+pub fn group_segments_indexed(
+    segments: &[Segment<'_>],
     schema: &'static [GroupDef],
     root_name: &'static str,
 ) -> SegmentGroupIndexed {
@@ -427,25 +222,10 @@ pub fn group_segments_indexed<'a>(
         definition: root_name,
         total_span: 0..0,
         children: Vec::new(),
+        occurrence_index: 0,
     };
     group_recursive_indexed(segments, &mut root, schema, &[], 0);
     root
-}
-
-/// Partition an owned-segment slice into a [`SegmentGroup`] tree according to `schema`.
-///
-/// Equivalent to [`group_segments`] but accepts `&[OwnedSegment]` for use with
-/// the reader-based API ([`crate::from_reader`] → [`crate::FromReaderIter`]).
-///
-/// Internally borrows each `OwnedSegment` as a `Segment<'_>` and delegates to
-/// [`group_segments`], so all grouping logic is shared.
-pub fn group_owned_segments<'a>(
-    segments: &'a [OwnedSegment],
-    schema: &'static [GroupDef],
-    root_name: &'static str,
-) -> SegmentGroup<'a> {
-    let borrowed: Vec<Segment<'a>> = segments.iter().map(|s| s.as_borrowed()).collect();
-    group_segments(&borrowed, schema, root_name)
 }
 
 /// Partition an owned-segment slice into a [`SegmentGroupIndexed`] tree according to `schema`.
@@ -461,8 +241,8 @@ pub fn group_owned_segments_indexed(
 }
 
 /// Internal recursive indexed grouping.  Returns the number of segments consumed.
-fn group_recursive_indexed<'a>(
-    segments: &[Segment<'a>],
+fn group_recursive_indexed(
+    segments: &[Segment<'_>],
     parent: &mut SegmentGroupIndexed,
     schema: &'static [GroupDef],
     stop_triggers: &[&'static str],
@@ -489,6 +269,10 @@ fn group_recursive_indexed<'a>(
     };
 
     let mut i = 0;
+    // Track how many children of each definition have been pushed at this level,
+    // so we can stamp `occurrence_index` on each new child.
+    let mut occ_counts: std::collections::HashMap<&'static str, usize> =
+        std::collections::HashMap::new();
     while i < segments.len() {
         let tag = segments[i].tag;
 
@@ -498,12 +282,19 @@ fn group_recursive_indexed<'a>(
 
         if let Some(def) = schema.iter().find(|d| d.trigger == tag) {
             let child_offset = offset + i;
+            let occ_idx = {
+                let c = occ_counts.entry(def.name).or_insert(0);
+                let idx = *c;
+                *c += 1;
+                idx
+            };
             let mut child = SegmentGroupIndexed {
                 definition: def.name,
                 // Pre-seed the trigger segment; the recursive call extends
                 // total_span to cover the full child subtree.
                 total_span: child_offset..child_offset + 1,
                 children: Vec::new(),
+                occurrence_index: occ_idx,
             };
             i += 1;
 
@@ -564,8 +355,10 @@ mod tests {
     #[test]
     fn root_segments_before_first_trigger() {
         let segs = vec![seg("UNH"), seg("BGM"), seg("NAD")];
-        let tree = group_segments(&segs, SCHEMA, "ROOT");
-        assert_eq!(tree.segments.len(), 2, "UNH + BGM should be in root");
+        let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+        // UNH (0) and BGM (1) are direct root segments; NAD (2) is in SG1.
+        let direct: Vec<_> = tree.direct_segment_indices().collect();
+        assert_eq!(direct, vec![0, 1], "UNH + BGM should be direct in root");
         assert_eq!(tree.children.len(), 1);
         assert_eq!(tree.children[0].definition, "SG1");
     }
@@ -573,7 +366,7 @@ mod tests {
     #[test]
     fn repeated_trigger_creates_multiple_children() {
         let segs = vec![seg("UNH"), seg("NAD"), seg("NAD"), seg("UNT")];
-        let tree = group_segments(&segs, SCHEMA, "ROOT");
+        let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
         // Two NAD triggers → two SG1 children
         assert_eq!(
             tree.children
@@ -585,9 +378,17 @@ mod tests {
     }
 
     #[test]
+    fn repeated_trigger_occurrence_index_is_stamped() {
+        let segs = vec![seg("NAD"), seg("NAD"), seg("NAD")];
+        let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+        let indices: Vec<_> = tree.children.iter().map(|c| c.occurrence_index).collect();
+        assert_eq!(indices, vec![0, 1, 2]);
+    }
+
+    #[test]
     fn nested_child_groups() {
         let segs = vec![seg("NAD"), seg("CTA"), seg("CTA")];
-        let tree = group_segments(&segs, SCHEMA, "ROOT");
+        let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
         let sg1 = &tree.children[0];
         assert_eq!(sg1.definition, "SG1");
         // Two CTA triggers → two SG2 children inside SG1
@@ -596,12 +397,16 @@ mod tests {
     }
 
     #[test]
-    fn all_segments_iterator_depth_first() {
+    fn total_span_covers_all_segments() {
         let segs = vec![seg("UNH"), seg("NAD"), seg("CTA")];
-        let tree = group_segments(&segs, SCHEMA, "ROOT");
-        let tags: Vec<_> = tree.all_segments().map(|s| s.tag).collect();
-        assert!(tags.contains(&"UNH"));
-        assert!(tags.contains(&"NAD"));
-        assert!(tags.contains(&"CTA"));
+        let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
+        // Root span covers all 3 segments
+        let all_tags: Vec<_> = segs[tree.total_span.clone()]
+            .iter()
+            .map(|s| s.tag)
+            .collect();
+        assert!(all_tags.contains(&"UNH"));
+        assert!(all_tags.contains(&"NAD"));
+        assert!(all_tags.contains(&"CTA"));
     }
 }

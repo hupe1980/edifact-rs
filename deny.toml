@@ -2,14 +2,9 @@
 # Run: cargo deny check
 
 [advisories]
-# Deny dependencies with known security vulnerabilities.
-vulnerability = "deny"
-# Warn on unmaintained crates — many become vulnerable over time.
-unmaintained = "warn"
+version = 2
 # Deny crates that have been yanked from crates.io.
 yanked = "deny"
-# Warn on notice-level advisories (informational, not security-critical).
-notice = "warn"
 ignore = []
 
 [bans]
@@ -21,23 +16,13 @@ wildcards = "deny"
 skip = []
 
 [licenses]
+version = 2
 # Allow only OSI-approved permissive licenses.
 allow = [
     "MIT",
     "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
-    "ISC",
-    "Unicode-DFS-2016",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "CC0-1.0",
-    "Zlib",
+    "Unicode-3.0",
 ]
-# Deny unlicensed crates entirely.
-unlicensed = "deny"
-# Deny copyleft licenses (GPL, LGPL, MPL, etc.) — incompatible with the
-# MIT/Apache-2.0 dual license used by edifact-rs.
-copyleft = "deny"
 confidence-threshold = 0.8
 
 [sources]

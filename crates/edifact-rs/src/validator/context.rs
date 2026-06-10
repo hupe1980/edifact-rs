@@ -100,6 +100,11 @@ pub struct ValidationContext {
     /// Injected into every emitted `ValidationIssue` when set.
     pub(super) message_ref: Option<String>,
     pub(super) metadata: Option<Arc<dyn Any + Send + Sync>>,
+    /// Advisory issues unconditionally appended to every report produced by
+    /// this context — regardless of what segments are validated.
+    ///
+    /// Use [`ValidationContextBuilder::with_static_issue`] to populate.
+    pub(super) static_issues: Vec<crate::ValidationIssue>,
 }
 
 /// Builder for [`ValidationContext`].
@@ -131,6 +136,7 @@ impl ValidationContextBuilder {
                 message_type: None,
                 message_ref: None,
                 metadata: None,
+                static_issues: Vec::new(),
             },
         }
     }
@@ -260,6 +266,17 @@ impl ValidationContextBuilder {
         self
     }
 
+    /// Unconditionally append `issue` to every report produced by this context.
+    ///
+    /// Static issues are emitted on every `validate_*` call — they are not
+    /// evaluated against segments.  This is useful for advisory notices that
+    /// should always be present regardless of message content (e.g. "AHB layer
+    /// is inactive for this message type").
+    pub fn with_static_issue(mut self, issue: crate::ValidationIssue) -> Self {
+        self.inner.static_issues.push(issue);
+        self
+    }
+
     /// Finalize builder and create context.
     #[must_use = "call `.validate_lenient()` or `.validate_strict()` on the resulting context"]
     pub fn build(self) -> ValidationContext {
@@ -359,7 +376,15 @@ impl ValidationContext {
         let base_ctx = self.build_rule_context();
         // Phase 1: flat validation.
         let mut report = self.validate_with_context_owned(segments, &base_ctx);
-        // Phase 2: group-aware validation — borrow owned segments.
+        // Phase 2: group-aware validation — skip early if no validator has group
+        // rules, avoiding the O(n) borrowed-segment allocation entirely.
+        if !self
+            .validators
+            .iter()
+            .any(|lv| self.layer_enabled(lv.layer) && lv.validator.has_group_rules())
+        {
+            return report;
+        }
         let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
         let unh_mt = borrowed
             .iter()
@@ -398,24 +423,34 @@ impl ValidationContext {
         report: &mut ValidationReport,
         context: &ValidationRuleContext<'_>,
     ) {
+        // Short-circuit: skip the entire DFS tree walk when no enabled validator
+        // has group rules.  This avoids the O(n) borrowed-segment allocation in
+        // `validate_lenient_grouped_owned` for the common case where the context
+        // only has flat (envelope/structure/code-list) validators.
+        if !self
+            .validators
+            .iter()
+            .any(|lv| self.layer_enabled(lv.layer) && lv.validator.has_group_rules())
+        {
+            return;
+        }
         for lv in &self.validators {
             if !self.layer_enabled(lv.layer) {
                 continue;
             }
             lv.validator
                 .validate_group_batch(root, segments, report, context);
-            if self.bail_on_first_critical
-                && report
-                    .errors
-                    .iter()
-                    .any(|i| i.severity == ValidationSeverity::Critical)
-            {
+            if self.bail_on_first_critical && report.critical_count > 0 {
                 break;
             }
         }
     }
 
     /// Execute validators with per-call typed metadata.
+    ///
+    /// `message_type` is set to `None` here; the concrete validation method
+    /// (`validate_with_context`) re-extracts the message type from the `UNH`
+    /// segment, so there is no information loss.
     pub fn validate_lenient_with<T: Any + Send + Sync>(
         &self,
         segments: &[Segment<'_>],
@@ -448,14 +483,6 @@ impl ValidationContext {
 
     /// Execute validators in lenient mode against an owned-segment slice.
     pub fn validate_lenient_owned(&self, segments: &[OwnedSegment]) -> ValidationReport {
-        if self.validators.is_empty()
-            && !self.envelope_enabled
-            && !self.structure_enabled
-            && !self.code_list_enabled
-            && !self.profile_enabled
-        {
-            return ValidationReport::default();
-        }
         self.validate_with_context_owned(segments, &self.build_rule_context())
     }
 
@@ -526,12 +553,7 @@ impl ValidationContext {
                 lv.validator
                     .validate_batch(active, &mut report, effective_ctx);
             }
-            if self.bail_on_first_critical
-                && report
-                    .errors
-                    .iter()
-                    .any(|i| i.severity == ValidationSeverity::Critical)
-            {
+            if self.bail_on_first_critical && report.critical_count > 0 {
                 break;
             }
         }
@@ -545,6 +567,19 @@ impl ValidationContext {
             {
                 if issue.message_ref.is_none() {
                     issue.message_ref = Some(msg_ref.clone());
+                }
+            }
+        }
+        for issue in &self.static_issues {
+            match issue.severity {
+                ValidationSeverity::Critical | ValidationSeverity::Error => {
+                    report.add_error(issue.clone());
+                }
+                ValidationSeverity::Warning => {
+                    report.warnings.push(issue.clone());
+                }
+                ValidationSeverity::Info => {
+                    report.infos.push(issue.clone());
                 }
             }
         }
@@ -608,12 +643,7 @@ impl ValidationContext {
                 lv.validator
                     .validate_batch(active, &mut report, effective_ctx);
             }
-            if self.bail_on_first_critical
-                && report
-                    .errors
-                    .iter()
-                    .any(|i| i.severity == ValidationSeverity::Critical)
-            {
+            if self.bail_on_first_critical && report.critical_count > 0 {
                 break;
             }
         }
@@ -627,6 +657,20 @@ impl ValidationContext {
             {
                 if issue.message_ref.is_none() {
                     issue.message_ref = Some(msg_ref.clone());
+                }
+            }
+        }
+        // Append static advisory issues unconditionally.
+        for issue in &self.static_issues {
+            match issue.severity {
+                ValidationSeverity::Critical | ValidationSeverity::Error => {
+                    report.add_error(issue.clone());
+                }
+                ValidationSeverity::Warning => {
+                    report.warnings.push(issue.clone());
+                }
+                ValidationSeverity::Info => {
+                    report.infos.push(issue.clone());
                 }
             }
         }
@@ -663,15 +707,37 @@ impl ValidationContext {
     /// }
     /// ```
     pub fn fork_with_message_ref(&self, message_ref: impl Into<String>) -> Self {
-        Self {
-            validators: self
-                .validators
-                .iter()
-                .map(|lv| LayeredValidator {
+        let validators: Vec<LayeredValidator> = self
+            .validators
+            .iter()
+            .filter_map(|lv| {
+                lv.validator.fork().map(|forked| LayeredValidator {
                     layer: lv.layer,
-                    validator: lv.validator.fork(),
+                    validator: forked,
                 })
-                .collect(),
+            })
+            .inspect(|_| {})
+            .collect();
+        // Count how many validators were excluded (non-forkable).
+        let excluded_count = self.validators.len() - validators.len();
+
+        let mut static_issues = self.static_issues.clone();
+        if excluded_count > 0 {
+            static_issues.push(
+                crate::ValidationIssue::new(
+                    crate::ValidationSeverity::Info,
+                    format!(
+                        "{excluded_count} validator(s) excluded from forked context \
+                         because fork() returned None; their group-pass rules will \
+                         not run for this message",
+                    ),
+                )
+                .with_rule_id("edifact-rs::fork::excluded-validator"),
+            );
+        }
+
+        Self {
+            validators,
             envelope_enabled: self.envelope_enabled,
             structure_enabled: self.structure_enabled,
             code_list_enabled: self.code_list_enabled,
@@ -680,6 +746,7 @@ impl ValidationContext {
             message_type: self.message_type.clone(),
             message_ref: Some(message_ref.into()),
             metadata: self.metadata.clone(),
+            static_issues,
         }
     }
 

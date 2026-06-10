@@ -4,18 +4,6 @@ error: field `rff`: #[edifact(composite)] is only valid on segment structs
 27 |     #[edifact(composite)]
    |               ^^^^^^^^^
 
-error[E0433]: failed to resolve: unresolved import
-  --> tests/ui/fail_composite_on_message.rs:18:34
-   |
-18 | #[derive(DeriveEdifactSerialize, DeriveEdifactDeserialize)]
-   |                                  ^^^^^^^^^^^^^^^^^^^^^^^^ unresolved import
-   |
-   = note: this error originates in the derive macro `DeriveEdifactDeserialize` (in Nightly builds, run with -Z macro-backtrace for more info)
-help: consider importing this module
-   |
-4  + use crate::support::edifact_rs::helpers;
-   |
-
 warning: unused imports: `composite_element`, `find_qualified_segment_owned`, `find_qualified_segment`, `find_segment_owned`, `find_segment`, and `find_segments_typed`
  --> tests/ui/support.rs
   |

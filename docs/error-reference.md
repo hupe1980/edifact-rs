@@ -406,9 +406,9 @@ element definition contains invalid position 0; positions must be >= 1 (one-base
 positions are one-based — position 1 is the first element slot. Position 0 is
 never valid.
 
-**Fix**: Pass `position >= 1` to `OwnedElementRef::new`. Use
-`OwnedElementRef::new` (which validates at construction time) rather than
-building the struct directly.
+**Fix**: Pass `position >= 1` to `OwnedElementRef::new_unchecked`. Use
+`OwnedElementRef::new_unchecked` (which validates at construction time) rather than
+building the struct directly. For external/untrusted data use `OwnedElementRef::try_new`.
 
 ---
 

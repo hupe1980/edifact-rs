@@ -143,19 +143,33 @@ pub trait Validator: Send + Sync {
     ) {
     }
 
+    /// Returns `true` if this validator has any group-scoped rules.
+    ///
+    /// Used by [`crate::ValidationContext`] to short-circuit the
+    /// group-tree walk when no validator in the context has group rules,
+    /// avoiding the cost of allocating a borrowed slice for nothing.
+    ///
+    /// The default implementation returns `false`.
+    fn has_group_rules(&self) -> bool {
+        false
+    }
+
     /// Configure message-type metadata for validators that support explicit scoping.
     fn set_message_type(&mut self, _message_type: Option<&str>) {}
 
     /// Create a `Box<dyn Validator>` clone of this validator for context forking.
     ///
-    /// The default implementation panics — only validators that are cheaply clonable
-    /// (i.e. backed by `Arc` data, like [`ProfileRulePack`]) need to override this.
-    fn fork(&self) -> Box<dyn Validator + Send + Sync> {
-        panic!(
-            "Validator::fork() not implemented for {}; \
-             only ProfileRulePack supports context forking",
-            std::any::type_name::<Self>()
-        )
+    /// Return `Some(boxed_clone)` for validators that support cheap forking
+    /// (e.g. those backed by `Arc` data, like [`ProfileRulePack`]).
+    ///
+    /// Return `None` for validators that cannot be forked (e.g. stateful validators
+    /// without `Clone`).  Returning `None` causes the validator to be silently
+    /// **excluded** from forked contexts — forking is used by
+    /// [`crate::ValidationContext::validate_lenient_grouped`] to validate
+    /// each group in isolation, so omitting a non-forkable validator from the
+    /// forked context is safer than panicking.
+    fn fork(&self) -> Option<Box<dyn Validator + Send + Sync>> {
+        None
     }
 }
 
@@ -173,6 +187,21 @@ where
 }
 
 /// Convert a low-level validation error to a user-facing issue and append it.
+///
+/// # Severity mapping
+///
+/// The mapping from `EdifactError` variant to `ValidationSeverity` is:
+///
+/// | Variant | Severity |
+/// |---|---|
+/// | `InvalidCodeValue` | `Warning` |
+/// | `QualifierMismatch` | `Warning` |
+/// | *(everything else)* | `Error` |
+///
+/// Rationale: code-list and qualifier mismatches indicate a value that *could*
+/// be intentional (non-standard extension codes are common in practice).  All
+/// structural violations — missing segments, wrong element counts, parse errors
+/// — are hard errors.
 pub(crate) fn report_error(report: &mut ValidationReport, err: EdifactError) {
     let issue = issue_from_error(err);
     match issue.severity {
@@ -203,8 +232,8 @@ impl Validator for EnvelopeValidator {
         }
     }
 
-    fn fork(&self) -> Box<dyn Validator + Send + Sync> {
-        Box::new(EnvelopeValidator)
+    fn fork(&self) -> Option<Box<dyn Validator + Send + Sync>> {
+        Some(Box::new(EnvelopeValidator))
     }
 }
 
@@ -579,7 +608,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("parse failed");
 
-        let pack_with_bail = two_dtm_errors_rule().bail_on_first_error(true);
+        let pack_with_bail = two_dtm_errors_rule().with_bail_on_first_error(true);
         let ctx = ValidationContext::builder()
             .with_profile_pack(pack_with_bail)
             .build();

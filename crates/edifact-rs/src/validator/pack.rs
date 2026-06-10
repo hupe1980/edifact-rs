@@ -19,9 +19,9 @@ use std::sync::Arc;
 /// `Vec` rather than returning a single `Option`.  This lets one rule iterate
 /// every matching segment and report *all* violations — not just the first.
 ///
-/// # `bail_on_first_error` interaction
+/// # `with_bail_on_first_error` interaction
 ///
-/// When [`ProfileRulePack::bail_on_first_error`] is set, the pack stops calling
+/// When [`ProfileRulePack::with_bail_on_first_error`] is set, the pack stops calling
 /// further rules as soon as this method pushes at least one error-severity issue.
 /// Issues already pushed remain in the report; subsequent rules in the same pack
 /// are skipped.
@@ -109,8 +109,12 @@ pub(super) struct NamedGroupRule {
     /// Stable identifier, used for override deduplication.
     pub(super) id: Option<Arc<str>>,
     /// If `Some(name)`, this rule fires only when `group.definition == name`.
-    pub(super) group_scope: Option<&'static str>,
+    ///
+    /// Accepts any `Into<Arc<str>>` at construction time, so both `&'static str`
+    /// literals and owned `String`s are valid group scopes.
+    pub(super) group_scope: Option<Arc<str>>,
     /// The rule closure.
+    #[allow(clippy::type_complexity)]
     pub(super) rule: Arc<
         dyn Fn(
                 &SegmentGroupIndexed,
@@ -126,7 +130,7 @@ impl Clone for NamedGroupRule {
     fn clone(&self) -> Self {
         Self {
             id: self.id.clone(),
-            group_scope: self.group_scope,
+            group_scope: self.group_scope.clone(),
             rule: Arc::clone(&self.rule),
         }
     }
@@ -136,12 +140,21 @@ impl Clone for NamedGroupRule {
 pub struct ProfileRulePack {
     name: String,
     /// Set of EDIFACT message types this pack is scoped to (e.g. `"ORDERS"`, `"INVOIC"`).
-    message_types: std::collections::BTreeSet<String>,
+    ///
+    /// Most packs target one or two message types, so a `SmallVec<[String; 2]>` avoids
+    /// any heap allocation for the common case.
+    message_types: smallvec::SmallVec<[String; 2]>,
     /// Association-assigned code (DE 0057) this pack is bound to, e.g. `"5.5.3a"`.
     release: Option<String>,
     pub(super) rules: Vec<NamedRule>,
     pub(super) group_rules: Vec<NamedGroupRule>,
     pub(super) bail_on_first_error: bool,
+    /// Maximum number of issues that a single rule may contribute per evaluation.
+    ///
+    /// `None` means unlimited.  Useful for noisy rules that can fire once per
+    /// segment occurrence in a large message (e.g. a missing-qualifier check
+    /// over thousands of DTM segments).
+    pub(super) max_issues_per_rule: Option<usize>,
 }
 
 impl ProfileRulePack {
@@ -149,11 +162,12 @@ impl ProfileRulePack {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
-            message_types: std::collections::BTreeSet::new(),
+            message_types: smallvec::SmallVec::new(),
             release: None,
             rules: Vec::new(),
             group_rules: Vec::new(),
             bail_on_first_error: false,
+            max_issues_per_rule: None,
         }
     }
 
@@ -194,7 +208,10 @@ impl ProfileRulePack {
 
     /// Restrict this pack to one or more EDIFACT message types from the `UNH` segment.
     pub fn for_message_type(mut self, message_type: impl Into<String>) -> Self {
-        self.message_types.insert(message_type.into());
+        let s = message_type.into();
+        if !self.message_types.iter().any(|x| x == &s) {
+            self.message_types.push(s);
+        }
         self
     }
 
@@ -206,8 +223,22 @@ impl ProfileRulePack {
 
     /// Stop evaluating rules in this pack after the first `Error`- or `Critical`-severity
     /// finding.
-    pub fn bail_on_first_error(mut self, bail: bool) -> Self {
+    pub fn with_bail_on_first_error(mut self, bail: bool) -> Self {
         self.bail_on_first_error = bail;
+        self
+    }
+
+    /// Cap the number of issues any single rule may emit per evaluation pass.
+    ///
+    /// When a rule fires more than `limit` times in one `validate_batch` call,
+    /// the excess issues are silently discarded.  This prevents a single noisy
+    /// rule (e.g. a missing-qualifier check iterating thousands of segments)
+    /// from flooding the report.
+    ///
+    /// The cap applies *per rule per call*, not globally.  Set to `None` (the
+    /// default) for unlimited output.
+    pub fn with_max_issues_per_rule(mut self, limit: usize) -> Self {
+        self.max_issues_per_rule = Some(limit);
         self
     }
 
@@ -298,12 +329,13 @@ impl ProfileRulePack {
     pub fn forbid_segment(self, tag: &'static str, rule_id: impl Into<Arc<str>>) -> Self {
         let id: Arc<str> = rule_id.into();
         self.with_named_stateless_rule_fn(id.clone(), move |segments, issues| {
-            for (occ, _s) in segments.iter().filter(|s| s.tag == tag).enumerate() {
+            for (occ, s) in segments.iter().filter(|s| s.tag == tag).enumerate() {
                 issues.push(
                     ValidationIssue::new(
                         ValidationSeverity::Error,
                         format!("segment {tag} must not appear"),
                     )
+                    .with_offset(s.span.start)
                     .with_segment(tag)
                     .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
                     .with_rule_id(id.as_ref()),
@@ -410,6 +442,9 @@ impl ProfileRulePack {
     /// The closure is called only when the DFS traversal enters a group whose
     /// [`SegmentGroupIndexed::definition`] equals `group_scope` (e.g. `"SG5"`).
     ///
+    /// Accepts any `impl Into<Arc<str>>` as `group_scope`, so both `&'static str`
+    /// literals and owned `String`s are valid.
+    ///
     /// # Example
     ///
     /// ```rust,ignore
@@ -426,7 +461,7 @@ impl ProfileRulePack {
     /// ```
     pub fn with_scoped_group_rule_fn<F>(
         mut self,
-        group_scope: &'static str,
+        group_scope: impl Into<Arc<str>>,
         id: impl Into<Arc<str>>,
         rule: F,
     ) -> Self
@@ -442,7 +477,7 @@ impl ProfileRulePack {
     {
         self.group_rules.push(NamedGroupRule {
             id: Some(id.into()),
-            group_scope: Some(group_scope),
+            group_scope: Some(group_scope.into()),
             rule: Arc::new(rule),
         });
         self
@@ -454,100 +489,101 @@ impl ProfileRulePack {
     /// once per `SG5` instance that contains no `LOC` segment.
     ///
     /// Issues are automatically annotated with the group name.
+    ///
+    /// Accepts any `impl Into<Arc<str>>` as `group_scope`.
     pub fn require_segment_in_group(
         self,
-        group_scope: &'static str,
+        group_scope: impl Into<Arc<str>>,
         tag: &'static str,
         rule_id: impl Into<Arc<str>>,
     ) -> Self {
+        let scope: Arc<str> = group_scope.into();
         let id: Arc<str> = rule_id.into();
-        self.with_scoped_group_rule_fn(
-            group_scope,
-            id.clone(),
-            move |_group, segs, _ctx, issues| {
-                if !segs.iter().any(|s| s.tag == tag) {
-                    issues.push(
-                        ValidationIssue::new(
-                            ValidationSeverity::Error,
-                            format!("mandatory segment {tag} is missing from group {group_scope}"),
-                        )
-                        .with_segment(tag)
-                        .with_rule_id(id.as_ref()),
-                    );
-                }
-            },
-        )
+        let scope_msg = Arc::clone(&scope);
+        self.with_scoped_group_rule_fn(scope, id.clone(), move |_group, segs, _ctx, issues| {
+            if !segs.iter().any(|s| s.tag == tag) {
+                issues.push(
+                    ValidationIssue::new(
+                        ValidationSeverity::Error,
+                        format!("mandatory segment {tag} is missing from group {scope_msg}"),
+                    )
+                    .with_segment(tag)
+                    .with_rule_id(id.as_ref()),
+                );
+            }
+        })
     }
 
     /// Assert segment `tag` does **not** appear in any occurrence of group `group_scope`.
     ///
     /// Emits an `Error`-severity issue for each occurrence found.
+    ///
+    /// Accepts any `impl Into<Arc<str>>` as `group_scope`.
     pub fn forbid_segment_in_group(
         self,
-        group_scope: &'static str,
+        group_scope: impl Into<Arc<str>>,
         tag: &'static str,
         rule_id: impl Into<Arc<str>>,
     ) -> Self {
+        let scope: Arc<str> = group_scope.into();
         let id: Arc<str> = rule_id.into();
-        self.with_scoped_group_rule_fn(
-            group_scope,
-            id.clone(),
-            move |_group, segs, _ctx, issues| {
-                for (occ, _s) in segs.iter().filter(|s| s.tag == tag).enumerate() {
-                    issues.push(
-                        ValidationIssue::new(
-                            ValidationSeverity::Error,
-                            format!("segment {tag} must not appear in group {group_scope}"),
-                        )
-                        .with_segment(tag)
-                        .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
-                        .with_rule_id(id.as_ref()),
-                    );
-                }
-            },
-        )
+        let scope_msg = Arc::clone(&scope);
+        self.with_scoped_group_rule_fn(scope, id.clone(), move |_group, segs, _ctx, issues| {
+            for (occ, s) in segs.iter().filter(|s| s.tag == tag).enumerate() {
+                issues.push(
+                    ValidationIssue::new(
+                        ValidationSeverity::Error,
+                        format!("segment {tag} must not appear in group {scope_msg}"),
+                    )
+                    .with_offset(s.span.start)
+                    .with_segment(tag)
+                    .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
+                    .with_rule_id(id.as_ref()),
+                );
+            }
+        })
     }
 
     /// Assert qualifier `qualifier` at `(element, component)` in segment `tag` is
     /// present in every occurrence of group `group_scope`.
+    ///
+    /// Accepts any `impl Into<Arc<str>>` as `group_scope`.
     pub fn require_qualifier_in_group(
         self,
-        group_scope: &'static str,
+        group_scope: impl Into<Arc<str>>,
         tag: &'static str,
         element: u8,
         component: u8,
         qualifier: &'static str,
         rule_id: impl Into<Arc<str>>,
     ) -> Self {
+        let scope: Arc<str> = group_scope.into();
         let id: Arc<str> = rule_id.into();
-        self.with_scoped_group_rule_fn(
-            group_scope,
-            id.clone(),
-            move |_group, segs, _ctx, issues| {
-                for (occ, s) in segs.iter().filter(|s| s.tag == tag).enumerate() {
-                    let actual = s
-                        .get_element(element as usize)
-                        .and_then(|e| e.get_component(component as usize));
-                    if actual != Some(qualifier) {
-                        issues.push(
-                            ValidationIssue::new(
-                                ValidationSeverity::Error,
-                                format!(
-                                    "segment {tag} element {element} component {component} must be \
-                                 {qualifier:?} in group {group_scope}, found {:?}",
-                                    actual.unwrap_or("<absent>")
-                                ),
-                            )
-                            .with_segment(tag)
-                            .with_element_index(element)
-                            .with_component_index(component)
-                            .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
-                            .with_rule_id(id.as_ref()),
-                        );
-                    }
+        let scope_msg = Arc::clone(&scope);
+        self.with_scoped_group_rule_fn(scope, id.clone(), move |_group, segs, _ctx, issues| {
+            for (occ, s) in segs.iter().filter(|s| s.tag == tag).enumerate() {
+                let actual = s
+                    .get_element(element as usize)
+                    .and_then(|e| e.get_component(component as usize));
+                if actual != Some(qualifier) {
+                    issues.push(
+                        ValidationIssue::new(
+                            ValidationSeverity::Error,
+                            format!(
+                                "segment {tag} element {element} component {component} must be \
+                                 {qualifier:?} in group {scope_msg}, found {:?}",
+                                actual.unwrap_or("<absent>")
+                            ),
+                        )
+                        .with_segment(tag)
+                        .with_element_index(element)
+                        .with_component_index(component)
+                        .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
+                        .with_rule_id(id.as_ref()),
+                    );
                 }
-            },
-        )
+            }
+        })
     }
 
     /// Return the number of group-scoped rules in this pack.
@@ -572,8 +608,8 @@ impl ProfileRulePack {
 
         for named in &self.group_rules {
             // Skip if this rule is scoped to a different group name.
-            if let Some(scope) = named.group_scope {
-                if group.definition != scope {
+            if let Some(scope) = &named.group_scope {
+                if group.definition != scope.as_ref() {
                     continue;
                 }
             }
@@ -653,6 +689,20 @@ impl ProfileRulePack {
     ///     .extend_from(&base)?
     ///     .with_stateless_rule_fn(/* 11001-specific rules */);
     /// ```
+    ///
+    /// When your base pack is wrapped in an [`Arc`] you can dereference it:
+    ///
+    /// ```rust,ignore
+    /// use std::sync::Arc;
+    ///
+    /// let base: Arc<ProfileRulePack> = Arc::new(
+    ///     ProfileRulePack::new("BASE").with_stateless_rule_fn(/* … */),
+    /// );
+    ///
+    /// let derived = ProfileRulePack::new("DERIVED")
+    ///     .extend_from(&*base)?          // deref Arc<T> to &T
+    ///     .with_stateless_rule_fn(/* … */);
+    /// ```
     pub fn extend_from(mut self, base: &ProfileRulePack) -> Result<Self, EdifactError> {
         let mut combined = base.rules.clone();
         combined.append(&mut self.rules);
@@ -662,7 +712,9 @@ impl ProfileRulePack {
         combined_group.append(&mut self.group_rules);
         self.group_rules = combined_group;
         for mt in &base.message_types {
-            self.message_types.insert(mt.clone());
+            if !self.message_types.iter().any(|x| x == mt) {
+                self.message_types.push(mt.clone());
+            }
         }
         self.release = merge_release_scopes(self.release.take(), base.release.clone())?;
         Ok(self)
@@ -726,7 +778,11 @@ impl ProfileRulePack {
         }
 
         self.rules.append(&mut to_append);
-        self.message_types.append(&mut other.message_types);
+        for mt in other.message_types.drain(..) {
+            if !self.message_types.iter().any(|x| *x == mt) {
+                self.message_types.push(mt);
+            }
+        }
         // Merge group rules: named overrides replace matching entries; others are appended.
         let mut group_id_to_index: std::collections::HashMap<Arc<str>, usize> = Default::default();
         for (idx, rule) in self.group_rules.iter().enumerate() {
@@ -798,7 +854,7 @@ impl Validator for ProfileRulePack {
             .or_else(|| unh_e1.and_then(|e| e.get_component(0)));
 
         if !self.message_types.is_empty()
-            && !message_type.is_some_and(|mt| self.message_types.contains(mt))
+            && !message_type.is_some_and(|mt| self.message_types.iter().any(|x| x.as_str() == mt))
         {
             return;
         }
@@ -819,6 +875,10 @@ impl Validator for ProfileRulePack {
         for named in &self.rules {
             let errors_before = report.errors.len();
             named.rule.evaluate(segments, context, &mut rule_issues);
+            // Apply per-rule issue cap if configured.
+            if let Some(limit) = self.max_issues_per_rule {
+                rule_issues.truncate(limit);
+            }
             for issue in rule_issues.drain(..) {
                 match issue.severity {
                     ValidationSeverity::Critical | ValidationSeverity::Error => {
@@ -865,7 +925,7 @@ impl Validator for ProfileRulePack {
             .or_else(|| unh_e1.and_then(|e| e.get_component(0)));
 
         if !self.message_types.is_empty()
-            && !message_type.is_some_and(|mt| self.message_types.contains(mt))
+            && !message_type.is_some_and(|mt| self.message_types.iter().any(|x| x.as_str() == mt))
         {
             return;
         }
@@ -884,8 +944,12 @@ impl Validator for ProfileRulePack {
         self.walk_group_tree(root, all_segments, report, context);
     }
 
-    fn fork(&self) -> Box<dyn Validator + Send + Sync> {
-        Box::new(self.clone())
+    fn has_group_rules(&self) -> bool {
+        !self.group_rules.is_empty()
+    }
+
+    fn fork(&self) -> Option<Box<dyn Validator + Send + Sync>> {
+        Some(Box::new(self.clone()))
     }
 }
 
@@ -898,6 +962,7 @@ impl Clone for ProfileRulePack {
             rules: self.rules.clone(),
             group_rules: self.group_rules.clone(),
             bail_on_first_error: self.bail_on_first_error,
+            max_issues_per_rule: self.max_issues_per_rule,
         }
     }
 }
@@ -960,7 +1025,11 @@ impl Validator for Arc<ProfileRulePack> {
             .validate_group_batch(root, all_segments, report, context);
     }
 
-    fn fork(&self) -> Box<dyn Validator + Send + Sync> {
-        Box::new(Arc::clone(self))
+    fn has_group_rules(&self) -> bool {
+        self.as_ref().has_group_rules()
+    }
+
+    fn fork(&self) -> Option<Box<dyn Validator + Send + Sync>> {
+        Some(Box::new(Arc::clone(self)))
     }
 }

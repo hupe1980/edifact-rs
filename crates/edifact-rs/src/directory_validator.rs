@@ -14,16 +14,90 @@ pub enum Status {
 }
 
 /// Reference to a data element within a segment definition.
+/// Reference to a data element within a segment definition.
+///
+/// Fields are private to enforce the one-based position invariant through the
+/// [`ElementRef::new`] constructor.  Use [`ElementRef::new`] for compile-time
+/// literals (panics at compile time when `position == 0`) or struct-update
+/// syntax with const values.
+///
+/// Use [`OwnedElementRef`] for runtime-constructed element refs.
 #[derive(Debug, Clone, Copy)]
 pub struct ElementRef {
     /// One-based element position in the segment definition.
-    pub position: u8,
+    position: u8,
     /// UN/EDIFACT data element identifier.
-    pub data_element: &'static str,
+    data_element: &'static str,
     /// Requirement status of the element.
-    pub status: Status,
+    status: Status,
     /// Maximum repetition count for this element.
-    pub max_repeat: u8,
+    max_repeat: u8,
+}
+
+impl ElementRef {
+    /// Construct an `ElementRef` with compile-time position validation.
+    ///
+    /// `position` must be ≥ 1 (one-based).  When called in a `const` context
+    /// (e.g. inside a `static` array initialiser), a zero `position` causes a
+    /// **compile-time error**.  At runtime it panics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `position == 0`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use edifact_rs::{ElementRef, Status};
+    ///
+    /// const BGM_1001: ElementRef = ElementRef::new(1, "1001", Status::Mandatory, 1);
+    /// ```
+    #[must_use]
+    pub const fn new(
+        position: u8,
+        data_element: &'static str,
+        status: Status,
+        max_repeat: u8,
+    ) -> Self {
+        assert!(
+            position != 0,
+            "ElementRef position must be >= 1 (one-based)"
+        );
+        Self {
+            position,
+            data_element,
+            status,
+            max_repeat,
+        }
+    }
+
+    /// One-based element position in the segment definition.
+    #[must_use]
+    #[inline]
+    pub const fn position(&self) -> u8 {
+        self.position
+    }
+
+    /// UN/EDIFACT data element identifier.
+    #[must_use]
+    #[inline]
+    pub const fn data_element(&self) -> &'static str {
+        self.data_element
+    }
+
+    /// Requirement status of the element.
+    #[must_use]
+    #[inline]
+    pub const fn status(&self) -> Status {
+        self.status
+    }
+
+    /// Maximum repetition count for this element.
+    #[must_use]
+    #[inline]
+    pub const fn max_repeat(&self) -> u8 {
+        self.max_repeat
+    }
 }
 
 /// Definition of an EDIFACT segment (tag + element structure).
@@ -43,7 +117,7 @@ pub struct SegmentDefinition {
 /// to construct validators from data that is not available at compile time (e.g. loaded
 /// from JSON or a database at startup).
 ///
-/// Use [`OwnedElementRef::new`] for compile-time-known positions (panics on invalid
+/// Use [`OwnedElementRef::new_unchecked`] for compile-time-known positions (panics on invalid
 /// input, no error handling noise) or [`OwnedElementRef::try_new`] when the position
 /// comes from an external source and you need a `Result`. Fields are private to prevent
 /// bypassing the position invariant through struct-literal syntax.
@@ -63,7 +137,7 @@ pub struct OwnedElementRef {
 ///
 /// Used by [`DirectoryValidatorBuilder`] and [`DirectoryValidator::from_owned_definitions`].
 ///
-/// Use [`OwnedSegmentDef::new`] for compile-time-known tags (panics on invalid input,
+/// Use [`OwnedSegmentDef::new_unchecked`] for compile-time-known tags (panics on invalid input,
 /// no error handling noise) or [`OwnedSegmentDef::try_new`] when the tag comes from
 /// an external source and you need a `Result`. Fields are private to prevent bypassing
 /// the tag invariant through struct-literal syntax.
@@ -92,10 +166,10 @@ impl OwnedSegmentDef {
     /// # Panics
     ///
     /// Panics if `tag` is not exactly three ASCII uppercase letters.
-    pub fn new(tag: String, name: String, elements: Vec<OwnedElementRef>) -> Self {
+    pub fn new_unchecked(tag: String, name: String, elements: Vec<OwnedElementRef>) -> Self {
         assert!(
             tag.len() == 3 && tag.bytes().all(|b| b.is_ascii_uppercase()),
-            "OwnedSegmentDef::new: tag must be exactly three ASCII uppercase letters, got {tag:?}"
+            "OwnedSegmentDef::new_unchecked: tag must be exactly three ASCII uppercase letters, got {tag:?}"
         );
         Self {
             tag,
@@ -106,7 +180,7 @@ impl OwnedSegmentDef {
 
     /// Construct an owned segment definition, returning an error for invalid tags.
     ///
-    /// Prefer this over [`new`][Self::new] when the tag comes from an external
+    /// Prefer this over [`new_unchecked`][Self::new_unchecked] when the tag comes from an external
     /// source (user input, config file, database) and you want to handle the
     /// error without panicking.
     ///
@@ -162,10 +236,15 @@ impl OwnedElementRef {
     /// # Panics
     ///
     /// Panics if `position` is `0` (positions are one-based).
-    pub fn new(position: u8, data_element: String, status: Status, max_repeat: u8) -> Self {
+    pub fn new_unchecked(
+        position: u8,
+        data_element: String,
+        status: Status,
+        max_repeat: u8,
+    ) -> Self {
         assert!(
             position != 0,
-            "OwnedElementRef::new: position must be >= 1 (one-based), got 0"
+            "OwnedElementRef::new_unchecked: position must be >= 1 (one-based), got 0"
         );
         Self {
             position,
@@ -177,7 +256,7 @@ impl OwnedElementRef {
 
     /// Construct an owned element reference, returning an error for position `0`.
     ///
-    /// Prefer this over [`new`][Self::new] when the position comes from an
+    /// Prefer this over [`new_unchecked`][Self::new_unchecked] when the position comes from an
     /// external source (user input, config file, database) and you want to
     /// handle the error without panicking.
     ///
@@ -253,7 +332,7 @@ enum SegmentDefRef<'a> {
     Owned(&'a OwnedSegmentDef),
 }
 
-impl<'a> SegmentDefRef<'a> {
+impl SegmentDefRef<'_> {
     /// Returns the highest defined element position (one-based → used directly as
     /// the maximum zero-based slot count for element-count validation).
     ///
@@ -487,10 +566,10 @@ impl DirectoryValidator {
     ///
     /// ```rust,ignore
     /// let defs = vec![
-    ///     OwnedSegmentDef::new(
+    ///     OwnedSegmentDef::new_unchecked(
     ///         "BGM".to_owned(),
     ///         "Beginning of message".to_owned(),
-    ///         vec![OwnedElementRef::new(1, "C002".to_owned(), Status::Mandatory, 1)],
+    ///         vec![OwnedElementRef::new_unchecked(1, "C002".to_owned(), Status::Mandatory, 1)],
     ///     ),
     /// ];
     /// let validator = DirectoryValidator::from_owned_definitions(defs)
@@ -808,10 +887,10 @@ impl Validator for DirectoryValidator {
 /// ```rust,ignore
 /// let validator = DirectoryValidatorBuilder::new("my-profile")
 ///     .add_segment(
-///         OwnedSegmentDef::new(
+///         OwnedSegmentDef::new_unchecked(
 ///             "BGM".to_owned(),
 ///             "Beginning of message".to_owned(),
-///             vec![OwnedElementRef::new(1, "C002".to_owned(), Status::Mandatory, 1)],
+///             vec![OwnedElementRef::new_unchecked(1, "C002".to_owned(), Status::Mandatory, 1)],
 ///         ),
 ///     )
 ///     .build();
@@ -868,12 +947,7 @@ impl DirectoryValidatorBuilder {
 mod tests {
     use super::*;
 
-    static TEST_ELEMENTS: &[ElementRef] = &[ElementRef {
-        position: 1,
-        data_element: "C507",
-        status: Status::Mandatory,
-        max_repeat: 1,
-    }];
+    static TEST_ELEMENTS: &[ElementRef] = &[ElementRef::new(1, "C507", Status::Mandatory, 1)];
 
     static TEST_SEGMENT: SegmentDefinition = SegmentDefinition {
         tag: "TST",

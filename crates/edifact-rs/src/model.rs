@@ -30,15 +30,18 @@ impl Span {
 
     /// Length of the span in bytes.
     ///
-    /// # Panics
-    ///
-    /// Panics in debug **and** release builds when `end < start` (inverted span).
-    /// Use `saturating_sub` directly if you need a non-panicking variant.
+    /// In debug builds, asserts `end >= start` (inverted spans are a bug).
+    /// In release builds, returns 0 for inverted spans rather than panicking,
+    /// so a single corrupt span does not abort an entire validation run.
     #[inline]
     pub fn len(self) -> usize {
-        self.end
-            .checked_sub(self.start)
-            .unwrap_or_else(|| panic!("Span::len: end ({}) < start ({})", self.end, self.start))
+        debug_assert!(
+            self.end >= self.start,
+            "Span::len: end ({}) < start ({})",
+            self.end,
+            self.start
+        );
+        self.end.saturating_sub(self.start)
     }
 
     /// Returns `true` if the span covers zero bytes.
@@ -89,6 +92,15 @@ impl<'a> Segment<'a> {
     #[inline]
     pub fn element_str(&self, n: usize) -> Option<&str> {
         self.elements.get(n)?.get_component(0)
+    }
+
+    /// Get component `comp` of element `elem` (both 0-based), or `None` if absent.
+    ///
+    /// Mirrors [`OwnedSegment::component_str`], eliminating the need to chain
+    /// `get_element(elem)?.get_component(comp)` in rule closures.
+    #[inline]
+    pub fn component_str(&self, elem: usize, comp: usize) -> Option<&str> {
+        self.elements.get(elem)?.get_component(comp)
     }
 
     /// Return the byte span of the element at position `n`, if it exists.
@@ -343,6 +355,19 @@ impl<'a> BorrowedSegment<'a> {
             .map(|(c, _)| c.as_str())
     }
 
+    /// Get component `comp` of element `elem` (both 0-based), or `None` if absent.
+    ///
+    /// Mirrors [`OwnedSegment::component_str`].
+    #[inline]
+    pub fn component_str(&self, elem: usize, comp: usize) -> Option<&'a str> {
+        self.0
+            .elements
+            .get(elem)?
+            .components
+            .get(comp)
+            .map(|(c, _)| c.as_str())
+    }
+
     /// Return the byte span of the element at position `n`, if it exists.
     #[inline]
     pub fn element_span(&self, n: usize) -> Option<Span> {
@@ -360,7 +385,7 @@ impl OwnedSegment {
     /// Get the first component of element `n`, or `None` if absent.
     ///
     /// This is the zero-allocation equivalent of `as_borrowed().element_str(n)`.
-    /// Used internally by [`crate::helpers::find_segment_owned`] and the derived
+    /// Used internally by [`crate::find_segment_owned`] and the derived
     /// [`crate::EdifactDeserialize::edifact_deserialize_owned`] implementations.
     #[inline]
     pub fn element_str(&self, n: usize) -> Option<&str> {
