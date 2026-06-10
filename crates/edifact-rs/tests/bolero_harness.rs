@@ -138,7 +138,7 @@ fn fuzz_validation_layers_no_panic() {
 
 #[test]
 fn fuzz_qualifier_matches_pattern_no_panic() {
-    use edifact_rs::helpers::qualifier_matches_pattern;
+    use edifact_rs::qualifier_matches_pattern;
     // For any two arbitrary strings the function must never panic.
     check!().with_type::<(String, String)>().cloned().for_each(
         |(value, pattern): (String, String)| {
@@ -149,7 +149,7 @@ fn fuzz_qualifier_matches_pattern_no_panic() {
 
 #[test]
 fn fuzz_qualifier_pattern_invariants() {
-    use edifact_rs::helpers::qualifier_matches_pattern;
+    use edifact_rs::qualifier_matches_pattern;
     // Invariant 1: a literal pattern (no '*') is always an exact match.
     // Invariant 2: pattern "*" matches every value (wildcard-only).
     // Invariant 3: empty pattern matches only empty value.
@@ -184,12 +184,12 @@ fn fuzz_qualifier_pattern_invariants() {
 #[test]
 fn fuzz_service_string_advice_is_valid_no_panic() {
     use edifact_rs::ServiceStringAdvice;
-    // ServiceStringAdvice::from_bytes + is_valid must not panic for any 9-byte input.
+    // ServiceStringAdvice::from_bytes_unchecked + is_valid must not panic for any 9-byte input.
     check!()
         .with_type::<[u8; 9]>()
         .cloned()
         .for_each(|bytes: [u8; 9]| {
-            let ssa = ServiceStringAdvice::from_bytes(&bytes);
+            let ssa = ServiceStringAdvice::from_bytes_unchecked(&bytes);
             let _ = ssa.is_valid();
         });
 }
@@ -205,8 +205,8 @@ fn fuzz_service_string_advice_valid_una_prefix() {
             let mut bytes = [0u8; 9];
             bytes[..3].copy_from_slice(b"UNA");
             bytes[3..].copy_from_slice(&suffix);
-            let ssa = ServiceStringAdvice::from_bytes(&bytes);
-            // If from_bytes returns a valid object, is_valid must also not panic.
+            let ssa = ServiceStringAdvice::from_bytes_unchecked(&bytes);
+            // If from_bytes_unchecked returns an object, is_valid must also not panic.
             let _ = ssa.is_valid();
         });
 }
@@ -294,8 +294,8 @@ fn fuzz_reader_no_panic_and_equivalence() {
 }
 
 #[test]
-fn fuzz_from_bytes_strict_no_panic() {
-    // `ServiceStringAdvice::from_bytes_strict` must not panic or unwind for any
+fn fuzz_from_bytes_no_panic() {
+    // `ServiceStringAdvice::from_bytes` must not panic or unwind for any
     // arbitrary byte input.  It may return errors or valid SSAs.
     use edifact_rs::ServiceStringAdvice;
 
@@ -304,7 +304,7 @@ fn fuzz_from_bytes_strict_no_panic() {
         .cloned()
         .for_each(|input: Vec<u8>| {
             // May succeed or return an error — must never panic.
-            let _ = ServiceStringAdvice::from_bytes_strict(&input);
+            let _ = ServiceStringAdvice::from_bytes(&input);
         });
 }
 
@@ -335,13 +335,13 @@ fn fuzz_tokenizer_with_limit_no_panic() {
             // parse with it — exercises alternative delimiter paths via the public
             // Tokenizer + Parser API.
             if input.len() >= 9 {
-                let ssa = ServiceStringAdvice::from_bytes(&input[..9]);
+                let ssa = ServiceStringAdvice::from_bytes_unchecked(&input[..9]);
                 // Ensure is_valid does not panic.
                 let _ = ssa.is_valid();
                 // Parse using the derived SSA with a 64 KiB per-segment limit.
                 let t = Tokenizer::with_limit(&input, ssa, 65_536);
-                let mut p = Parser::new(t);
-                while let Some(result) = p.next() {
+                let p = Parser::new(t);
+                for result in p {
                     let _ = result;
                 }
             }
@@ -361,25 +361,10 @@ fn fuzz_directory_validator_no_panic() {
     // A minimal static segment directory: just BGM and DTM so we exercise both
     // "known segment" and "unknown segment" paths without pulling in a full directory.
     static BGM_ELEMENTS: &[ElementRef] = &[
-        ElementRef {
-            position: 1,
-            data_element: "C002",
-            status: Status::Conditional,
-            max_repeat: 1,
-        },
-        ElementRef {
-            position: 2,
-            data_element: "1004",
-            status: Status::Conditional,
-            max_repeat: 1,
-        },
+        ElementRef::new(1, "C002", Status::Conditional, 1),
+        ElementRef::new(2, "1004", Status::Conditional, 1),
     ];
-    static DTM_ELEMENTS: &[ElementRef] = &[ElementRef {
-        position: 1,
-        data_element: "C507",
-        status: Status::Mandatory,
-        max_repeat: 1,
-    }];
+    static DTM_ELEMENTS: &[ElementRef] = &[ElementRef::new(1, "C507", Status::Mandatory, 1)];
     static BGM_DEF: SegmentDefinition = SegmentDefinition {
         tag: "BGM",
         name: "Beginning of message",
@@ -495,14 +480,14 @@ fn fuzz_escape_value_no_unescaped_delimiters() {
                 release as char,
                 term as char,
             );
-            let ssa = ServiceStringAdvice::from_bytes_strict(una.as_bytes());
+            let ssa = ServiceStringAdvice::from_bytes(una.as_bytes());
             let Ok(ssa) = ssa else {
                 return; // Invalid SSA combination — skip.
             };
 
             // Build a Writer backed by a Vec<u8>.
             let mut buf = Vec::new();
-            let Ok(writer) = Writer::with_una(&mut buf, ssa.clone()) else {
+            let Ok(writer) = Writer::with_una(&mut buf, ssa) else {
                 return;
             };
 

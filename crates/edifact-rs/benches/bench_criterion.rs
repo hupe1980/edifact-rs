@@ -16,7 +16,7 @@ fn bench_tokenizer(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(small.len() as u64));
     group.bench_with_input(BenchmarkId::new("small", small.len()), &small, |b, data| {
         b.iter(|| {
-            let ssa = ServiceStringAdvice::from_bytes(data);
+            let ssa = ServiceStringAdvice::from_bytes_unchecked(data);
             let tokens: Vec<_> = Tokenizer::new(black_box(data), ssa).collect();
             black_box(tokens);
         });
@@ -26,7 +26,7 @@ fn bench_tokenizer(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(large.len() as u64));
     group.bench_with_input(BenchmarkId::new("1mb", large.len()), &large, |b, data| {
         b.iter(|| {
-            let ssa = ServiceStringAdvice::from_bytes(data);
+            let ssa = ServiceStringAdvice::from_bytes_unchecked(data);
             let tokens: Vec<_> = Tokenizer::new(black_box(data), ssa).collect();
             black_box(tokens);
         });

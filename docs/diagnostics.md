@@ -11,7 +11,7 @@ programmatically.
 
 ```toml
 [dependencies]
-edifact-rs = { version = "0.9", features = ["diagnostics"] }
+edifact-rs = { version = "0.10", features = ["diagnostics"] }
 ```
 
 You also need `miette` in your dependencies to render errors:

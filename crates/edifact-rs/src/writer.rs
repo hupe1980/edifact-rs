@@ -244,7 +244,11 @@ impl<W: Write> Writer<W> {
         //      while continuation bytes of multi-byte sequences always have the high
         //      bit set (0x80–0xBF).
         //   3. All other bytes are copied verbatim from the valid UTF-8 source.
-        Cow::Owned(unsafe { String::from_utf8_unchecked(out) })
+        Cow::Owned(
+            String::from_utf8(out).expect(
+                "escape_value: output is not valid UTF-8; this is a bug in the escape logic",
+            ),
+        )
     }
     /// Write only the segment tag bytes — no element separator or terminator.
     ///

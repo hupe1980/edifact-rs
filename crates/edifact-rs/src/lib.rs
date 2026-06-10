@@ -1,4 +1,5 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
+#![deny(unsafe_code)]
 
 //! `edifact-rs` — zero-copy EDIFACT tokenizer, parser, writer, serde traits,
 //! validation engine, and extensible directory support.
@@ -166,6 +167,10 @@ pub mod group;
 /// Core zero-copy and owned EDIFACT data model types.
 pub(crate) mod model;
 pub(crate) mod parser;
+/// Validation report types: [`ValidationSeverity`], [`ValidationIssue`], [`ValidationReport`].
+///
+/// These types are also re-exported from the crate root.
+pub mod report;
 pub(crate) mod tokenizer;
 pub(crate) mod validator;
 pub(crate) mod writer;
@@ -180,10 +185,9 @@ pub use envelope::{
     InterchangeEnvelope, MessageEnvelope, MessageIdentifier, parse_unh, validate_envelope,
     validate_envelope_from_owned, validate_envelope_lenient, validate_envelope_lenient_from_owned,
 };
-pub use error::{EdifactError, IoError, ValidationIssue, ValidationReport, ValidationSeverity};
+pub use error::{EdifactError, IoError};
 pub use group::{
-    GroupDef, SegmentGroup, SegmentGroupIndexed, group_owned_segments,
-    group_owned_segments_indexed, group_segments, group_segments_indexed,
+    GroupDef, SegmentGroupIndexed, group_owned_segments_indexed, group_segments_indexed,
 };
 pub use model::{
     BorrowedElement, BorrowedSegment, Element, OwnedElement, OwnedSegment, Segment, Span,
@@ -192,6 +196,7 @@ pub use parser::{
     Parser, ReaderConfig, from_bufread, from_bufread_stream, from_bufread_stream_with_config,
     from_reader_with_config,
 };
+pub use report::{ValidationIssue, ValidationReport, ValidationSeverity};
 pub use tokenizer::{ServiceStringAdvice, Tokenizer};
 pub use validator::{
     EnvelopeValidator, ProfileRule, ProfileRulePack, ValidationContext, ValidationContextBuilder,
@@ -205,11 +210,14 @@ pub use writer::Writer;
 pub use de::{
     CompositeElement, DispatchedMessage, EdifactCompositeDeserialize, EdifactDeserialize,
     EdifactSegmentTag, MessageDispatch, MessageWindow, MessageWindowsIter, MessageWindowsSliceIter,
-    OwnedMessageWindow, SegmentAccessor, deserialize, deserialize_all_from_reader,
-    deserialize_all_streaming, deserialize_first_from_reader, deserialize_first_streaming,
-    deserialize_messages_bytes, deserialize_messages_from_reader, deserialize_str, element_str,
-    find_qualified_segment, find_segment, groups_are_contiguous_by_qualifier,
-    message_windows_from_reader, optional_element, required_element,
+    OwnedMessageWindow, SegmentAccessor, composite_element, contiguous_groups_by_qualifier,
+    deserialize, deserialize_all_from_reader, deserialize_all_streaming,
+    deserialize_first_from_reader, deserialize_first_streaming, deserialize_messages_bytes,
+    deserialize_messages_from_reader, deserialize_str, element_str, find_qualified_segment,
+    find_qualified_segment_owned, find_segment, find_segment_owned, find_segment_typed,
+    find_segments_iter, find_segments_typed, get_components_iter,
+    groups_are_contiguous_by_qualifier, message_windows_from_reader, optional_component,
+    optional_element, qualifier_matches_pattern, required_component, required_element,
 };
 
 /// Splits a byte slice into [`MessageWindow`] views, one per `UNH`/`UNT` envelope,
@@ -224,57 +232,6 @@ pub use de::message_windows_bytes as from_bytes_windows;
 
 // ── Proc-macro support ─────────────────────────────────────────────────────────
 
-/// Segment-navigation helpers for working with parsed EDIFACT segments.
-///
-/// These functions cover the most common patterns when extracting data from
-/// a parsed `&[Segment<'_>]` or `&[OwnedSegment]` slice.
-///
-/// ## Segment lookup
-///
-/// - [`find_segment`] — locate the first segment with a given tag.
-/// - [`find_qualified_segment`] — locate a segment by tag *and* qualifier (element 0).
-/// - [`helpers::find_qualified_segment_owned`] — owned-segment variant.
-/// - [`helpers::find_segment_owned`] — owned-segment variant of `find_segment`.
-/// - [`helpers::find_segment_typed`] — find a segment matching an `EdifactSegmentTag` implementor.
-/// - [`helpers::find_segments_typed`] — iterate all segments matching a tag type.
-/// - [`helpers::find_segments_iter`] — iterate all segments matching a tag string.
-///
-/// ## Element and component access
-///
-/// - [`element_str`] — extract the raw string value of an element.
-/// - [`required_element`] — extract a mandatory element, returning an error when absent.
-/// - [`optional_element`] — extract an optional element as `Option<&str>`.
-/// - [`helpers::required_component`] — extract a mandatory component within a composite element.
-/// - [`helpers::optional_component`] — extract an optional component within a composite element.
-/// - [`helpers::get_components_iter`] — iterate over the components of a composite element.
-/// - [`helpers::composite_element`] — retrieve a composite element as a [`crate::CompositeElement`].
-///
-/// ## Pattern matching
-///
-/// - [`helpers::qualifier_matches_pattern`] — test whether a qualifier value matches a
-///   wildcard pattern (e.g. `"E01*"` matches `"E010"`, `"E011"`, …).
-///
-/// ## Groups
-///
-/// - [`helpers::contiguous_groups_by_qualifier`] — collect contiguous groups of segments
-///   sharing the same qualifier value into a `Vec<Vec<…>>`.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// use edifact_rs::helpers::{find_segment, required_element};
-///
-/// let bgm = find_segment(segments, "BGM").ok_or(/* … */)?;
-/// let doc_code = required_element(bgm, 0)?;
-/// ```
-pub mod helpers {
-    pub use crate::de::{
-        composite_element, contiguous_groups_by_qualifier, element_str, find_qualified_segment,
-        find_qualified_segment_owned, find_segment, find_segment_owned, find_segment_typed,
-        find_segments_iter, find_segments_typed, get_components_iter, optional_component,
-        optional_element, qualifier_matches_pattern, required_component, required_element,
-    };
-}
 pub use directory_validator::{
     DirectoryValidator, DirectoryValidatorBuilder, ElementRef, OwnedElementRef, OwnedSegmentDef,
     SegmentDefinition, Status,
@@ -400,13 +357,10 @@ pub fn from_bytes(input: &[u8]) -> FromBytesIter<'_> {
 /// let result: Result<Vec<_>, _> = from_bytes_with_config(b"BGM+220+1+9'", cfg).collect();
 /// assert!(result.is_ok());
 /// ```
-pub fn from_bytes_with_config<'a>(
-    input: &'a [u8],
-    config: parser::ReaderConfig,
-) -> FromBytesIter<'a> {
+pub fn from_bytes_with_config(input: &[u8], config: parser::ReaderConfig) -> FromBytesIter<'_> {
     let segments_remaining = config.max_segments;
     let bytes_remaining = config.max_input_bytes;
-    match tokenizer::ServiceStringAdvice::from_bytes_strict(input) {
+    match tokenizer::ServiceStringAdvice::from_bytes(input) {
         Ok(ssa) => {
             let t = tokenizer::Tokenizer::with_limit(input, ssa, config.max_segment_bytes);
             FromBytesIter {

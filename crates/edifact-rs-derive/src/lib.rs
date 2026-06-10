@@ -1,3 +1,4 @@
+#![deny(unsafe_code)]
 //! Derive macros for `EdifactSerialize` and `EdifactDeserialize`.
 //!
 //! # Segment struct (single segment)
@@ -54,9 +55,9 @@
 //!
 //! At runtime the generated deserialization code collects contiguous occurrences of
 //! the inner segment type `T` into the `Vec` using
-//! `edifact_rs::helpers::contiguous_groups_by_qualifier`.
+//! `edifact_rs::contiguous_groups_by_qualifier`.
 //! This is behaviorally different from a bare `Vec<T>` without `#[edifact(group)]`,
-//! which uses `edifact_rs::helpers::find_segments_typed` and does
+//! which uses `edifact_rs::find_segments_typed` and does
 //! not enforce contiguity.
 //!
 //! # `#[edifact(required)]` on `Option<T>` fields
@@ -811,11 +812,11 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
         let find_seg = if let Some(qual) = &struct_attrs.qualifier {
             quote! {
-                ::edifact_rs::helpers::find_qualified_segment(segments, #seg_tag, #qual)
+                ::edifact_rs::find_qualified_segment(segments, #seg_tag, #qual)
             }
         } else {
             quote! {
-                ::edifact_rs::helpers::find_segment(segments, #seg_tag)
+                ::edifact_rs::find_segment(segments, #seg_tag)
             }
         };
 
@@ -829,7 +830,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         let inner_ty = option_inner_type(ty)
                             .ok_or_else(|| syn::Error::new(ident.span(), "expected Option<T>"))?;
                         return Ok(quote! {
-                            let #ident = match ::edifact_rs::helpers::composite_element(__seg, #idx) {
+                            let #ident = match ::edifact_rs::composite_element(__seg, #idx) {
                                 ::core::option::Option::Some(__composite) => {
                                     ::core::option::Option::Some(
                                         <#inner_ty as ::edifact_rs::EdifactCompositeDeserialize>::edifact_deserialize_composite(__composite)?
@@ -841,7 +842,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     }
                     return Ok(quote! {
                         let #ident = <#ty as ::edifact_rs::EdifactCompositeDeserialize>::edifact_deserialize_composite(
-                            ::edifact_rs::helpers::composite_element(__seg, #idx).ok_or_else(|| ::edifact_rs::EdifactError::MissingRequiredElement {
+                            ::edifact_rs::composite_element(__seg, #idx).ok_or_else(|| ::edifact_rs::EdifactError::MissingRequiredElement {
                                 tag: #seg_tag.to_owned(),
                                 element_index: #idx as usize,
                             })?
@@ -987,11 +988,11 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // Works directly on `&[OwnedSegment]` without allocating a `Vec<Segment>`.
         let find_seg_owned = if let Some(qual) = &struct_attrs.qualifier {
             quote! {
-                ::edifact_rs::helpers::find_qualified_segment_owned(segments, #seg_tag, #qual)
+                ::edifact_rs::find_qualified_segment_owned(segments, #seg_tag, #qual)
             }
         } else {
             quote! {
-                ::edifact_rs::helpers::find_segment_owned(segments, #seg_tag)
+                ::edifact_rs::find_segment_owned(segments, #seg_tag)
             }
         };
 
@@ -1173,7 +1174,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         let inner_ty = option_inner_type(ty)
                             .ok_or_else(|| syn::Error::new(ident.span(), "expected Option<T>"))?;
                         quote! {
-                            let #ident = match ::edifact_rs::helpers::find_qualified_segment(
+                            let #ident = match ::edifact_rs::find_qualified_segment(
                                 segments,
                                 <#inner_ty as ::edifact_rs::EdifactSegmentTag>::SEGMENT_TAG,
                                 #qual,
@@ -1190,7 +1191,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         }
                     } else {
                         quote! {
-                            let __seg = ::edifact_rs::helpers::find_qualified_segment(
+                            let __seg = ::edifact_rs::find_qualified_segment(
                                 segments,
                                 <#ty as ::edifact_rs::EdifactSegmentTag>::SEGMENT_TAG,
                                 #qual,
@@ -1208,7 +1209,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     let inner_ty = vec_inner_type(ty)
                         .ok_or_else(|| syn::Error::new(ident.span(), "expected Vec<T>"))?;
                     quote! {
-                        let #ident = ::edifact_rs::helpers::find_segments_typed::<#inner_ty>(segments)
+                        let #ident = ::edifact_rs::find_segments_typed::<#inner_ty>(segments)
                             .map(|__seg| {
                                 <#inner_ty as ::edifact_rs::EdifactDeserialize>::edifact_deserialize(
                                     ::core::slice::from_ref(__seg),
@@ -1271,7 +1272,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         let inner_ty = option_inner_type(ty)
                             .ok_or_else(|| syn::Error::new(ident.span(), "expected Option<T>"))?;
                         quote! {
-                            let #ident = match ::edifact_rs::helpers::find_qualified_segment_owned(
+                            let #ident = match ::edifact_rs::find_qualified_segment_owned(
                                 segments,
                                 <#inner_ty as ::edifact_rs::EdifactSegmentTag>::SEGMENT_TAG,
                                 #qual,
@@ -1288,7 +1289,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         }
                     } else {
                         quote! {
-                            let __seg = ::edifact_rs::helpers::find_qualified_segment_owned(
+                            let __seg = ::edifact_rs::find_qualified_segment_owned(
                                 segments,
                                 <#ty as ::edifact_rs::EdifactSegmentTag>::SEGMENT_TAG,
                                 #qual,
