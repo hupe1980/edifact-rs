@@ -62,15 +62,26 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Wait for crates.io to index edifact-rs-derive
+        shell: bash
         run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; \
+              print(next(p['version'] for p in pkgs if p['name']=='edifact-rs-derive'))")
           indexed=false
-          for i in $(seq 1 10); do
-            cargo search edifact-rs-derive 2>/dev/null | grep -q "^edifact-rs-derive" && echo "Indexed." && indexed=true && break
-            echo "Waiting for crates.io to index edifact-rs-derive... ($i/10)"
+          for i in $(seq 1 12); do
+            if curl -sf -o /dev/null \
+                -H "User-Agent: edifact-rs-publish-ci/github-actions" \
+                "https://crates.io/api/v1/crates/edifact-rs-derive/${version}"; then
+              echo "edifact-rs-derive ${version} is available on crates.io."
+              indexed=true
+              break
+            fi
+            echo "Waiting for crates.io to index edifact-rs-derive ${version}... ($i/12)"
             sleep 15
           done
           if [ "$indexed" != "true" ]; then
-            echo "Timed out waiting for edifact-rs-derive to be indexed on crates.io" >&2
+            echo "Timed out waiting for edifact-rs-derive ${version} to be indexed on crates.io" >&2
             exit 1
           fi
 
