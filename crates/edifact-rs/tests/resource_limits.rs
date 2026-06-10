@@ -67,7 +67,7 @@ fn max_segments_larger_than_message_yields_all() {
 
 #[test]
 fn max_input_bytes_stops_before_end() {
-    // Allow exactly the first segment's bytes + 1 spare byte so the
+    // Allow exactly the first segment's bytes so the
     // cursor stops before reading the second segment.
     // UNB+UNOA:1+SENDER+RECEIVER+200101:0900+1' = 41 bytes
     let first_seg_len = FIVE_SEGMENT_MSG

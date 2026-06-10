@@ -716,7 +716,6 @@ impl ValidationContext {
                     validator: forked,
                 })
             })
-            .inspect(|_| {})
             .collect();
         // Count how many validators were excluded (non-forkable).
         let excluded_count = self.validators.len() - validators.len();
@@ -728,8 +727,8 @@ impl ValidationContext {
                     crate::ValidationSeverity::Info,
                     format!(
                         "{excluded_count} validator(s) excluded from forked context \
-                         because fork() returned None; their group-pass rules will \
-                         not run for this message",
+                         because fork() returned None; all their rules (flat and \
+                         group-pass) will not run for this message",
                     ),
                 )
                 .with_rule_id("edifact-rs::fork::excluded-validator"),

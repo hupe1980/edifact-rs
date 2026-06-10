@@ -535,14 +535,6 @@ impl ValidationReport {
         &mut self.errors
     }
 
-    /// Returns all error-level [`ValidationIssue`]s as a mutable `Vec`.
-    ///
-    /// Gives full `Vec` API access (e.g. `push`, `extend`, `retain`) for code that
-    /// needs to build reports programmatically rather than through the validation pipeline.
-    pub fn errors_vec_mut(&mut self) -> &mut Vec<ValidationIssue> {
-        &mut self.errors
-    }
-
     /// Returns all warning-level [`ValidationIssue`]s in this report.
     pub fn warnings(&self) -> &[ValidationIssue] {
         &self.warnings
@@ -553,11 +545,6 @@ impl ValidationReport {
         &mut self.warnings
     }
 
-    /// Returns all warning-level [`ValidationIssue`]s as a mutable `Vec`.
-    pub fn warnings_vec_mut(&mut self) -> &mut Vec<ValidationIssue> {
-        &mut self.warnings
-    }
-
     /// Returns all informational [`ValidationIssue`]s in this report.
     pub fn infos(&self) -> &[ValidationIssue] {
         &self.infos
@@ -565,11 +552,6 @@ impl ValidationReport {
 
     /// Returns all informational [`ValidationIssue`]s mutably.
     pub fn infos_mut(&mut self) -> &mut [ValidationIssue] {
-        &mut self.infos
-    }
-
-    /// Returns all informational [`ValidationIssue`]s as a mutable `Vec`.
-    pub fn infos_vec_mut(&mut self) -> &mut Vec<ValidationIssue> {
         &mut self.infos
     }
 

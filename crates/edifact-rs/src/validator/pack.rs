@@ -235,10 +235,10 @@ impl ProfileRulePack {
     /// rule (e.g. a missing-qualifier check iterating thousands of segments)
     /// from flooding the report.
     ///
-    /// The cap applies *per rule per call*, not globally.  Set to `None` (the
-    /// default) for unlimited output.
-    pub fn with_max_issues_per_rule(mut self, limit: usize) -> Self {
-        self.max_issues_per_rule = Some(limit);
+    /// The cap applies *per rule per call*, not globally.  Pass `None` to
+    /// remove a previously set cap and restore unlimited output.
+    pub fn with_max_issues_per_rule(mut self, limit: impl Into<Option<usize>>) -> Self {
+        self.max_issues_per_rule = limit.into();
         self
     }
 

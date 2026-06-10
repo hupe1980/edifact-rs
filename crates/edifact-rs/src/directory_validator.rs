@@ -14,12 +14,10 @@ pub enum Status {
 }
 
 /// Reference to a data element within a segment definition.
-/// Reference to a data element within a segment definition.
 ///
 /// Fields are private to enforce the one-based position invariant through the
 /// [`ElementRef::new`] constructor.  Use [`ElementRef::new`] for compile-time
-/// literals (panics at compile time when `position == 0`) or struct-update
-/// syntax with const values.
+/// literals (panics at compile time when `position == 0`).
 ///
 /// Use [`OwnedElementRef`] for runtime-constructed element refs.
 #[derive(Debug, Clone, Copy)]

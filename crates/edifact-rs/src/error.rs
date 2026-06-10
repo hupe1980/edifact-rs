@@ -368,8 +368,8 @@ pub enum EdifactError {
     /// An [`crate::OwnedElementRef`] has `position = 0`, which is never valid.
     ///
     /// Element positions are one-based: position 1 refers to the first element
-    /// slot.  Position 0 is reserved and invalid.  Use [`crate::OwnedElementRef::new_unchecked`]
-    /// to catch this at construction time.
+    /// slot.  Position 0 is reserved and invalid.  Use [`crate::OwnedElementRef::try_new`]
+    /// to get a `Result` instead of a panic.
     #[error("element definition contains invalid position 0; positions must be >= 1 (one-based)")]
     InvalidElementPosition,
 
