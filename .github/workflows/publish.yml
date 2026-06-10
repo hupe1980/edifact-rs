@@ -50,7 +50,14 @@ jobs:
           fi
 
       - name: Publish edifact-rs-derive
-        run: cargo publish -p edifact-rs-derive
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(cargo publish -p edifact-rs-derive 2>&1) && echo "$output" || {
+            echo "$output"
+            echo "$output" | grep -q "already exists" || exit 1
+            echo "edifact-rs-derive already published on crates.io, skipping."
+          }
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -68,6 +75,13 @@ jobs:
           fi
 
       - name: Publish edifact-rs
-        run: cargo publish -p edifact-rs
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(cargo publish -p edifact-rs 2>&1) && echo "$output" || {
+            echo "$output"
+            echo "$output" | grep -q "already exists" || exit 1
+            echo "edifact-rs already published on crates.io, skipping."
+          }
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
