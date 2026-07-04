@@ -260,18 +260,18 @@ pub struct MessageEnvelope {
     /// A reference shared across related messages or exchanges on the same network
     /// path.  Used by some EDI network profiles (e.g. certain gas-market MIGs) to
     /// correlate messages that belong to a single business transaction.
-    /// `None` when element [2] is absent or empty.
+    /// `None` when element \[2\] is absent or empty.
     pub common_access_ref: Option<String>,
     /// Sequence of transfers (UNH S010 DE 0070, element index 3), if present.
     ///
     /// When a large message is split across multiple interchanges, this is the
     /// 1-based index of this segment within the sequence.  `None` when the message
-    /// is not split (element [3] absent).
+    /// is not split (element \[3\] absent).
     pub sequence_of_transfers: Option<u32>,
     /// Transfer position indicator (UNH S010 DE 0073, element index 3 comp 1), if present.
     ///
     /// Values per ISO 9735-1 §6.2.3: `"C"` = continuation, `"F"` = first, `"L"` = last.
-    /// `None` when element [3] is absent.
+    /// `None` when element \[3\] is absent.
     pub transfer_position: Option<String>,
     /// Declared segment count from `UNT`.
     pub declared_segment_count: u32,
@@ -423,7 +423,7 @@ impl ValidatedInterchange {
     /// borrow of `self`.  In practice this is always satisfied when passing a string
     /// literal (`&'static str`) or any string whose lifetime is at least as long as
     /// the `ValidatedInterchange` reference.  For short-lived computed strings, use
-    /// [`messages_by_type`] which collects eagerly and releases the string reference
+    /// [`messages_by_type`](Self::messages_by_type) which collects eagerly and releases the string reference
     /// immediately.
     #[inline]
     #[must_use]
