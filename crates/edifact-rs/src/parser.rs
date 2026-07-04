@@ -711,6 +711,7 @@ fn read_next_raw_segment<R: BufRead>(
                     element_sep: una[4],
                     decimal_mark: una[5],
                     release_char: una[6],
+                    repetition_sep: una[7],
                     segment_term: una[8],
                 };
                 if !ssa.is_valid() {

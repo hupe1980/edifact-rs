@@ -3,6 +3,7 @@ use std::borrow::Cow;
 
 /// A half-open byte span within an EDIFACT payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Span {
     /// Start byte offset (inclusive).
     pub start: usize,

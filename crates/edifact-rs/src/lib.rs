@@ -182,7 +182,8 @@ pub mod ser;
 
 // ── flat re-exports: core ─────────────────────────────────────────────────────
 pub use envelope::{
-    InterchangeEnvelope, MessageEnvelope, MessageIdentifier, parse_unh, validate_envelope,
+    FunctionalGroupEnvelope, GroupIdentifier, InterchangeEnvelope, LenientResult, MessageEnvelope,
+    MessageIdentifier, ValidatedInterchange, parse_ung, parse_unh, validate_envelope,
     validate_envelope_from_owned, validate_envelope_lenient, validate_envelope_lenient_from_owned,
 };
 pub use error::{EdifactError, IoError};
@@ -202,7 +203,7 @@ pub use validator::{
     EnvelopeValidator, ProfileRule, ProfileRulePack, ValidationContext, ValidationContextBuilder,
     ValidationLayer, ValidationRuleContext, Validator, validate_each,
 };
-pub use writer::Writer;
+pub use writer::{MessageWriter, Writer};
 
 // ── flat re-exports: serde ────────────────────────────────────────────────────
 
@@ -339,11 +340,14 @@ pub fn from_bytes(input: &[u8]) -> FromBytesIter<'_> {
 /// - `max_segment_bytes`: returns [`EdifactError::SegmentTooLong`] if a single segment
 ///   exceeds the threshold.
 /// - `max_segments`: stops the iterator after this many segments have been yielded.
-/// - `max_input_bytes`: stops the iterator once this many bytes have been consumed.
-///   The byte count uses the absolute input position (i.e. `Segment::span.end` after
-///   each segment is yielded), so it correctly accounts for the 9-byte UNA header and
-///   segment terminators.  The last segment whose end position exceeds the limit is still
-///   returned; processing stops before fetching the next one.
+/// - `max_input_bytes`: **stop-after** limit — the iterator stops once the cumulative
+///   byte position (tracked via `Segment::span.end`) reaches or exceeds this value.
+///   The last segment whose `span.end` exceeds the limit is **still returned**;
+///   no further segments are fetched after that.  This means at most one segment
+///   worth of bytes can be processed beyond the limit, which is sufficient for a
+///   DoS guard but is not a strict hard cap.  If your use case requires that every
+///   yielded segment fits entirely within `max_input_bytes` bytes, collect and
+///   filter the output, or set the limit conservatively below the true boundary.
 ///
 /// Pass `ReaderConfig::default()` to use the default 64 KiB per-segment limit with
 /// no segment-count or byte-budget cap.
@@ -536,15 +540,19 @@ pub fn segments_to_bytes_owned(segments: &[OwnedSegment]) -> Result<Vec<u8>, Edi
 /// # Errors
 ///
 /// Returns an error if the envelope is structurally invalid.
-pub fn validate_envelope_owned(segments: &[OwnedSegment]) -> Result<(), EdifactError> {
-    envelope::validate_envelope_from_owned(segments).map(|_| ())
+pub fn validate_envelope_owned(
+    segments: &[OwnedSegment],
+) -> Result<ValidatedInterchange, EdifactError> {
+    envelope::validate_envelope_from_owned(segments)
 }
 
 /// Lenient envelope validation over owned segments — collects all errors.
 ///
-/// Convenience wrapper around [`validate_envelope_lenient_from_owned`] that accepts
-/// `&[OwnedSegment]` directly.  Returns an empty `Vec` when the envelope is valid.
-pub fn validate_envelope_lenient_owned(segments: &[OwnedSegment]) -> Vec<EdifactError> {
+/// Convenience wrapper around [`validate_envelope_lenient_from_owned`].
+/// Returns a [`LenientResult`] with `Some(result)` and empty errors on success.
+/// On count-only violations, returns `Some(partial)` with errors.
+/// On structural failures, returns `None` with errors.
+pub fn validate_envelope_lenient_owned(segments: &[OwnedSegment]) -> LenientResult {
     envelope::validate_envelope_lenient_from_owned(segments)
 }
 

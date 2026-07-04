@@ -131,10 +131,12 @@ pub enum EdifactError {
     /// Invalid UNA service string advice.
     ///
     /// If present, the UNA segment must be exactly 9 bytes: `"UNA"` followed by
-    /// 6 service characters.  The four active characters (element separator,
-    /// component separator, release character, and segment terminator) must be
-    /// mutually distinct and must not be ASCII whitespace.  The decimal mark and
-    /// repetition separator characters are not validated by this check.
+    /// 6 service characters.  The five active characters (`element_sep`,
+    /// `component_sep`, `decimal_mark`, `release_char`, and `segment_term`) must
+    /// all be mutually distinct and in the printable ASCII range `0x21–0x7E`.
+    /// Only the **repetition separator** (UNA byte 7) is not validated by this
+    /// check — it is read and stored but excluded from the uniqueness and
+    /// printability assertions.
     #[error("invalid UNA service string advice")]
     InvalidUna,
 
@@ -415,19 +417,15 @@ pub enum EdifactError {
         offset: usize,
     },
 
-    /// The input contains EDIFACT functional group segments (`UNG`/`UNE`).
+    /// The interchange syntax identifier (UNB DE 0001) is not a recognised ISO 9735-1 value.
     ///
-    /// Functional groups are defined in ISO 9735 but are rarely used in practice
-    /// and are not supported by this library.  Strip `UNG`/`UNE` wrappers before
-    /// calling `validate_envelope`, or process the interchange as raw segments.
+    /// Valid syntax identifiers are: `UNOA`, `UNOB`, `UNOC`, `UNOD`, `UNOE`, `UNOF`, and
+    /// `KECA` (Korean EDI Centre A).  Any other value indicates a non-standard generator
+    /// or a corrupted UNB header.
     #[error(
-        "functional group segments (UNG/UNE) at byte offset {offset} are not supported; \
-         strip them before calling validate_envelope"
+        "unrecognised syntax identifier '{0}': expected UNOA/UNOB/UNOC/UNOD/UNOE/UNOF (or KECA)"
     )]
-    FunctionalGroupNotSupported {
-        /// Byte offset of the first `UNG` or `UNE` segment found.
-        offset: usize,
-    },
+    UnrecognisedSyntaxIdentifier(String),
 }
 
 impl From<std::io::Error> for EdifactError {
@@ -469,8 +467,10 @@ impl EdifactError {
             Self::IncompatibleReleaseScopes { .. } => "E026",
             Self::InvalidFieldValue { .. } => "E027",
             Self::UnexpectedDataToken { .. } => "E028",
-            Self::FunctionalGroupNotSupported { .. } => "E029",
+            // E029 is permanently retired (was FunctionalGroupNotSupported, removed when
+            // full UNG/UNE support was added — functional groups are now parsed natively)
             Self::ValidationErrors { .. } => "E030",
+            Self::UnrecognisedSyntaxIdentifier(_) => "E031",
         }
     }
 
@@ -540,14 +540,12 @@ impl EdifactError {
             Self::UnexpectedDataToken { .. } => Some(
                 "A data element appeared before any segment tag; check for partial writes or encoding corruption",
             ),
-            Self::FunctionalGroupNotSupported { .. } => Some(
-                "Strip UNG/UNE segments before calling validate_envelope, or process the interchange as raw segments",
-            ),
             Self::ValidationErrors { .. }
             | Self::MessageCountMismatch { .. }
             | Self::SegmentCountMismatch { .. }
             | Self::UnexpectedMessageType { .. }
             | Self::InterchangeTooLarge { .. }
+            | Self::UnrecognisedSyntaxIdentifier(_)
             | Self::InvalidUtf8
             | Self::Io(_) => None,
         }
@@ -721,12 +719,12 @@ impl miette::Diagnostic for EdifactError {
                 "Data element at offset {offset} appeared before any segment tag. \
                  Check for partial writes or encoding corruption",
             ))),
-            Self::FunctionalGroupNotSupported { offset } => Some(Box::new(format!(
-                "Functional group segment (UNG/UNE) found at offset {offset}. \
-                 Strip UNG/UNE wrappers before calling validate_envelope",
-            ))),
             Self::ValidationErrors { error_count, .. } => Some(Box::new(format!(
                 "Validation found {error_count} error(s). Inspect the ValidationReport for details",
+            ))),
+            Self::UnrecognisedSyntaxIdentifier(id) => Some(Box::new(format!(
+                "Syntax identifier '{id}' is not defined in ISO 9735-1. \
+                 Valid values are UNOA, UNOB, UNOC, UNOD, UNOE, UNOF (or KECA for KEC-A profile)",
             ))),
         }
     }

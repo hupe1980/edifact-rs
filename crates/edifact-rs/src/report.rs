@@ -4,6 +4,8 @@
 
 use std::sync::Arc;
 
+use crate::model::Span;
+
 // ── ValidationSeverity ────────────────────────────────────────────────────────
 
 /// Priority level for a validation error or warning.
@@ -116,7 +118,20 @@ pub struct ValidationIssue {
     /// The error or warning message.
     pub message: String,
     /// Byte offset in the source (if available).
+    ///
+    /// For precise source-range highlighting (e.g. in `miette` diagnostics or
+    /// Language Server Protocol `Range` values), prefer [`span`](Self::span)
+    /// which carries both start and end.  `offset` is kept for backwards
+    /// compatibility and is always equal to `span.start` when both are set.
     pub offset: Option<usize>,
+    /// Half-open byte range of the relevant segment or element in the source.
+    ///
+    /// Provides precise source-range information for diagnostics and editor
+    /// tooling.  Use [`with_span`](Self::with_span) to set this from a
+    /// [`Span`] obtained from a parsed [`crate::Segment`].  Setting `span`
+    /// automatically populates `offset` with `span.start` for backwards
+    /// compatibility.
+    pub span: Option<Span>,
     /// Segment tag involved (if known).
     pub segment_tag: Option<String>,
     /// Profile/MIG rule identifier, if applicable.
@@ -191,6 +206,7 @@ impl ValidationIssue {
             severity,
             message: message.into(),
             offset: None,
+            span: None,
             segment_tag: None,
             rule_id: None,
             element_index: None,
@@ -212,6 +228,32 @@ impl ValidationIssue {
     /// Set the byte offset for this issue.
     pub fn with_offset(mut self, offset: usize) -> Self {
         self.offset = Some(offset);
+        self
+    }
+
+    /// Set the full byte-range span for this issue.
+    ///
+    /// Also populates [`offset`](Self::offset) with `span.start` so that
+    /// existing code that only reads `offset` continues to work.
+    ///
+    /// Use this in preference to `with_offset` when you have access to the
+    /// source [`Span`] from a parsed [`crate::Segment`] — the full range
+    /// enables precise source-range highlighting in `miette` diagnostics and
+    /// Language Server Protocol tooling.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use edifact_rs::{ValidationIssue, ValidationSeverity, Span};
+    /// let span = Span::new(42, 57);
+    /// let issue = ValidationIssue::new(ValidationSeverity::Error, "BGM code missing")
+    ///     .with_span(span);
+    /// assert_eq!(issue.offset, Some(42));
+    /// assert_eq!(issue.span, Some(span));
+    /// ```
+    pub fn with_span(mut self, span: Span) -> Self {
+        self.offset = Some(span.start);
+        self.span = Some(span);
         self
     }
 
@@ -369,6 +411,13 @@ impl ValidationIssue {
     #[inline]
     pub fn offset(&self) -> Option<usize> {
         self.offset
+    }
+
+    /// Half-open byte range of the relevant source region, if available.
+    #[must_use]
+    #[inline]
+    pub fn span(&self) -> Option<Span> {
+        self.span
     }
 
     /// Segment tag involved in this issue, if known.
@@ -633,6 +682,40 @@ impl ValidationReport {
         self.infos.append(&mut other.infos);
     }
 
+    /// Extend `self` with cloned issues from `other` (borrowing).
+    ///
+    /// Unlike [`merge`](Self::merge), this method borrows `other` so the caller
+    /// retains ownership.  Issues are cloned and appended to the respective
+    /// severity buckets.  Use `merge` when you can afford to consume `other`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use edifact_rs::{ValidationReport, ValidationIssue, ValidationSeverity};
+    ///
+    /// let mut combined = ValidationReport::default();
+    /// let report = ValidationReport::from_issues(
+    ///     vec![ValidationIssue::new(ValidationSeverity::Error, "bad segment")],
+    ///     vec![],
+    ///     vec![],
+    /// );
+    /// combined.extend_from(&report);
+    /// assert_eq!(combined.errors().len(), 1);
+    /// // `report` is still accessible
+    /// assert_eq!(report.errors().len(), 1);
+    /// ```
+    pub fn extend_from(&mut self, other: &ValidationReport) {
+        for issue in &other.errors {
+            self.add_error(issue.clone());
+        }
+        for issue in &other.warnings {
+            self.add_warning(issue.clone());
+        }
+        for issue in &other.infos {
+            self.add_info(issue.clone());
+        }
+    }
+
     /// Iterate over all issues matching an exact profile/MIG rule identifier.
     ///
     /// Searches errors, warnings, and infos in that order.  Returns a lazy
@@ -851,6 +934,50 @@ impl std::fmt::Display for ValidationReport {
 }
 
 impl std::error::Error for ValidationReport {}
+
+impl Extend<ValidationIssue> for ValidationReport {
+    /// Push each issue into the appropriate severity bucket.
+    ///
+    /// This enables ergonomic batch collection:
+    ///
+    /// ```rust
+    /// use edifact_rs::{ValidationReport, ValidationIssue, ValidationSeverity};
+    ///
+    /// let issues = vec![
+    ///     ValidationIssue::new(ValidationSeverity::Error, "bad segment"),
+    ///     ValidationIssue::new(ValidationSeverity::Warning, "optional field missing"),
+    ///     ValidationIssue::new(ValidationSeverity::Info, "advisory note"),
+    /// ];
+    /// let mut report = ValidationReport::default();
+    /// report.extend(issues);
+    /// assert_eq!(report.errors().len(), 1);
+    /// assert_eq!(report.warnings().len(), 1);
+    /// assert_eq!(report.infos().len(), 1);
+    /// ```
+    fn extend<I: IntoIterator<Item = ValidationIssue>>(&mut self, iter: I) {
+        for issue in iter {
+            match issue.severity {
+                ValidationSeverity::Critical | ValidationSeverity::Error => {
+                    self.add_error(issue);
+                }
+                ValidationSeverity::Warning => {
+                    self.add_warning(issue);
+                }
+                _ => {
+                    self.add_info(issue);
+                }
+            }
+        }
+    }
+}
+
+impl FromIterator<ValidationIssue> for ValidationReport {
+    fn from_iter<I: IntoIterator<Item = ValidationIssue>>(iter: I) -> Self {
+        let mut report = ValidationReport::default();
+        report.extend(iter);
+        report
+    }
+}
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 

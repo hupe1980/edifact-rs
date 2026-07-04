@@ -318,8 +318,7 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
         | EdifactError::InvalidDelimiter { offset, .. }
         | EdifactError::InvalidText { offset }
         | EdifactError::UnexpectedEof { offset }
-        | EdifactError::UnexpectedDataToken { offset }
-        | EdifactError::FunctionalGroupNotSupported { offset } => {
+        | EdifactError::UnexpectedDataToken { offset } => {
             issue = issue.with_offset(offset);
         }
         _ => {}

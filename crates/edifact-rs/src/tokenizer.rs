@@ -8,7 +8,12 @@ use memchr::{memchr, memchr3};
 
 /// EDIFACT service string advice (UNA segment).
 ///
-/// Defaults: `+` (element), `:` (component), `?` (release), space (reserved), `'` (segment).
+/// Defaults: `+` (element), `:` (component), `?` (release), `.` (decimal mark),
+/// `*` (repetition separator), `'` (segment terminator).
+///
+/// All six service characters are now first-class fields.  `is_valid()` checks
+/// all six for mutual distinctness and printability so that a collision between
+/// the repetition separator and any other delimiter is caught at UNA parse time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServiceStringAdvice {
     /// Data element separator (default `+`)
@@ -20,6 +25,17 @@ pub struct ServiceStringAdvice {
     /// Decimal notation mark (default `.`; UNA byte 5, ISO 9735-1 §7.1).
     /// Not used by the tokenizer for splitting, but preserved for downstream use.
     pub decimal_mark: u8,
+    /// Repetition separator (default `*`; UNA byte 7, ISO 9735-4 §3.1).
+    ///
+    /// Some DVGW gas-market profiles and other non-default EDIFACT implementations
+    /// use a non-standard repetition separator.  This field is always populated
+    /// from the UNA (or defaults to `b'*'` when no UNA is present) so that
+    /// downstream code can access it without re-parsing the raw UNA bytes.
+    ///
+    /// The tokenizer does not currently split on the repetition separator — that
+    /// responsibility belongs to downstream consumers — but `is_valid()` includes
+    /// it in the six-way uniqueness check to catch delimiter collisions early.
+    pub repetition_sep: u8,
     /// Segment terminator (default `'`)
     pub segment_term: u8,
 }
@@ -31,15 +47,21 @@ impl Default for ServiceStringAdvice {
             component_sep: b':',
             release_char: b'?',
             decimal_mark: b'.',
+            // Space (0x20) is the conventional "not used" sentinel found at
+            // position 7 in the vast majority of real-world EDIFACT interchanges
+            // that do not employ ISO 9735-4 repetition elements.  `is_valid()`
+            // accepts space here without a printability or uniqueness check.
+            repetition_sep: b' ',
             segment_term: b'\'',
         }
     }
 }
 
 impl ServiceStringAdvice {
-    /// Parse a UNA header and validate that the five active service characters
-    /// (`element_sep`, `component_sep`, `decimal_mark`, `release_char`, `segment_term`) are all
-    /// mutually distinct and in the printable ASCII range `0x21–0x7E`.
+    /// Parse a UNA header and validate that all six service characters
+    /// (`element_sep`, `component_sep`, `decimal_mark`, `release_char`,
+    /// `repetition_sep`, and `segment_term`) are mutually distinct and in
+    /// the printable ASCII range `0x21–0x7E`.
     ///
     /// Returns [`EdifactError::InvalidUna`] if the invariant is violated.
     /// Falls back to [`ServiceStringAdvice::default`] when no UNA is present.
@@ -60,6 +82,9 @@ impl ServiceStringAdvice {
     ///
     /// If no UNA is present, returns [`ServiceStringAdvice::default`].
     ///
+    /// The `repetition_sep` field is populated from UNA byte 7 (ISO 9735-4 §3.1)
+    /// or defaults to `b'*'` when no UNA is present.
+    ///
     /// # When to use
     ///
     /// Use this only for trusted internal data (e.g. round-tripping data where
@@ -76,7 +101,7 @@ impl ServiceStringAdvice {
                 element_sep: input[4],
                 decimal_mark: input[5],
                 release_char: input[6],
-                // input[7] = repetition separator (ISO 9735-4 §3.1; not modelled here)
+                repetition_sep: input[7],
                 segment_term: input[8],
             }
         } else {
@@ -84,16 +109,25 @@ impl ServiceStringAdvice {
         }
     }
 
-    /// Return `true` if all five active service characters are mutually distinct
-    /// and all fall in the printable ASCII range `0x21–0x7E` (excl. space `0x20`,
-    /// control characters `0x00–0x1F`, and `DEL 0x7F`).
+    /// Return `true` if all active service characters are mutually distinct
+    /// and printable ASCII.
     ///
-    /// The five characters are `element_sep`, `component_sep`, `decimal_mark`,
-    /// `release_char`, and `segment_term`.  All 10 pairwise combinations are
-    /// checked.
+    /// The five *mandatory* characters (`element_sep`, `component_sep`,
+    /// `decimal_mark`, `release_char`, `segment_term`) must all be in the
+    /// printable ASCII range `0x21–0x7E` and mutually distinct (10 pairwise
+    /// checks).
     ///
-    /// Bytes outside `0x21–0x7E` are rejected: high-bytes (`>= 0x80`) would cause
-    /// incorrect single-byte tokenization of multi-byte UTF-8 sequences, and DEL
+    /// The `repetition_sep` field is also validated when it is **not a space**
+    /// (`0x20`).  A space at position 7 of the UNA is the conventional
+    /// "absent" sentinel used by interchanges that do not employ repetition
+    /// elements (ISO 9735-1 / ISO 9735-4 §3.1), and it is accepted without
+    /// a printability or uniqueness check.  Any other value must be printable
+    /// ASCII and distinct from the five mandatory characters and from the
+    /// configured repetition separator value.
+    ///
+    /// Bytes outside `0x21–0x7E` (for mandatory chars) or a non-space value
+    /// outside that range (for `repetition_sep`) are rejected because high-bytes
+    /// (`>= 0x80`) would incorrectly bisect multi-byte UTF-8 sequences, and DEL
     /// (`0x7F`) is a non-printable control character.
     pub fn is_valid(&self) -> bool {
         let [e, c, d, r, t] = [
@@ -103,10 +137,10 @@ impl ServiceStringAdvice {
             self.release_char,
             self.segment_term,
         ];
-        // All five must be printable ASCII 0x21–0x7E (excludes high-bytes, control chars,
-        // whitespace, and DEL 0x7F) and mutually distinct (10 pairwise checks).
+        // All five mandatory chars must be printable ASCII 0x21–0x7E and
+        // mutually distinct (10 pairwise checks).
         let printable_ascii = |b: u8| (0x21..=0x7E).contains(&b);
-        printable_ascii(e)
+        let basic_valid = printable_ascii(e)
             && printable_ascii(c)
             && printable_ascii(d)
             && printable_ascii(r)
@@ -120,7 +154,19 @@ impl ServiceStringAdvice {
             && c != t
             && d != r
             && d != t
-            && r != t
+            && r != t;
+        if !basic_valid {
+            return false;
+        }
+        // repetition_sep: space (0x20) means "not used" — accepted as-is.
+        // Any other value must be printable ASCII and distinct from all five
+        // mandatory service characters.
+        let rep = self.repetition_sep;
+        if rep == b' ' {
+            true
+        } else {
+            printable_ascii(rep) && rep != e && rep != c && rep != d && rep != r && rep != t
+        }
     }
 }
 

@@ -33,7 +33,7 @@ impl<W: Write> Writer<W> {
         if !ssa.is_valid() {
             return Err(EdifactError::InvalidUna);
         }
-        // UNA: component_sep, element_sep, decimal_mark, release_char, space, segment_term
+        // UNA: component_sep, element_sep, decimal_mark, release_char, repetition_sep, segment_term
         let una = [
             b'U',
             b'N',
@@ -42,7 +42,7 @@ impl<W: Write> Writer<W> {
             ssa.element_sep,
             ssa.decimal_mark,
             ssa.release_char,
-            b' ',
+            ssa.repetition_sep,
             ssa.segment_term,
         ];
         inner.write_all(&una)?;
@@ -315,6 +315,183 @@ impl<W: Write> Writer<W> {
         self.inner.write_all(&bytes[last..])?;
         Ok(())
     }
+
+    // ── Interchange envelope helpers ──────────────────────────────────────────
+
+    /// Write a `UNB` interchange header segment.
+    ///
+    /// Generates:
+    /// ```text
+    /// UNB+<syntax_id>+<sender>+<recipient>+<datetime>+<control_ref>'
+    /// ```
+    ///
+    /// The caller is responsible for:
+    /// - Formatting `syntax_id` as a composite (e.g. `"UNOA:1"` for UN/EDIFACT syntax
+    ///   version 1 of set A).
+    /// - Formatting `datetime` as a composite date-time (e.g. `"200101:0900"`).
+    ///
+    /// Track the `control_ref` — it must be repeated in the matching
+    /// [`end_interchange`](Self::end_interchange) call.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError`] if writing fails.
+    pub fn begin_interchange(
+        &mut self,
+        syntax_id: &str,
+        sender: &str,
+        recipient: &str,
+        datetime: &str,
+        control_ref: &str,
+    ) -> Result<(), EdifactError> {
+        self.write_raw(
+            "UNB",
+            &[syntax_id, sender, recipient, datetime, control_ref],
+        )
+    }
+
+    /// Write a `UNH` message header and return a [`MessageWriter`] guard.
+    ///
+    /// The guard tracks the per-message segment count automatically.  Call
+    /// [`MessageWriter::finish`] when all message segments have been written — this
+    /// writes the matching `UNT` segment with the correct count.  If `finish` is not
+    /// called, `Drop` will attempt to write `UNT` as a best-effort fallback (errors
+    /// are silently discarded on drop; prefer explicit `finish`).
+    ///
+    /// Generates:
+    /// ```text
+    /// UNH+<message_ref>+<message_type>:<version>:<release>:<controlling_agency>'
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError`] if writing the `UNH` segment fails.
+    pub fn begin_message<'w>(
+        &'w mut self,
+        message_ref: &str,
+        message_type: &str,
+        version: &str,
+        release: &str,
+        controlling_agency: &str,
+    ) -> Result<MessageWriter<'w, W>, EdifactError> {
+        let msg_id = format!("{message_type}:{version}:{release}:{controlling_agency}");
+        self.write_raw("UNH", &[message_ref, &msg_id])?;
+        // Capture `segment_count` after writing UNH so `MessageWriter` knows
+        // the absolute count that includes UNH.
+        let unh_count = self.segment_count;
+        Ok(MessageWriter {
+            writer: self,
+            message_ref: message_ref.to_owned(),
+            unh_count,
+            finished: false,
+        })
+    }
+
+    /// Write a `UNZ` interchange trailer segment.
+    ///
+    /// `message_count` is the number of `UNH`/`UNT` message pairs in the
+    /// interchange.  `control_ref` must match the value passed to
+    /// [`begin_interchange`](Self::begin_interchange).
+    ///
+    /// If you used [`begin_message`](Self::begin_message) for every message in the
+    /// interchange, `message_count` equals the number of times you called that
+    /// method.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError`] if writing fails.
+    pub fn end_interchange(
+        &mut self,
+        message_count: u32,
+        control_ref: &str,
+    ) -> Result<(), EdifactError> {
+        let msg_count_str = message_count.to_string();
+        self.write_raw("UNZ", &[&msg_count_str, control_ref])
+    }
+}
+
+/// RAII guard for a single EDIFACT message within an interchange.
+///
+/// Obtained from [`Writer::begin_message`].  Writes `UNH` on creation and
+/// `UNT` (with the correct per-message segment count) when [`finish`](Self::finish)
+/// is called or the guard is dropped.
+///
+/// Always prefer calling [`finish`](Self::finish) explicitly so that write
+/// errors can be propagated.  The `Drop` impl writes `UNT` as a best-effort
+/// fallback but silently discards I/O errors.
+///
+/// # Example
+///
+/// ```rust,no_run
+/// # use edifact_rs::{Writer, Segment};
+/// # fn example() -> Result<(), edifact_rs::EdifactError> {
+/// let mut writer = Writer::new(Vec::new());
+/// writer.begin_interchange("UNOA:1", "SENDER", "RECEIVER", "200101:0900", "1")?;
+/// {
+///     let mut msg = writer.begin_message("1", "ORDERS", "D", "96A", "UN")?;
+///     msg.write_raw("BGM", &["220", "PO001", "9"])?;
+///     msg.finish()?;
+/// }
+/// writer.end_interchange(1, "1")?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct MessageWriter<'w, W: Write> {
+    writer: &'w mut Writer<W>,
+    message_ref: String,
+    /// Absolute segment count immediately after `UNH` was written.
+    unh_count: u64,
+    /// Set to `true` once `finish()` has been called to prevent a double-write
+    /// from the `Drop` impl.
+    finished: bool,
+}
+
+impl<'w, W: Write> MessageWriter<'w, W> {
+    /// Write a segment within this message.
+    ///
+    /// Delegates to [`Writer::write_raw`].
+    pub fn write_raw(&mut self, tag: &str, elements: &[&str]) -> Result<(), EdifactError> {
+        self.writer.write_raw(tag, elements)
+    }
+
+    /// Write a fully-typed segment within this message.
+    ///
+    /// Delegates to [`Writer::write_segment`].
+    pub fn write_segment(&mut self, seg: &Segment<'_>) -> Result<(), EdifactError> {
+        self.writer.write_segment(seg)
+    }
+
+    /// Compute the per-message segment count and write `UNT`, consuming the guard.
+    ///
+    /// The count written into `UNT` DE 0074 includes `UNH`, all content segments,
+    /// and `UNT` itself — matching the EDIFACT standard.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError`] if writing the `UNT` segment fails.
+    pub fn finish(mut self) -> Result<(), EdifactError> {
+        self.write_unt()?;
+        self.finished = true;
+        Ok(())
+    }
+
+    fn write_unt(&mut self) -> Result<(), EdifactError> {
+        // Segments since UNH: writer.segment_count - unh_count (content only).
+        // Total = 1 (UNH) + content + 1 (UNT) = content + 2.
+        let count = self.writer.segment_count - self.unh_count + 2;
+        let count_str = count.to_string();
+        self.writer
+            .write_raw("UNT", &[&count_str, &self.message_ref])
+    }
+}
+
+impl<'w, W: Write> Drop for MessageWriter<'w, W> {
+    fn drop(&mut self) {
+        if !self.finished {
+            // Best-effort: write UNT; errors cannot be propagated from drop.
+            let _ = self.write_unt();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -373,12 +550,13 @@ mod tests {
     fn with_una_non_default_delimiters() {
         use crate::tokenizer::ServiceStringAdvice;
 
-        // Custom UNA: comp_sep=|  elem_sep=!  esc=?  dec_mark=,  seg_term=~
+        // Custom UNA: comp_sep=|  elem_sep=!  esc=?  dec_mark=,  rep_sep=*  seg_term=~
         let ssa = ServiceStringAdvice {
             component_sep: b'|',
             element_sep: b'!',
             release_char: b'?',
             decimal_mark: b',',
+            repetition_sep: b'*',
             segment_term: b'~',
         };
 
