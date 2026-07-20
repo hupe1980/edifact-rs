@@ -1,5 +1,10 @@
 # cargo-deny configuration for edifact-rs
-# Run: cargo deny check
+#
+# Run exactly as CI does — the `--all-features` flag matters, because the
+# `diagnostics` feature pulls in `miette` and a whole subtree that is invisible
+# without it:
+#
+#   cargo deny --all-features check advisories bans licenses sources
 
 [advisories]
 version = 2
@@ -12,25 +17,40 @@ ignore = []
 
 [bans]
 # Duplicate versions of a crate inflate compile times and binary size. Denied
-# outright; add a documented entry to `skip` when a transitive graph genuinely
-# forces one.
+# outright, with documented exceptions below for duplicates that live entirely
+# inside a dependency's own tree and cannot be resolved from here.
 multiple-versions = "deny"
 wildcards = "deny"
-skip = []
+skip = [
+    # `miette` depends on unicode-width 0.1 directly while its own `textwrap`
+    # dependency has moved to 0.2. Only reachable via the optional
+    # `diagnostics` feature, and only miette can resolve it.
+    { crate = "unicode-width@0.1.14", reason = "miette 7.x pulls 0.1 directly while its textwrap dependency uses 0.2" },
+]
 
 [licenses]
 version = 2
-# OSI-approved permissive licenses only. Entries beyond MIT/Apache-2.0 are ones
-# that appear in this crate's actual transitive graph or are near-certain to,
-# listed up front so a routine dependency bump does not break CI.
+# OSI-approved permissive licenses only.
+#
+# This list is deliberately broader than what the current dependency graph
+# happens to use, so a routine dependency bump does not fail CI on a license
+# that was always going to be acceptable. `unused-allowed-license` is therefore
+# set to "allow" — otherwise every forward-looking entry emits a warning, and
+# trimming entries to silence those warnings is exactly how ISC came to be
+# missing when the graph later needed it.
 allow = [
     "MIT",
+    "MIT-0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
     "Unicode-3.0",
+    "Zlib",
 ]
+unused-allowed-license = "allow"
 # The cargo-deny default. A lower threshold accepts fuzzier matches against
 # license text, which is how an unexpected license slips through.
 confidence-threshold = 0.93

@@ -20,7 +20,7 @@
 #   7.  cargo doc (RUSTDOCFLAGS=-D warnings)               (docsrs-check proxy)
 #   8.  cargo publish --dry-run -p edifact-rs-derive       (release-check)
 #   9.  Crate versions match across workspace              (release-check)
-#   10. cargo deny check                                   (security/license audit)
+#   10. cargo deny --all-features check                    (security/license audit)
 #   11. cargo test --benches --no-run                      (bench compile smoke)
 #   12. cargo bench bench_core                             (divan, skipped with --no-bench)
 #   13. cargo bench bench_criterion smoke                  (criterion, skipped with --no-bench)
@@ -130,8 +130,11 @@ step "Crate versions match across workspace" bash -c '
 # passed" without having run the advisory/license audit is worse than not
 # running the script at all.
 if command -v cargo-deny &>/dev/null || cargo deny --version &>/dev/null 2>&1; then
-  step "cargo deny check" \
-    cargo deny check
+  # Must match the CI invocation exactly. `--all-features` is what pulls in the
+  # optional `miette` subtree; without it the license and duplicate-version
+  # checks run against a graph CI never sees.
+  step "cargo deny --all-features check" \
+    cargo deny --all-features check advisories bans licenses sources
 else
   echo -e "\n${RED}  ✗ cargo deny check (cargo-deny not installed)${RESET}"
   echo -e "${YELLOW}    install it with: cargo install cargo-deny --locked${RESET}"

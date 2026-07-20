@@ -31,6 +31,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
+          # `--all-features` is the action default, but stated explicitly: it
+          # decides whether the optional `miette` subtree is in the graph, and
+          # a local run without it audits a different dependency set.
+          arguments: --all-features
           command: check advisories bans licenses sources
 
   msrv-check:
