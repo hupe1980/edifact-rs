@@ -88,7 +88,7 @@ pub trait EventEmitter {
     /// The default implementation returns `b'.'`, which is correct for standard
     /// EDIFACT interchanges that do not declare a UNA service string or that use
     /// the ISO 9735 default.  Override this in emitters backed by a
-    /// [`crate::Writer`] with a custom [`crate::tokenizer::ServiceStringAdvice`].
+    /// [`crate::Writer`] with a custom [`crate::ServiceStringAdvice`].
     #[inline]
     fn decimal_mark(&self) -> u8 {
         b'.'
@@ -180,7 +180,7 @@ impl<W: Write> WriterEmitter<W> {
         self.writer.segment_count()
     }
 
-    /// Return the active [`ServiceStringAdvice`][crate::tokenizer::ServiceStringAdvice].
+    /// Return the active [`ServiceStringAdvice`][crate::ServiceStringAdvice].
     ///
     /// Callers can use this to format values (e.g., floats) using the correct
     /// decimal-mark character configured in the UNA header.

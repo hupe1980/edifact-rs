@@ -12,14 +12,14 @@ first install to production-grade performance tuning.
 | [Getting Started](getting-started.md) | Install, first parse, feature flags |
 | [Core Concepts](core-concepts.md) | EDIFACT wire format, segments, delimiters, UNA |
 | [Parsing](parsing.md) | `from_bytes`, `from_reader`, spans, UNA handling |
-| [Writing](writing.md) | `Writer`, `ser::to_string`, escape rules |
+| [Writing](writing.md) | `Writer`, `to_edifact_string`, escape rules |
 | [Typed Derive](typed-derive.md) | `#[derive(EdifactDeserialize, EdifactSerialize)]` and all attributes |
 | [Streaming](streaming.md) | Reader iterators, message windows, low-memory extraction |
 | [Validation](validation.md) | `Validator` trait, `ValidationContext`, multi-layer pipelines |
 | [Profile Packs](profile-packs.md) | `ProfileRulePack`, rule authoring, merging, filtering |
 | [Diagnostics](diagnostics.md) | `diagnostics` feature, miette integration |
 | [Async Integration](async-integration.md) | Tokio patterns A / B / C |
-| [Error Reference](error-reference.md) | All `EdifactError` variants and stable codes E001–E026 |
+| [Error Reference](error-reference.md) | All `EdifactError` variants and stable codes E001–E032 |
 | [Performance](performance.md) | Zero-copy, allocation budgets, benchmarking |
 
 ---

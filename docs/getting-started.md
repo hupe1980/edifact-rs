@@ -22,7 +22,7 @@ rustup update      # upgrade to latest stable
 
 ```toml
 [dependencies]
-edifact-rs = "0.10"
+edifact-rs = "0.12"
 ```
 
 The `derive` feature is enabled by default, which re-exports
@@ -39,14 +39,14 @@ Enable diagnostics:
 
 ```toml
 [dependencies]
-edifact-rs = { version = "0.10", features = ["diagnostics"] }
+edifact-rs = { version = "0.12", features = ["diagnostics"] }
 ```
 
 Disable derive macros (core parsing only):
 
 ```toml
 [dependencies]
-edifact-rs = { version = "0.10", default-features = false }
+edifact-rs = { version = "0.12", default-features = false }
 ```
 
 ---
@@ -177,7 +177,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
     if report.is_valid() {
         println!("✅ valid");
     } else {
-        for issue in &report.errors {
+        for issue in report.errors() {
             eprintln!("❌ {}", issue.message);
         }
     }
@@ -191,7 +191,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 
 ## 6. Process a reader (large files)
 
-```rust
+```rust,ignore
 use edifact_rs::from_reader;
 use std::fs::File;
 

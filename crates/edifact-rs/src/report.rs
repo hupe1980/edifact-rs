@@ -194,7 +194,10 @@ pub struct ValidationIssue {
     /// [`context_get`](Self::context_get) returns the first match.
     /// [`with_context_entry`](Self::with_context_entry) uses upsert semantics
     /// (updates an existing key in place rather than duplicating it).
-    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Vec::is_empty"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
     pub context: Vec<(String, String)>,
 }
 
@@ -508,7 +511,7 @@ impl std::error::Error for ValidationIssue {}
 /// );
 /// assert!(report.is_valid()); // warnings don't fail validation
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ValidationReport {
     /// Critical and error-level issues.
@@ -517,24 +520,6 @@ pub struct ValidationReport {
     pub(crate) warnings: Vec<ValidationIssue>,
     /// Informational notes.
     pub(crate) infos: Vec<ValidationIssue>,
-    /// Cached count of `Critical`-severity issues inside `errors`.
-    ///
-    /// Maintained incrementally by [`add_error`](Self::add_error) and
-    /// [`merge`](Self::merge); recomputed by [`from_issues`](Self::from_issues)
-    /// and `filter_report`.  Used to make the bail-on-first-critical check O(1)
-    /// instead of O(n_errors).  Not serialized (it is derived from `errors`).
-    #[cfg_attr(feature = "serde", serde(skip))]
-    pub(crate) critical_count: usize,
-}
-
-impl PartialEq for ValidationReport {
-    fn eq(&self, other: &Self) -> bool {
-        // Exclude `critical_count` from equality: it is derived from `errors`
-        // and would be zero for deserialized reports (serde(skip)), which would
-        // otherwise cause spurious inequality when comparing live vs. round-tripped
-        // reports.
-        self.errors == other.errors && self.warnings == other.warnings && self.infos == other.infos
-    }
 }
 
 impl ValidationReport {
@@ -562,15 +547,10 @@ impl ValidationReport {
         warnings: Vec<ValidationIssue>,
         infos: Vec<ValidationIssue>,
     ) -> Self {
-        let critical_count = errors
-            .iter()
-            .filter(|i| i.severity == ValidationSeverity::Critical)
-            .count();
         Self {
             errors,
             warnings,
             infos,
-            critical_count,
         }
     }
 
@@ -606,9 +586,6 @@ impl ValidationReport {
 
     /// Add an error to the report.
     pub fn add_error(&mut self, issue: ValidationIssue) {
-        if issue.severity == ValidationSeverity::Critical {
-            self.critical_count += 1;
-        }
         self.errors.push(issue);
     }
 
@@ -631,7 +608,9 @@ impl ValidationReport {
     ///
     /// O(1) — backed by an incrementally maintained counter.
     pub fn has_critical_errors(&self) -> bool {
-        self.critical_count > 0
+        self.errors
+            .iter()
+            .any(|i| i.severity == ValidationSeverity::Critical)
     }
 
     /// Check if the report has any warnings.
@@ -676,7 +655,6 @@ impl ValidationReport {
     /// Issues are appended in severity order: errors, warnings, infos.
     /// `other` is left empty after this call.
     pub fn merge(&mut self, mut other: ValidationReport) {
-        self.critical_count += other.critical_count;
         self.errors.append(&mut other.errors);
         self.warnings.append(&mut other.warnings);
         self.infos.append(&mut other.infos);
@@ -734,10 +712,6 @@ impl ValidationReport {
     {
         let errors: Vec<ValidationIssue> =
             self.errors().iter().filter(|i| pred(i)).cloned().collect();
-        let critical_count = errors
-            .iter()
-            .filter(|i| i.severity == ValidationSeverity::Critical)
-            .count();
         Self {
             errors,
             warnings: self
@@ -747,7 +721,6 @@ impl ValidationReport {
                 .cloned()
                 .collect(),
             infos: self.infos().iter().filter(|i| pred(i)).cloned().collect(),
-            critical_count,
         }
     }
 

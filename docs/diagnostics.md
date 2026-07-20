@@ -11,7 +11,7 @@ programmatically.
 
 ```toml
 [dependencies]
-edifact-rs = { version = "0.10", features = ["diagnostics"] }
+edifact-rs = { version = "0.12", features = ["diagnostics"] }
 ```
 
 You also need `miette` in your dependencies to render errors:
@@ -31,7 +31,7 @@ When `diagnostics` is enabled:
 - Every error carries a **byte-level source span** pointing into the input
 - `miette::Report` renders errors with annotated source context:
 
-```
+```text
 Error: invalid code value "999" at offset 42
   ╭─ input.edi:2:5
   │
@@ -83,7 +83,7 @@ fn validate(input: &[u8]) {
 
 ### Propagating through anyhow
 
-```rust
+```rust,ignore
 use anyhow::Context;
 
 fn parse_edi(input: &[u8]) -> anyhow::Result<Vec<edifact_rs::OwnedSegment>> {
@@ -99,7 +99,7 @@ fn parse_edi(input: &[u8]) -> anyhow::Result<Vec<edifact_rs::OwnedSegment>> {
 `ValidationReport::render_deterministic()` always produces the same output for the
 same input, making it suitable for snapshot tests:
 
-```rust
+```rust,ignore
 use edifact_rs::{from_bytes, ValidationContext, ValidationLayer, Validator, ValidationReport, Segment};
 
 # struct DemoValidator;
@@ -167,7 +167,7 @@ cargo run -p edifact-rs --example cookbook_diagnostics --features diagnostics
 
 Sample output (with `miette`'s `fancy` feature):
 
-```
+```text
   × invalid code value "999" in BGM element 0
    ╭─[<anonymous>:1:5]
  1 │ BGM+999+PO-4711+9'

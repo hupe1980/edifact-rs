@@ -4,11 +4,13 @@
 # Usage:
 #   ./scripts/check.sh              # run everything
 #   ./scripts/check.sh --no-bench   # skip benchmarks (faster inner-loop check)
+#   ./scripts/check.sh --help       # show this usage
 #
 # Exit code is non-zero if any step fails. All steps are reported even when one
 # fails so you see the full picture in one pass.
 #
 # Steps mirrored from .github/workflows/ci.yml:
+#   0.  cargo fmt --all --check                            (lint)
 #   1.  cargo check --workspace --all-targets              (msrv-check / feature-matrix)
 #   2.  cargo test --workspace --all-targets               (workspace tests)
 #   3.  cargo test -p edifact-rs --no-default-features     (feature-matrix)
@@ -36,10 +38,15 @@ RESET='\033[0m'
 FAILED_STEPS=()
 RUN_BENCH=true
 
+usage() {
+  sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
 for arg in "$@"; do
   case "$arg" in
     --no-bench) RUN_BENCH=false ;;
-    *) echo "Unknown argument: $arg"; exit 1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $arg"; echo; usage; exit 1 ;;
   esac
 done
 
@@ -61,13 +68,20 @@ step() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
+# ── 0. Formatting ──────────────────────────────────────────────────────────────
+step "cargo fmt --all --check" \
+  cargo fmt --all --check
+
 # ── 1. Workspace check ─────────────────────────────────────────────────────────
 step "cargo check --workspace --all-targets" \
   cargo check --workspace --all-targets
 
 # ── 2. Workspace tests ─────────────────────────────────────────────────────────
+# EDIFACT_UI_TESTS enables the derive trybuild suite, whose blessed .stderr
+# files track rustc's diagnostic rendering and so are pinned to the MSRV
+# toolchain. Re-bless with TRYBUILD=overwrite after intentional changes.
 step "cargo test --workspace --all-targets" \
-  cargo test --workspace --all-targets
+  env EDIFACT_UI_TESTS=1 cargo test --workspace --all-targets
 
 # ── 3. No-default-features test ────────────────────────────────────────────────
 step "cargo test -p edifact-rs --no-default-features" \
@@ -82,8 +96,8 @@ step "cargo test -p edifact-rs --all-features --examples" \
   cargo test -p edifact-rs --all-features --examples
 
 # ── 6. Clippy ──────────────────────────────────────────────────────────────────
-step "cargo clippy --all-targets --all-features -- -D warnings" \
-  cargo clippy --all-targets --all-features -- -D warnings
+step "cargo clippy --workspace --all-targets --all-features -- -D warnings" \
+  cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # ── 7. Docs (stable proxy for docsrs-check) ────────────────────────────────────
 # CI uses nightly + --cfg docsrs; locally we use stable without that cfg.
@@ -112,12 +126,16 @@ step "Crate versions match across workspace" bash -c '
 '
 
 # ── 10. cargo deny ─────────────────────────────────────────────────────────────
-# Skip silently if cargo-deny is not installed (it's an optional tool).
+# A missing cargo-deny is a failure, not a silent skip: reporting "all checks
+# passed" without having run the advisory/license audit is worse than not
+# running the script at all.
 if command -v cargo-deny &>/dev/null || cargo deny --version &>/dev/null 2>&1; then
   step "cargo deny check" \
     cargo deny check
 else
-  echo -e "\n${YELLOW}⏭  cargo deny skipped (cargo-deny not installed)${RESET}"
+  echo -e "\n${RED}  ✗ cargo deny check (cargo-deny not installed)${RESET}"
+  echo -e "${YELLOW}    install it with: cargo install cargo-deny --locked${RESET}"
+  FAILED_STEPS+=("cargo deny check (tool not installed)")
 fi
 
 # ── 11-12. Benchmarks ────────────────────────────────────────────────────────

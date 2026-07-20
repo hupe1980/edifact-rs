@@ -225,8 +225,15 @@ impl ValidationContextBuilder {
     }
 
     /// Add a profile rule pack to the profile layer.
-    pub fn with_profile_pack(mut self, mut pack: ProfileRulePack) -> Self {
-        pack.set_message_type(self.inner.message_type.as_deref());
+    ///
+    /// The pack's own message-type scoping — set with
+    /// [`ProfileRulePack::for_message_type`] — is what decides whether its rules
+    /// run.  The context's message type does not narrow an unscoped pack.
+    pub fn with_profile_pack(self, pack: ProfileRulePack) -> Self {
+        self.with_profile_pack_inner(pack)
+    }
+
+    fn with_profile_pack_inner(mut self, pack: ProfileRulePack) -> Self {
         self.inner.validators.push(LayeredValidator {
             layer: ValidationLayer::Profile,
             validator: Box::new(pack),
@@ -440,7 +447,7 @@ impl ValidationContext {
             }
             lv.validator
                 .validate_group_batch(root, segments, report, context);
-            if self.bail_on_first_critical && report.critical_count > 0 {
+            if self.bail_on_first_critical && report.has_critical_errors() {
                 break;
             }
         }
@@ -526,18 +533,22 @@ impl ValidationContext {
         };
         let mut full_borrowed: Option<Vec<Segment<'_>>> = None;
         let mut filtered_borrowed: Option<Vec<Segment<'_>>> = None;
-        let mut envelope_ran = false;
+        // Decided once, up front.  Deriving this from a flag flipped as the loop
+        // walks `self.validators` made the filtering depend on *registration*
+        // order, so moving `.with_envelope_validation()` in the builder chain
+        // silently changed which segments later layers saw.
+        let envelope_active = self.envelope_layer_active();
 
         for lv in &self.validators {
             if !self.layer_enabled(lv.layer) {
                 continue;
             }
             if lv.layer == ValidationLayer::Envelope {
-                let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
+                let active = full_borrowed
+                    .get_or_insert_with(|| segments.iter().map(|s| s.as_borrowed()).collect());
                 lv.validator
-                    .validate_batch(&borrowed, &mut report, effective_ctx);
-                envelope_ran = true;
-            } else if envelope_ran {
+                    .validate_batch(active, &mut report, effective_ctx);
+            } else if envelope_active {
                 let active = filtered_borrowed.get_or_insert_with(|| {
                     segments
                         .iter()
@@ -553,7 +564,7 @@ impl ValidationContext {
                 lv.validator
                     .validate_batch(active, &mut report, effective_ctx);
             }
-            if self.bail_on_first_critical && report.critical_count > 0 {
+            if self.bail_on_first_critical && report.has_critical_errors() {
                 break;
             }
         }
@@ -618,7 +629,9 @@ impl ValidationContext {
             context
         };
         let mut filtered: Option<Vec<Segment<'_>>> = None;
-        let mut envelope_ran = false;
+        // See the owned path: computed once so filtering is independent of the
+        // order in which validators were registered.
+        let envelope_active = self.envelope_layer_active();
 
         for lv in &self.validators {
             if !self.layer_enabled(lv.layer) {
@@ -627,23 +640,28 @@ impl ValidationContext {
             if lv.layer == ValidationLayer::Envelope {
                 lv.validator
                     .validate_batch(segments, &mut report, effective_ctx);
-                envelope_ran = true;
             } else {
-                let active: &[Segment<'_>] = if envelope_ran {
-                    filtered.get_or_insert_with(|| {
-                        segments
-                            .iter()
-                            .filter(|s| !matches!(s.tag, "UNB" | "UNZ" | "UNG" | "UNE"))
-                            .cloned()
-                            .collect()
-                    })
+                let active: &[Segment<'_>] = if envelope_active {
+                    match envelope_interior(segments) {
+                        // Common case: UNB/UNZ bracket the message and no
+                        // UNG/UNE appear inside, so a sub-slice suffices and no
+                        // segment has to be deep-cloned.
+                        Some(interior) => interior,
+                        None => filtered.get_or_insert_with(|| {
+                            segments
+                                .iter()
+                                .filter(|s| !matches!(s.tag, "UNB" | "UNZ" | "UNG" | "UNE"))
+                                .cloned()
+                                .collect()
+                        }),
+                    }
                 } else {
                     segments
                 };
                 lv.validator
                     .validate_batch(active, &mut report, effective_ctx);
             }
-            if self.bail_on_first_critical && report.critical_count > 0 {
+            if self.bail_on_first_critical && report.has_critical_errors() {
                 break;
             }
         }
@@ -757,4 +775,37 @@ impl ValidationContext {
             ValidationLayer::Profile => self.profile_enabled,
         }
     }
+
+    /// Whether an enabled envelope-layer validator is registered.
+    ///
+    /// Determines whether envelope segments are hidden from later layers.  It is
+    /// a property of the context as a whole, not of how far the validator loop
+    /// has progressed.
+    fn envelope_layer_active(&self) -> bool {
+        self.envelope_enabled
+            && self
+                .validators
+                .iter()
+                .any(|lv| lv.layer == ValidationLayer::Envelope)
+    }
+}
+
+/// Return the message body as a sub-slice when the envelope segments form a
+/// clean `UNB` … `UNZ` bracket with no functional groups inside.
+///
+/// Returns `None` when the caller must fall back to filter-and-clone (functional
+/// groups present, or the interchange is not bracketed as expected).
+fn envelope_interior<'s, 'a>(segments: &'s [Segment<'a>]) -> Option<&'s [Segment<'a>]> {
+    let (first, last) = (segments.first()?, segments.last()?);
+    if segments.len() < 2 || first.tag != "UNB" || last.tag != "UNZ" {
+        return None;
+    }
+    let interior = &segments[1..segments.len() - 1];
+    if interior
+        .iter()
+        .any(|s| matches!(s.tag, "UNB" | "UNZ" | "UNG" | "UNE"))
+    {
+        return None;
+    }
+    Some(interior)
 }

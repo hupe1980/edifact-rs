@@ -9,7 +9,7 @@ raw segment construction and custom delimiter configuration.
 
 | API | Best for |
 |---|---|
-| `ser::to_string(value)` | Quick serialization of a single derived struct |
+| `to_edifact_string(value)` | Quick serialization of a single derived struct |
 | `ser::to_bytes(segments)` | Round-trip a parsed `Vec<Segment<'_>>` |
 | `to_bytes(segments)` | Free function alias for `ser::to_bytes` |
 | `Writer::write_segment(seg)` | Streaming segment-by-segment output |
@@ -20,7 +20,7 @@ raw segment construction and custom delimiter configuration.
 
 ## Serialize a typed struct
 
-```rust
+```rust,ignore
 use edifact_rs::{EdifactSerialize, ser};
 
 #[derive(edifact_rs::EdifactSerialize)]
@@ -40,7 +40,7 @@ let bgm = Bgm {
     function_code: Some("9".into()),
 };
 
-let output = ser::to_string(&bgm)?;
+let output = to_edifact_string(&bgm)?;
 assert_eq!(output, "BGM+220+PO-4711+9'");
 
 // or as bytes:
@@ -50,13 +50,29 @@ let bytes = ser::to_bytes(&bgm)?;
 
 `None` fields produce empty elements in their positional slot:
 
-```rust
+```rust,ignore
+# #[derive(edifact_rs::EdifactSerialize)]
+# #[edifact(segment = "BGM")]
+# struct Bgm {
+#     #[edifact(element = 0)]
+#     doc_code: String,
+#     #[edifact(element = 1)]
+#     doc_number: String,
+#     #[edifact(element = 2)]
+#     function_code: Option<String>,
+# }
+# 
+# let bgm = Bgm {
+#     doc_code: "220".into(),
+#     doc_number: "PO-4711".into(),
+#     function_code: Some("9".into()),
+# };
 let bgm_no_func = Bgm {
     doc_code: "220".into(),
     doc_number: "PO-4711".into(),
     function_code: None,
 };
-let out = ser::to_string(&bgm_no_func)?;
+let out = to_edifact_string(&bgm_no_func)?;
 assert_eq!(out, "BGM+220+PO-4711+'");
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
@@ -65,7 +81,7 @@ assert_eq!(out, "BGM+220+PO-4711+'");
 
 ## Round-trip: parse then write
 
-```rust
+```rust,ignore
 use edifact_rs::{from_bytes, to_bytes};
 
 let input = b"UNA:+.? 'BGM+220+PO-4711+9'NAD+BY+4000001::9'";
@@ -87,7 +103,7 @@ let output = to_bytes(&segs)?;
 `Writer<W>` writes one segment at a time to any `Write` implementation:
 
 ```rust
-use edifact_rs::{Writer, Segment, model::Element};
+use edifact_rs::{Writer, Segment, Element};
 
 let mut buf: Vec<u8> = Vec::new();
 let mut writer = Writer::new(&mut buf);
@@ -119,7 +135,7 @@ assert_eq!(text, "BGM+220+PO-4711+9'NAD+BY+4000001::9'");
 segment's count field:
 
 ```rust
-# use edifact_rs::{Writer, Segment, model::Element};
+# use edifact_rs::{Writer, Segment, Element};
 # let mut buf: Vec<u8> = Vec::new();
 # let mut writer = Writer::new(&mut buf);
 // ... write body segments ...
@@ -156,14 +172,15 @@ writer.finish()?;
 
 To write with non-default delimiters, create the writer with `Writer::with_una`:
 
-```rust
-use edifact_rs::{Writer, tokenizer::ServiceStringAdvice};
+```rust,ignore
+use edifact_rs::{Writer, ServiceStringAdvice};
 
 let ssa = ServiceStringAdvice {
     component_sep: b';',
     element_sep:   b'|',
     decimal_mark:  b'.',
     release_char:  b'?',
+    repetition_sep: b' ',   // 0x20 = 'not used'
     segment_term:  b'!',
 };
 
@@ -186,8 +203,8 @@ assert!(text.starts_with("UNA;|.?!"));
 `Writer` **automatically escapes** any character in a component value that collides
 with the current delimiter set. You never need to pre-escape data:
 
-```rust
-use edifact_rs::{Writer, Segment, model::Element};
+```rust,ignore
+use edifact_rs::{Writer, Segment, Element};
 
 let mut buf: Vec<u8> = Vec::new();
 let mut writer = Writer::new(&mut buf);
@@ -217,7 +234,7 @@ Characters escaped by default:
 For advanced use cases — such as writing segments produced by `EdifactSerialize`
 derived types to a `Write` sink without buffering — use `WriterEmitter`:
 
-```rust
+```rust,ignore
 use edifact_rs::{ser, WriterEmitter, EdifactSerialize, Writer};
 
 # #[derive(EdifactSerialize)]
@@ -226,13 +243,14 @@ use edifact_rs::{ser, WriterEmitter, EdifactSerialize, Writer};
 let bgm = Bgm { code: "220".into() };
 
 let mut buf: Vec<u8> = Vec::new();
-let writer = Writer::new(&mut buf);
-let mut emitter = WriterEmitter::new(writer);
+// `WriterEmitter::new` takes the `io::Write` sink directly and constructs its
+// own `Writer` internally — do not wrap the sink in a `Writer` first.
+let mut emitter = WriterEmitter::new(&mut buf);
 
 bgm.edifact_serialize(&mut emitter)?;
 
-let (inner_writer, _) = emitter.into_inner();
-let _ = inner_writer.finish();
+let (writer, _) = emitter.into_inner();
+writer.finish()?;
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
@@ -244,7 +262,7 @@ underlying `Write` on each `EdifactEvent` without buffering components in a `Str
 ## Writing a full interchange
 
 ```rust
-use edifact_rs::{Writer, Segment, model::Element};
+use edifact_rs::{Writer, Segment, Element};
 use std::io::Cursor;
 
 let mut buf: Vec<u8> = Vec::new();

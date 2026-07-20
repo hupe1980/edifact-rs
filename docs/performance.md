@@ -38,7 +38,7 @@ entirely — which covers the large majority of real-world EDIFACT segments.
 
 `from_reader(reader)` is the reader-based API with minimal memory overhead:
 
-```rust
+```rust,ignore
 use edifact_rs::from_reader;
 
 let f = std::fs::File::open("large.edi")?;
@@ -62,7 +62,7 @@ for the whole interchange. It uses `edifact_deserialize_owned` internally to
 deserialize each `UNH..UNT` window as a typed value, then immediately drops the
 window segments:
 
-```rust
+```rust,ignore
 use edifact_rs::{deserialize_messages_from_reader, EdifactDeserialize};
 
 # #[derive(Debug, EdifactDeserialize)]
@@ -82,20 +82,23 @@ This achieves O(1) peak memory even when an interchange contains thousands of me
 ## `WriterEmitter` — zero-alloc output
 
 `WriterEmitter<W>` writes EDIFACT directly to any `std::io::Write` without
-accumulating a `Vec<u8>`. Each `emit_*` call flushes bytes immediately:
+accumulating a `Vec<u8>`. It implements the `EventEmitter` trait, whose single
+`emit` method takes an `EdifactEvent`; each event is written out immediately:
 
 ```rust
-use edifact_rs::WriterEmitter;
+use edifact_rs::{EdifactEvent, EventEmitter, WriterEmitter};
 
 let mut out = Vec::<u8>::new();
 let mut emitter = WriterEmitter::new(&mut out);
-emitter.emit_segment_start("BGM")?;
-emitter.emit_element("220")?;
-emitter.emit_segment_end()?;
+emitter.emit(EdifactEvent::StartSegment { tag: "BGM" })?;
+emitter.emit(EdifactEvent::Element { value: "220" })?;
+emitter.emit(EdifactEvent::Element { value: "PO-4711" })?;
+emitter.emit(EdifactEvent::EndSegment)?;
+assert_eq!(out, b"BGM+220+PO-4711'");
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-Use `WriterEmitter` over `ser::to_bytes` or `Writer` when generating large interchanges
+Use `WriterEmitter` over `to_bytes` or `Writer` when generating large interchanges
 that you want to pipe directly to a file or socket.
 
 ---
@@ -189,7 +192,7 @@ heaptrack_gui heaptrack.*.gz
 
 The reader-based APIs accept a `ReaderConfig` that controls the DOS guard:
 
-```rust
+```rust,ignore
 use edifact_rs::{from_bufread_stream_with_config, ReaderConfig};
 
 let config = ReaderConfig {

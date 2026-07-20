@@ -21,7 +21,7 @@ separated by `:`.
 
 ## Wire format anatomy
 
-```
+```text
 UNA:+.? '
 UNB+UNOA:1+SENDER:14+RECEIVER:14+200101:0900+1'
 UNH+1+ORDERS:D:96A:UN+MYREF'
@@ -50,7 +50,7 @@ A single interchange may contain **many UNH..UNT pairs** (multi-message intercha
 The `UNA` segment is always exactly **9 bytes**: the literal `UNA` followed by six
 service characters in fixed positions:
 
-```
+```text
 U N A : + . ?   '
         │ │ │ │ │ └── Segment terminator (default: ' )
         │ │ │ │ └──── Release character   (default: ? )
@@ -81,7 +81,7 @@ A segment has:
 
 Example breakdown:
 
-```
+```text
 BGM  +  220  +  PO-4711  +  9  '
  │       │         │        │
  tag   elem 0   elem 1   elem 2 (all single-component)
@@ -103,7 +103,7 @@ use `qualifier_from = 0` to dispatch different Rust structs for `NAD+BY` vs `NAD
 The **release character** (`?` by default) escapes the next byte, allowing delimiters
 to appear as literal text:
 
-```
+```text
 BGM+Test?+value'
          ^^
          '?+' means a literal '+', not an element separator
@@ -122,7 +122,7 @@ A trailing `?` at end-of-input (with no following byte) is **malformed** and cau
 
 ### `Segment<'a>` — zero-copy view
 
-```rust
+```rust,ignore
 pub struct Segment<'a> {
     pub tag: &'a str,       // borrows from input
     pub span: Span,         // byte range of the whole segment
@@ -137,7 +137,7 @@ the `SmallVec<[(Cow<'a, str>, Span); 4]>` per element are allocated.
 
 ### `Element<'a>` — component holder
 
-```rust
+```rust,ignore
 pub struct Element<'a> {
     pub span: Span,
     pub components: SmallVec<[(Cow<'a, str>, Span); 4]>,  // (value, span) — inline for ≤4 components
@@ -153,7 +153,7 @@ from the raw bytes).
 When parsing from a `Read` source (`from_reader`, `message_windows_from_reader`),
 the library can't borrow from the input buffer. It produces `OwnedSegment` instead:
 
-```rust
+```rust,ignore
 pub struct OwnedSegment {
     pub tag: String,
     pub elements: Vec<OwnedElement>,
@@ -162,14 +162,14 @@ pub struct OwnedSegment {
 
 `OwnedSegment` provides two accessors that avoid extra allocation:
 
-```rust
+```rust,ignore
 seg.element_str(n)           // component 0 of element n → Option<&str>
 seg.component_str(elem, comp) // specific component → Option<&str>
 ```
 
 To get a zero-allocation `Segment<'_>` view of an `OwnedSegment`, call:
 
-```rust
+```rust,ignore
 let borrowed: BorrowedSegment<'_> = seg.borrow();
 ```
 
@@ -210,7 +210,7 @@ The `UNH` segment element 1, component 0 carries the **message type** (e.g.
 `ORDERS`, `INVOIC`, `UTILMD`). `ValidationContext` and `ProfileRulePack` scope their
 rules to a specific message type:
 
-```
+```text
 UNH + 1 + ORDERS : D : 96A : UN '
              ^^^   ^   ^^^   ^^
              type  dir rel   org

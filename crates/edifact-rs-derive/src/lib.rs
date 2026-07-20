@@ -45,7 +45,8 @@
 //! repeated segments.  Without the attribute, `Vec<T>` on a segment struct collects
 //! all matching segments from the window into the `Vec`.
 //!
-//! **Note**: `#[edifact(group)]` enforces two compile-time structural constraints:
+//! `#[edifact(group)]` is a documentation and validation marker: it makes the
+//! repeating-group intent explicit and enforces two compile-time constraints:
 //!
 //! 1. The annotated field **must** be of type `Vec<T>` — any other type is rejected
 //!    with a clear error message.
@@ -53,12 +54,12 @@
 //!    `#[edifact(component = ...)]` — positional placement and group semantics are
 //!    mutually exclusive.
 //!
-//! At runtime the generated deserialization code collects contiguous occurrences of
-//! the inner segment type `T` into the `Vec` using
-//! `edifact_rs::contiguous_groups_by_qualifier`.
-//! This is behaviorally different from a bare `Vec<T>` without `#[edifact(group)]`,
-//! which uses `edifact_rs::find_segments_typed` and does
-//! not enforce contiguity.
+//! At runtime it generates the same code as a bare `Vec<T>`: every segment matching
+//! `T`'s tag and qualifier is collected, in document order, without a contiguity
+//! requirement.  When you need contiguity enforced, use
+//! [`contiguous_groups_by_qualifier`] directly on the parsed segments.
+//!
+//! [`contiguous_groups_by_qualifier`]: https://docs.rs/edifact-rs/latest/edifact_rs/fn.contiguous_groups_by_qualifier.html
 //!
 //! # `#[edifact(required)]` on `Option<T>` fields
 //!
@@ -179,6 +180,28 @@ struct FieldAttrs {
 
 // ── attribute parsing ──────────────────────────────────────────────────────────
 
+/// Largest accepted `element` / `component` index.
+///
+/// Serialization emits one statement per slot up to the highest declared index,
+/// so an unbounded value makes rustc generate an arbitrary amount of code — a
+/// typo'd `element = 200000` was enough to exhaust memory and kill the compiler.
+/// UN/EDIFACT caps segments at 99 data elements and composites at 99 components,
+/// so 256 is generous.
+const MAX_POSITION_INDEX: u32 = 256;
+
+fn check_index_bound(lit: &syn::LitInt, value: u32, key: &str) -> syn::Result<()> {
+    if value > MAX_POSITION_INDEX {
+        return Err(syn::Error::new(
+            lit.span(),
+            format!(
+                "`{key}` index {value} exceeds the maximum of {MAX_POSITION_INDEX}; \
+                 UN/EDIFACT allows at most 99 elements per segment and 99 components per composite"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_struct_attrs(input: &DeriveInput) -> syn::Result<StructAttrs> {
     let mut out = StructAttrs::default();
     for attr in &input.attrs {
@@ -187,6 +210,9 @@ fn parse_struct_attrs(input: &DeriveInput) -> syn::Result<StructAttrs> {
         }
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("segment") {
+                if out.segment.is_some() {
+                    return Err(meta.error("duplicate `segment`"));
+                }
                 let lit = meta.value()?.parse::<syn::LitStr>()?;
                 let tag = lit.value();
                 if tag.len() != 3 || !tag.bytes().all(|b| b.is_ascii_uppercase()) {
@@ -199,10 +225,18 @@ fn parse_struct_attrs(input: &DeriveInput) -> syn::Result<StructAttrs> {
                 }
                 out.segment = Some(tag);
             } else if meta.path.is_ident("qualifier") {
+                if out.qualifier.is_some() {
+                    return Err(meta.error("duplicate `qualifier`"));
+                }
                 out.qualifier = Some(meta.value()?.parse::<syn::LitStr>()?.value());
                 out.qualifier_span = Some(meta.path.span());
             } else if meta.path.is_ident("qualifier_from") {
-                let idx: u32 = meta.value()?.parse::<syn::LitInt>()?.base10_parse()?;
+                if out.qualifier_from.is_some() {
+                    return Err(meta.error("duplicate `qualifier_from`"));
+                }
+                let lit = meta.value()?.parse::<syn::LitInt>()?;
+                let idx: u32 = lit.base10_parse()?;
+                check_index_bound(&lit, idx, "qualifier_from")?;
                 out.qualifier_from = Some(idx);
                 out.qualifier_from_span = Some(meta.path.span());
             } else {
@@ -238,10 +272,22 @@ fn parse_field_attrs(field: &Field) -> syn::Result<FieldAttrs> {
         }
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("element") {
-                out.element = Some(meta.value()?.parse::<syn::LitInt>()?.base10_parse()?);
+                if out.element.is_some() {
+                    return Err(meta.error("duplicate `element`"));
+                }
+                let lit = meta.value()?.parse::<syn::LitInt>()?;
+                let idx: u32 = lit.base10_parse()?;
+                check_index_bound(&lit, idx, "element")?;
+                out.element = Some(idx);
                 out.element_span = Some(meta.path.span());
             } else if meta.path.is_ident("component") {
-                out.component = Some(meta.value()?.parse::<syn::LitInt>()?.base10_parse()?);
+                if out.component.is_some() {
+                    return Err(meta.error("duplicate `component`"));
+                }
+                let lit = meta.value()?.parse::<syn::LitInt>()?;
+                let idx: u32 = lit.base10_parse()?;
+                check_index_bound(&lit, idx, "component")?;
+                out.component = Some(idx);
                 out.component_span = Some(meta.path.span());
             } else if meta.path.is_ident("composite") {
                 out.composite = true;
@@ -250,6 +296,9 @@ fn parse_field_attrs(field: &Field) -> syn::Result<FieldAttrs> {
                 out.group = true;
                 out.group_span = Some(meta.path.span());
             } else if meta.path.is_ident("qualifier") {
+                if out.qualifier.is_some() {
+                    return Err(meta.error("duplicate `qualifier`"));
+                }
                 out.qualifier = Some(meta.value()?.parse::<syn::LitStr>()?.value());
                 out.qualifier_span = Some(meta.path.span());
             } else if meta.path.is_ident("required") {
@@ -348,6 +397,44 @@ fn vec_inner_type(ty: &Type) -> Option<&Type> {
 }
 
 // ── named field extraction ─────────────────────────────────────────────────────
+
+/// Reject two fields that map to the same `(element, component)` slot.
+///
+/// Serialization keys its emit table by slot, so a duplicate silently dropped
+/// one field from the output while deserialization still read both — an
+/// asymmetric, compile-clean data loss.
+fn check_duplicate_slots(
+    field_data: &[(&syn::Ident, &Type, FieldAttrs)],
+    is_segment_struct: bool,
+) -> syn::Result<()> {
+    if !is_segment_struct {
+        return Ok(());
+    }
+    let mut seen: Vec<((u32, u32), &syn::Ident)> = Vec::with_capacity(field_data.len());
+    for (i, (ident, _, attrs)) in field_data.iter().enumerate() {
+        // Group fields are not positional, so they occupy no slot.
+        if attrs.group {
+            continue;
+        }
+        let slot = (
+            attrs.element.unwrap_or(i as u32),
+            attrs.component.unwrap_or(0),
+        );
+        if let Some((_, first)) = seen.iter().find(|(s, _)| *s == slot) {
+            return Err(syn::Error::new(
+                ident.span(),
+                format!(
+                    "field `{ident}` maps to element {} component {}, which is already \
+                     claimed by field `{first}`; give each field a distinct \
+                     `#[edifact(element = ..., component = ...)]` slot",
+                    slot.0, slot.1
+                ),
+            ));
+        }
+        seen.push((slot, ident));
+    }
+    Ok(())
+}
 
 fn get_named_fields(input: &DeriveInput) -> syn::Result<&syn::FieldsNamed> {
     if !input.generics.params.is_empty() {
@@ -498,6 +585,7 @@ fn impl_serialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
             Ok((ident, &f.ty, attrs))
         })
         .collect::<syn::Result<_>>()?;
+    check_duplicate_slots(&field_data, is_segment_struct)?;
 
     let body = if let Some(seg_tag) = &struct_attrs.segment {
         // ── Segment struct: emit one EDIFACT segment ──────────────────────────
@@ -771,6 +859,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
             Ok((ident, &f.ty, attrs))
         })
         .collect::<syn::Result<_>>()?;
+    check_duplicate_slots(&field_data, is_segment_struct)?;
 
     let field_names: Vec<&syn::Ident> = field_data.iter().map(|(id, _, _)| *id).collect();
 
@@ -789,21 +878,24 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         } else if let Some(idx) = struct_attrs.qualifier_from {
             quote! {
+                // Fully-qualified patterns: a user type named `Some`/`None` in
+                // scope (e.g. `pub use MyOpt::*`) would otherwise shadow the
+                // std variants and break the generated code.
                 match __seg.element_str(#idx as usize) {
-                    None => return ::core::result::Result::Err(
+                    ::core::option::Option::None => return ::core::result::Result::Err(
                         ::edifact_rs::EdifactError::MissingRequiredElement {
                             tag: #seg_tag.to_owned(),
                             element_index: #idx as usize,
                         }
                     ),
-                    Some("") => return ::core::result::Result::Err(
+                    ::core::option::Option::Some("") => return ::core::result::Result::Err(
                         ::edifact_rs::EdifactError::InvalidFieldValue {
                             tag: #seg_tag.to_owned(),
                             element_index: #idx as usize,
                             value: ::std::string::String::new(),
                         }
                     ),
-                    Some(__qual_val) => { let _ = __qual_val; }
+                    ::core::option::Option::Some(__qual_val) => { let _ = __qual_val; }
                 }
             }
         } else {
@@ -959,18 +1051,35 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
         };
 
         // Also generate EdifactSegmentTag impl.
+        // Declare the qualifier through `QUALIFIER_PATTERN` rather than by
+        // hand-rolling `matches_segment`.  Overriding only the borrowed matcher
+        // left `matches_owned_segment` (which consults `QUALIFIER_PATTERN`)
+        // matching on tag alone, so the owned deserialization path picked up
+        // wrongly-qualified segments and then failed to parse them.
         let qualifier_match = if let Some(qual) = &struct_attrs.qualifier {
             quote! {
-                fn matches_segment(seg: &::edifact_rs::Segment<'_>) -> bool {
-                    seg.tag == Self::SEGMENT_TAG
-                        && seg.element_str(0).unwrap_or("") == #qual
-                }
+                const QUALIFIER_PATTERN: ::core::option::Option<&'static str> =
+                    ::core::option::Option::Some(#qual);
             }
         } else if let Some(idx) = struct_attrs.qualifier_from {
+            // "Any non-empty value at element `idx`" cannot be expressed as a
+            // `QUALIFIER_PATTERN` (which is element 0 only), so both matchers are
+            // overridden explicitly and must stay in agreement.
             quote! {
                 fn matches_segment(seg: &::edifact_rs::Segment<'_>) -> bool {
                     seg.tag == Self::SEGMENT_TAG
                         && !seg.element_str(#idx as usize).unwrap_or("").is_empty()
+                }
+
+                fn matches_owned_segment(seg: &::edifact_rs::OwnedSegment) -> bool {
+                    seg.tag == Self::SEGMENT_TAG
+                        && !seg
+                            .elements
+                            .get(#idx as usize)
+                            .and_then(|e| e.components.first())
+                            .map(|(c, _)| c.as_str())
+                            .unwrap_or("")
+                            .is_empty()
                 }
             }
         } else {
@@ -1368,8 +1477,24 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
 #[cfg(test)]
 mod tests {
+    /// Compile-fail / compile-pass suite for the derive macros.
+    ///
+    /// The blessed `.stderr` files capture rustc's exact diagnostic rendering,
+    /// which changes between toolchain releases — so this suite is pinned to the
+    /// MSRV toolchain and skipped elsewhere.  Set `EDIFACT_UI_TESTS=1` to run it
+    /// (CI does so in the MSRV job; `scripts/check.sh` does so locally).
+    ///
+    /// Re-bless after intentional message changes with:
+    ///   `EDIFACT_UI_TESTS=1 TRYBUILD=overwrite cargo test -p edifact-rs-derive`
     #[test]
     fn trybuild_ui() {
+        if std::env::var_os("EDIFACT_UI_TESTS").is_none() {
+            eprintln!(
+                "skipping derive UI suite: set EDIFACT_UI_TESTS=1 to run it \
+                 (expectations are pinned to the MSRV toolchain)"
+            );
+            return;
+        }
         let t = trybuild::TestCases::new();
         t.pass("tests/ui/pass_*.rs");
         t.compile_fail("tests/ui/fail_*.rs");

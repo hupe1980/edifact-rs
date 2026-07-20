@@ -4,16 +4,18 @@
 //! Uses `memchr` for fast delimiter scanning (no byte-by-byte inner loops).
 
 use crate::{error::EdifactError, model::Span};
-use memchr::{memchr, memchr3};
+use memchr::{memchr, memchr2, memchr3};
 
 /// EDIFACT service string advice (UNA segment).
 ///
 /// Defaults: `+` (element), `:` (component), `?` (release), `.` (decimal mark),
 /// `*` (repetition separator), `'` (segment terminator).
 ///
-/// All six service characters are now first-class fields.  `is_valid()` checks
-/// all six for mutual distinctness and printability so that a collision between
-/// the repetition separator and any other delimiter is caught at UNA parse time.
+/// All six service characters are first-class fields.  [`is_valid`][Self::is_valid]
+/// checks all six for mutual distinctness and for being printable, non-alphanumeric
+/// ASCII, so a collision between the repetition separator and any other delimiter —
+/// or a delimiter that would clash with segment-tag characters — is caught at UNA
+/// parse time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServiceStringAdvice {
     /// Data element separator (default `+`)
@@ -25,12 +27,13 @@ pub struct ServiceStringAdvice {
     /// Decimal notation mark (default `.`; UNA byte 5, ISO 9735-1 §7.1).
     /// Not used by the tokenizer for splitting, but preserved for downstream use.
     pub decimal_mark: u8,
-    /// Repetition separator (default `*`; UNA byte 7, ISO 9735-4 §3.1).
+    /// Repetition separator (UNA byte 7, ISO 9735-4 §3.1).
     ///
-    /// Some DVGW gas-market profiles and other non-default EDIFACT implementations
-    /// use a non-standard repetition separator.  This field is always populated
-    /// from the UNA (or defaults to `b'*'` when no UNA is present) so that
-    /// downstream code can access it without re-parsing the raw UNA bytes.
+    /// Defaults to space (`0x20`), the conventional "not used" sentinel, when no
+    /// UNA is present.  Some DVGW gas-market profiles and other non-default
+    /// EDIFACT implementations declare a real repetition separator here; this
+    /// field is always populated from the UNA so that downstream code can access
+    /// it without re-parsing the raw UNA bytes.
     ///
     /// The tokenizer does not currently split on the repetition separator — that
     /// responsibility belongs to downstream consumers — but `is_valid()` includes
@@ -60,8 +63,9 @@ impl Default for ServiceStringAdvice {
 impl ServiceStringAdvice {
     /// Parse a UNA header and validate that all six service characters
     /// (`element_sep`, `component_sep`, `decimal_mark`, `release_char`,
-    /// `repetition_sep`, and `segment_term`) are mutually distinct and in
-    /// the printable ASCII range `0x21–0x7E`.
+    /// `repetition_sep`, and `segment_term`) are mutually distinct and are
+    /// printable, non-alphanumeric ASCII.  See [`is_valid`][Self::is_valid] for
+    /// the exact rule.
     ///
     /// Returns [`EdifactError::InvalidUna`] if the invariant is violated.
     /// Falls back to [`ServiceStringAdvice::default`] when no UNA is present.
@@ -83,7 +87,7 @@ impl ServiceStringAdvice {
     /// If no UNA is present, returns [`ServiceStringAdvice::default`].
     ///
     /// The `repetition_sep` field is populated from UNA byte 7 (ISO 9735-4 §3.1)
-    /// or defaults to `b'*'` when no UNA is present.
+    /// or defaults to space (`0x20`, the "not used" sentinel) when no UNA is present.
     ///
     /// # When to use
     ///
@@ -113,22 +117,22 @@ impl ServiceStringAdvice {
     /// and printable ASCII.
     ///
     /// The five *mandatory* characters (`element_sep`, `component_sep`,
-    /// `decimal_mark`, `release_char`, `segment_term`) must all be in the
-    /// printable ASCII range `0x21–0x7E` and mutually distinct (10 pairwise
-    /// checks).
+    /// `decimal_mark`, `release_char`, `segment_term`) must all be printable,
+    /// **non-alphanumeric** ASCII (`0x21–0x7E`, excluding `0-9A-Za-z`) and
+    /// mutually distinct (10 pairwise checks).  Alphanumerics are rejected
+    /// because segment tags are written verbatim and cannot be escaped, so a
+    /// letter delimiter would make tags containing it unrepresentable.
     ///
     /// The `repetition_sep` field is also validated when it is **not a space**
     /// (`0x20`).  A space at position 7 of the UNA is the conventional
     /// "absent" sentinel used by interchanges that do not employ repetition
     /// elements (ISO 9735-1 / ISO 9735-4 §3.1), and it is accepted without
     /// a printability or uniqueness check.  Any other value must be printable
-    /// ASCII and distinct from the five mandatory characters and from the
-    /// configured repetition separator value.
+    /// non-alphanumeric ASCII and distinct from all five mandatory characters.
     ///
-    /// Bytes outside `0x21–0x7E` (for mandatory chars) or a non-space value
-    /// outside that range (for `repetition_sep`) are rejected because high-bytes
-    /// (`>= 0x80`) would incorrectly bisect multi-byte UTF-8 sequences, and DEL
-    /// (`0x7F`) is a non-printable control character.
+    /// High bytes (`>= 0x80`) are rejected because they would incorrectly bisect
+    /// multi-byte UTF-8 sequences, and DEL (`0x7F`) is a non-printable control
+    /// character.
     pub fn is_valid(&self) -> bool {
         let [e, c, d, r, t] = [
             self.element_sep,
@@ -137,9 +141,16 @@ impl ServiceStringAdvice {
             self.release_char,
             self.segment_term,
         ];
-        // All five mandatory chars must be printable ASCII 0x21–0x7E and
+        // All five mandatory chars must be printable, non-alphanumeric ASCII and
         // mutually distinct (10 pairwise checks).
-        let printable_ascii = |b: u8| (0x21..=0x7E).contains(&b);
+        //
+        // Alphanumerics are excluded because segment tags are always three ASCII
+        // uppercase letters and are written verbatim (a tag cannot be escaped).
+        // A delimiter such as `N` would therefore make `NAD` unrepresentable —
+        // the writer would emit a premature terminator and the result would not
+        // reparse.  Real-world UNA strings use punctuation exclusively, so this
+        // rejects only degenerate configurations.
+        let printable_ascii = |b: u8| (0x21..=0x7E).contains(&b) && !b.is_ascii_alphanumeric();
         let basic_valid = printable_ascii(e)
             && printable_ascii(c)
             && printable_ascii(d)
@@ -355,19 +366,40 @@ impl<'a> Tokenizer<'a> {
             self.ssa.release_char,
             self.ssa.segment_term,
         );
+        // Absolute cap on how far this value may extend before the per-segment
+        // byte guard trips.  Bounding the scan window here (rather than only
+        // checking the length after the loop) keeps adversarial input that omits
+        // every delimiter from forcing a scan across the whole remaining input.
+        let scan_end = self
+            .segment_start
+            .saturating_add(self.max_segment_bytes)
+            .saturating_add(1)
+            .min(self.input.len());
+
+        // Absolute offset of the next segment terminator at or after the current
+        // search origin.  `memchr3` below rescans only the bytes it actually
+        // consumes, but a naive `memchr(term, remaining)` per iteration would
+        // rescan the whole tail on every release sequence, making a value such as
+        // `?a?a?a…` quadratic.  Caching the hit keeps the terminator search
+        // amortised linear: each rescan starts past the previous hit, so the
+        // scanned regions are disjoint.
+        let mut term_hit = memchr(term, &self.input[self.pos..scan_end]).map(|i| self.pos + i);
+
         loop {
-            let remaining = &self.input[self.pos..];
-            if remaining.is_empty() {
+            if self.pos >= scan_end {
                 break;
             }
-            // Scan for release OR a value-terminating delimiter.
-            // memchr3 can hold three bytes; we combine elem/comp/release.
-            // A separate memchr finds term so we take the nearest hit.
+            let remaining = &self.input[self.pos..scan_end];
+            // Refresh the cached terminator position once the cursor has moved
+            // past it (only happens when a release sequence escaped a terminator).
+            if term_hit.is_some_and(|t| t < self.pos) {
+                term_hit = memchr(term, remaining).map(|i| self.pos + i);
+            }
             let hit_ect = memchr3(elem, comp, release, remaining);
-            let hit_term = memchr(term, remaining);
+            let hit_term = term_hit.map(|t| t - self.pos);
             let hit = match (hit_ect, hit_term) {
                 (None, None) => {
-                    self.pos += remaining.len();
+                    self.pos = scan_end;
                     break;
                 }
                 (Some(a), None) => a,
@@ -378,7 +410,7 @@ impl<'a> Tokenizer<'a> {
             if b == release {
                 // A release char must be followed by exactly one escaped byte.
                 // If it is the last byte in the buffer the sequence is malformed.
-                if remaining.len() - hit == 1 {
+                if self.pos + hit + 1 >= self.input.len() {
                     return Err(EdifactError::InvalidReleaseSequence {
                         offset: self.pos + hit,
                     });
@@ -420,8 +452,11 @@ impl<'a> Tokenizer<'a> {
             .saturating_add(1)
             .min(input_remaining.len());
         let remaining = &input_remaining[..scan_limit];
-        let end = memchr(self.ssa.element_sep, remaining)
-            .or_else(|| memchr(self.ssa.segment_term, remaining))
+        // Take the *nearest* of the two terminating delimiters.  Searching for
+        // the element separator first and only falling back to the segment
+        // terminator would run straight past the terminator of an element-less
+        // segment (`UNZ'…`) and swallow the following segment's tag.
+        let end = memchr2(self.ssa.element_sep, self.ssa.segment_term, remaining)
             .unwrap_or(remaining.len());
 
         if end == 0 {
@@ -627,6 +662,49 @@ mod tests {
                 .collect::<Result<Vec<_>, _>>();
             assert!(result.is_err(), "expected tag rejection for {input:?}");
         }
+    }
+
+    #[test]
+    fn element_less_segment_does_not_swallow_the_next_tag() {
+        // `read_tag` must stop at the *nearest* of element-separator and
+        // segment-terminator.  Scanning for `+` first would run past the `'`
+        // and produce the bogus tag "UNZ'UNB".
+        let segs: Vec<_> = crate::from_bytes(b"UNZ'UNB+A'")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("element-less segment must parse");
+        assert_eq!(
+            segs.iter().map(|s| s.tag).collect::<Vec<_>>(),
+            vec!["UNZ", "UNB"]
+        );
+        assert!(segs[0].elements.is_empty());
+    }
+
+    #[test]
+    fn release_heavy_value_is_bounded_by_the_segment_guard() {
+        // A value consisting solely of release sequences and no delimiter must
+        // trip the per-segment guard rather than scanning the whole input once
+        // per release sequence (which was quadratic).
+        let mut input = b"BGM+".to_vec();
+        input.extend(std::iter::repeat_n(b"?a".as_slice(), 200_000).flatten());
+        let err = crate::from_bytes(&input)
+            .collect::<Result<Vec<_>, _>>()
+            .expect_err("oversized segment must be rejected");
+        assert!(
+            matches!(err, EdifactError::SegmentTooLong { .. }),
+            "expected SegmentTooLong, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn escaped_terminator_inside_a_value_is_not_a_segment_break() {
+        // Exercises the cached-terminator refresh path: the first `'` is escaped,
+        // so the scan must resume past it and find the real terminator.
+        let segs: Vec<_> = crate::from_bytes(b"FTX+a?'b+c'")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("escaped terminator must parse");
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].element_str(0), Some("a'b"));
+        assert_eq!(segs[0].element_str(1), Some("c"));
     }
 
     #[test]

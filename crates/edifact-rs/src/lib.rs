@@ -24,6 +24,13 @@
 //! - `diagnostics` (disabled by default): enables rich diagnostic output via `miette`.
 //!   When enabled, errors implement `miette::Diagnostic` for enhanced error reporting.
 //!   This feature adds an optional dependency and has no impact on parsing performance.
+//! - `serde` (disabled by default): derives `Serialize` / `Deserialize` for
+//!   [`ValidationReport`], [`ValidationIssue`], and the envelope types, so
+//!   reports can be persisted or sent across a queue and read back.
+//!
+//! Features are additive and independent: enabling any combination changes only
+//! which trait impls and re-exports are available, never parsing or validation
+//! behaviour.
 //!
 //! The crate is expected to compile both with defaults and with
 //! `--no-default-features` for consumers who only want the core parsing and
@@ -156,8 +163,6 @@
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! A native zero-copy streaming async API is tracked as a future roadmap item.
 // ── core modules ──────────────────────────────────────────────────────────────
 pub mod directory_validator;
 pub(crate) mod envelope;
@@ -194,11 +199,11 @@ pub use model::{
     BorrowedElement, BorrowedSegment, Element, OwnedElement, OwnedSegment, Segment, Span,
 };
 pub use parser::{
-    Parser, ReaderConfig, from_bufread, from_bufread_stream, from_bufread_stream_with_config,
-    from_reader_with_config,
+    OwnedSegmentStream, Parser, ReaderConfig, from_bufread, from_bufread_stream,
+    from_bufread_stream_with_config, from_reader_with_config,
 };
 pub use report::{ValidationIssue, ValidationReport, ValidationSeverity};
-pub use tokenizer::{ServiceStringAdvice, Tokenizer};
+pub use tokenizer::{ServiceStringAdvice, Token, Tokenizer};
 pub use validator::{
     EnvelopeValidator, ProfileRule, ProfileRulePack, ValidationContext, ValidationContextBuilder,
     ValidationLayer, ValidationRuleContext, Validator, validate_each,
@@ -212,7 +217,7 @@ pub use de::{
     CompositeElement, DispatchedMessage, EdifactCompositeDeserialize, EdifactDeserialize,
     EdifactSegmentTag, MessageDispatch, MessageWindow, MessageWindowsIter, MessageWindowsSliceIter,
     OwnedMessageWindow, SegmentAccessor, composite_element, contiguous_groups_by_qualifier,
-    deserialize, deserialize_all_from_reader, deserialize_all_streaming,
+    contiguous_groups_iter, deserialize, deserialize_all_from_reader, deserialize_all_streaming,
     deserialize_first_from_reader, deserialize_first_streaming, deserialize_messages_bytes,
     deserialize_messages_from_reader, deserialize_str, element_str, find_qualified_segment,
     find_qualified_segment_owned, find_segment, find_segment_owned, find_segment_typed,
@@ -463,20 +468,6 @@ pub fn from_bytes_owned_with_config(
     from_bytes_with_config(input, config).map(|r| r.map(OwnedSegment::from))
 }
 
-/// Parse a reader into owned segments as a streaming iterator.
-///
-/// This keeps memory bounded by yielding segments incrementally instead of
-/// materializing the full interchange up front.
-///
-/// # Deprecation
-///
-/// Use [`from_reader`] instead — this function is an alias kept for internal use.
-pub(crate) fn from_reader_iter<R: Read>(reader: R) -> FromReaderIter<R> {
-    FromReaderIter {
-        inner: parser::from_reader_stream(reader),
-    }
-}
-
 /// Serialize `segments` to an [`std::io::Write`] implementation.
 ///
 /// # Errors
@@ -567,4 +558,49 @@ mod tests {
             .expect_err("invalid UNA should fail slice parsing");
         assert!(matches!(err, EdifactError::InvalidUna));
     }
+}
+
+/// Compiles and runs every ```` ```rust ```` block in the `docs/` guides as a
+/// doctest.
+///
+/// The guides drifted from the API — snippets referenced private module paths
+/// and methods that did not exist — because nothing ever compiled them. Wiring
+/// them in here means a rename that breaks a guide breaks the build.
+///
+/// Blocks that genuinely cannot run (they need a live socket, a real directory
+/// file, or a downstream crate) should be marked ```` ```rust,ignore ```` or
+/// ```` ```rust,no_run ```` in the guide itself.
+#[cfg(doctest)]
+mod doc_guides {
+    macro_rules! guide {
+        ($name:ident, $path:literal) => {
+            #[doc = include_str!($path)]
+            pub struct $name;
+        };
+    }
+
+    guide!(CoreConcepts, "../../../docs/core-concepts.md");
+    guide!(Parsing, "../../../docs/parsing.md");
+    guide!(ProfilePacks, "../../../docs/profile-packs.md");
+    guide!(Validation, "../../../docs/validation.md");
+
+    // Guides whose examples use the derive macros.
+    #[cfg(feature = "derive")]
+    guide!(AsyncIntegration, "../../../docs/async-integration.md");
+    #[cfg(feature = "derive")]
+    guide!(ErrorReference, "../../../docs/error-reference.md");
+    #[cfg(feature = "derive")]
+    guide!(GettingStarted, "../../../docs/getting-started.md");
+    #[cfg(feature = "derive")]
+    guide!(Performance, "../../../docs/performance.md");
+    #[cfg(feature = "derive")]
+    guide!(Streaming, "../../../docs/streaming.md");
+    #[cfg(feature = "derive")]
+    guide!(TypedDerive, "../../../docs/typed-derive.md");
+    #[cfg(feature = "derive")]
+    guide!(Writing, "../../../docs/writing.md");
+
+    // The diagnostics guide's examples use `miette` types.
+    #[cfg(feature = "diagnostics")]
+    guide!(Diagnostics, "../../../docs/diagnostics.md");
 }

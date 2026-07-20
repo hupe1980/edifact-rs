@@ -206,8 +206,201 @@ fn fuzz_service_string_advice_valid_una_prefix() {
             bytes[..3].copy_from_slice(b"UNA");
             bytes[3..].copy_from_slice(&suffix);
             let ssa = ServiceStringAdvice::from_bytes_unchecked(&bytes);
-            // If from_bytes_unchecked returns an object, is_valid must also not panic.
-            let _ = ssa.is_valid();
+
+            // The six service characters must round-trip verbatim out of the UNA.
+            assert_eq!(ssa.component_sep, suffix[0]);
+            assert_eq!(ssa.element_sep, suffix[1]);
+            assert_eq!(ssa.decimal_mark, suffix[2]);
+            assert_eq!(ssa.release_char, suffix[3]);
+            assert_eq!(ssa.repetition_sep, suffix[4]);
+            assert_eq!(ssa.segment_term, suffix[5]);
+
+            // `is_valid` must agree with the checked constructor, and must imply
+            // that every active delimiter is distinct printable ASCII — the
+            // invariant the whole tokenizer relies on.
+            let checked = ServiceStringAdvice::from_bytes(&bytes);
+            assert_eq!(
+                ssa.is_valid(),
+                checked.is_ok(),
+                "is_valid disagreed with from_bytes for {suffix:?}"
+            );
+            if ssa.is_valid() {
+                let mandatory = [
+                    ssa.component_sep,
+                    ssa.element_sep,
+                    ssa.decimal_mark,
+                    ssa.release_char,
+                    ssa.segment_term,
+                ];
+                for (i, a) in mandatory.iter().enumerate() {
+                    assert!(
+                        (0x21..=0x7E).contains(a),
+                        "non-printable delimiter {a:#04X}"
+                    );
+                    for b in &mandatory[i + 1..] {
+                        assert_ne!(a, b, "duplicate delimiter {a:#04X}");
+                    }
+                }
+                assert!(
+                    ssa.repetition_sep == b' ' || !mandatory.contains(&ssa.repetition_sep),
+                    "repetition separator collides with a mandatory delimiter"
+                );
+            }
+        });
+}
+
+// ── structured generation ─────────────────────────────────────────────────────
+
+/// Build a syntactically plausible interchange from a fuzzer seed.
+///
+/// Arbitrary `Vec<u8>` essentially never parses as EDIFACT, so targets driven by
+/// raw bytes almost always bail before reaching the code they are named after.
+/// This produces messages that *do* parse — including empty elements, multi-
+/// component composites, and values containing every service character, so the
+/// escaping path is actually exercised.
+fn build_message(seed: &[u8]) -> String {
+    // Values deliberately include each delimiter and the release character so the
+    // writer's escaping and the tokenizer's un-escaping must agree.
+    const VALUES: &[&str] = &[
+        "",
+        "A",
+        "220",
+        "a+b",
+        "a:b",
+        "a?b",
+        "a'b",
+        "a*b",
+        "??",
+        "a??b",
+        "x?'y",
+        "LONGER VALUE",
+    ];
+    if seed.is_empty() {
+        return "BGM+220'".to_owned();
+    }
+    let mut out = String::new();
+    let segment_count = 1 + (seed[0] as usize % 4);
+    let mut cursor = 1usize;
+    let next = |cursor: &mut usize| -> u8 {
+        let b = seed.get(*cursor).copied().unwrap_or(0);
+        *cursor = cursor.wrapping_add(1);
+        b
+    };
+    for _ in 0..segment_count {
+        let tag_seed = next(&mut cursor);
+        let tag: String =
+            ["BGM", "RFF", "NAD", "DTM", "FTX", "LIN"][tag_seed as usize % 6].to_owned();
+        out.push_str(&tag);
+        let element_count = next(&mut cursor) as usize % 4;
+        for _ in 0..element_count {
+            out.push('+');
+            let component_count = 1 + (next(&mut cursor) as usize % 3);
+            for c in 0..component_count {
+                if c > 0 {
+                    out.push(':');
+                }
+                let v = VALUES[next(&mut cursor) as usize % VALUES.len()];
+                // Escape the service characters so the generated text is valid.
+                for ch in v.chars() {
+                    if matches!(ch, '+' | ':' | '?' | '\'') {
+                        out.push('?');
+                    }
+                    out.push(ch);
+                }
+            }
+        }
+        out.push('\'');
+    }
+    out
+}
+
+#[test]
+fn fuzz_structured_parse_write_reparse_is_stable() {
+    // parse -> write -> reparse must preserve the full segment/element/component
+    // structure.  This is the invariant that the raw-bytes targets never reach.
+    check!()
+        .with_type::<Vec<u8>>()
+        .cloned()
+        .for_each(|seed: Vec<u8>| {
+            let text = build_message(&seed);
+            let Ok(first) = from_bytes(text.as_bytes()).collect::<Result<Vec<_>, _>>() else {
+                panic!("generator produced unparseable EDIFACT: {text:?}");
+            };
+            let bytes = segments_to_bytes(&first).expect("write must succeed");
+            let second = from_bytes(&bytes)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_else(|e| panic!("re-parse of own output failed: {e} for {text:?}"));
+
+            assert_eq!(first.len(), second.len(), "segment count changed: {text:?}");
+            for (a, b) in first.iter().zip(second.iter()) {
+                assert_eq!(a.tag, b.tag, "tag changed: {text:?}");
+                assert_eq!(
+                    a.elements.len(),
+                    b.elements.len(),
+                    "element count changed for {}: {text:?}",
+                    a.tag
+                );
+                for (ea, eb) in a.elements.iter().zip(b.elements.iter()) {
+                    let va: Vec<&str> = ea.components.iter().map(|(c, _)| c.as_ref()).collect();
+                    let vb: Vec<&str> = eb.components.iter().map(|(c, _)| c.as_ref()).collect();
+                    assert_eq!(va, vb, "component values changed for {}: {text:?}", a.tag);
+                }
+            }
+        });
+}
+
+#[test]
+fn fuzz_custom_una_round_trip_is_stable() {
+    // Same invariant, but written through a fuzzed (valid) UNA.  A writer that
+    // hardcodes a default delimiter, or forgets to escape one that the active UNA
+    // declares, fails here and nowhere else.
+    use edifact_rs::{ServiceStringAdvice, Writer};
+    check!()
+        .with_type::<(Vec<u8>, [u8; 6])>()
+        .cloned()
+        .for_each(|(seed, delims): (Vec<u8>, [u8; 6])| {
+            let mut una = [0u8; 9];
+            una[..3].copy_from_slice(b"UNA");
+            una[3..].copy_from_slice(&delims);
+            // Only exercise delimiter sets the library accepts.
+            let Ok(ssa) = ServiceStringAdvice::from_bytes(&una) else {
+                return;
+            };
+
+            let text = build_message(&seed);
+            let Ok(source) = from_bytes(text.as_bytes()).collect::<Result<Vec<_>, _>>() else {
+                return;
+            };
+
+            let mut buf = Vec::new();
+            {
+                let mut w = Writer::with_una(&mut buf, ssa).expect("valid ssa");
+                for seg in &source {
+                    w.write_segment(seg).expect("write must succeed");
+                }
+                w.finish().expect("flush must succeed");
+            }
+
+            let reparsed = from_bytes(&buf)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_else(|e| {
+                    panic!("output written with UNA {delims:?} did not reparse: {e}")
+                });
+            assert_eq!(source.len(), reparsed.len(), "segment count changed");
+            for (a, b) in source.iter().zip(reparsed.iter()) {
+                assert_eq!(a.tag, b.tag);
+                let va: Vec<Vec<&str>> = a
+                    .elements
+                    .iter()
+                    .map(|e| e.components.iter().map(|(c, _)| c.as_ref()).collect())
+                    .collect();
+                let vb: Vec<Vec<&str>> = b
+                    .elements
+                    .iter()
+                    .map(|e| e.components.iter().map(|(c, _)| c.as_ref()).collect())
+                    .collect();
+                assert_eq!(va, vb, "values changed under UNA {delims:?}");
+            }
         });
 }
 
@@ -365,16 +558,10 @@ fn fuzz_directory_validator_no_panic() {
         ElementRef::new(2, "1004", Status::Conditional, 1),
     ];
     static DTM_ELEMENTS: &[ElementRef] = &[ElementRef::new(1, "C507", Status::Mandatory, 1)];
-    static BGM_DEF: SegmentDefinition = SegmentDefinition {
-        tag: "BGM",
-        name: "Beginning of message",
-        elements: BGM_ELEMENTS,
-    };
-    static DTM_DEF: SegmentDefinition = SegmentDefinition {
-        tag: "DTM",
-        name: "Date/time/period",
-        elements: DTM_ELEMENTS,
-    };
+    static BGM_DEF: SegmentDefinition =
+        SegmentDefinition::new("BGM", "Beginning of message", BGM_ELEMENTS);
+    static DTM_DEF: SegmentDefinition =
+        SegmentDefinition::new("DTM", "Date/time/period", DTM_ELEMENTS);
 
     fn seg_lookup(tag: &str) -> Option<&'static SegmentDefinition> {
         match tag {

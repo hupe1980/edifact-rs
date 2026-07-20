@@ -181,6 +181,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bytes"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -334,7 +340,7 @@ dependencies = [
 
 [[package]]
 name = "edifact-rs"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "bolero",
  "criterion",
@@ -351,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "edifact-rs-derive"
-version = "0.11.0"
+version = "0.12.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -908,6 +914,7 @@ version = "1.52.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe"
 dependencies = [
+ "bytes",
  "pin-project-lite",
  "tokio-macros",
 ]

@@ -211,7 +211,7 @@ where
     T: EdifactDeserialize + EdifactSegmentTag,
     R: Read,
 {
-    for segment in crate::from_reader_iter(reader) {
+    for segment in crate::from_reader(reader) {
         let segment = segment?;
         // O(1) tag + qualifier check before paying for as_borrowed().
         if !T::matches_owned_segment(&segment) {
@@ -233,7 +233,7 @@ where
     R: Read,
 {
     let mut out = Vec::new();
-    for segment in crate::from_reader_iter(reader) {
+    for segment in crate::from_reader(reader) {
         let segment = segment?;
         // O(1) tag + qualifier check before paying for as_borrowed().
         if !T::matches_owned_segment(&segment) {
@@ -1129,7 +1129,7 @@ pub fn message_windows_bytes(input: &[u8]) -> MessageWindowsSliceIter<'_> {
 pub fn message_windows_from_reader<R: Read>(
     reader: R,
 ) -> MessageWindowsIter<crate::FromReaderIter<R>> {
-    MessageWindowsIter::new(crate::from_reader_iter(reader))
+    MessageWindowsIter::new(crate::from_reader(reader))
 }
 
 /// Stream typed messages from a reader by deserializing each `UNH..UNT` window.

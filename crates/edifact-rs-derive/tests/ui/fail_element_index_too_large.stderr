@@ -1,0 +1,15 @@
+error: `element` index 200000 exceeds the maximum of 256; UN/EDIFACT allows at most 99 elements per segment and 99 components per composite
+  --> tests/ui/fail_element_index_too_large.rs:15:25
+   |
+15 |     #[edifact(element = 200000)]
+   |                         ^^^^^^
+
+warning: unused imports: `composite_element`, `find_qualified_segment_owned`, `find_qualified_segment`, `find_segment_owned`, `find_segment`, and `find_segments_typed`
+ --> tests/ui/support.rs
+  |
+  |             composite_element, find_qualified_segment, find_qualified_segment_owned,
+  |             ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |             find_segment, find_segment_owned, find_segments_typed,
+  |             ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default

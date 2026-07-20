@@ -3,27 +3,37 @@
 
 [advisories]
 version = 2
-# Deny crates that have been yanked from crates.io.
+# Security advisories, unmaintained crates, and unsound crates are all denied.
+# Stated explicitly rather than relying on defaults so a cargo-deny upgrade
+# cannot silently relax the gate.
 yanked = "deny"
+unmaintained = "all"
 ignore = []
 
 [bans]
-# Deny multiple versions of the same crate in the dependency tree.
-multiple-versions = "warn"
-# Deny wildcard dependencies.
+# Duplicate versions of a crate inflate compile times and binary size. Denied
+# outright; add a documented entry to `skip` when a transitive graph genuinely
+# forces one.
+multiple-versions = "deny"
 wildcards = "deny"
-# Known allowed duplicates (common in transitive graphs).
 skip = []
 
 [licenses]
 version = 2
-# Allow only OSI-approved permissive licenses.
+# OSI-approved permissive licenses only. Entries beyond MIT/Apache-2.0 are ones
+# that appear in this crate's actual transitive graph or are near-certain to,
+# listed up front so a routine dependency bump does not break CI.
 allow = [
     "MIT",
     "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
     "Unicode-3.0",
 ]
-confidence-threshold = 0.8
+# The cargo-deny default. A lower threshold accepts fuzzier matches against
+# license text, which is how an unexpected license slips through.
+confidence-threshold = 0.93
 
 [sources]
 # Only allow crates.io as a source.

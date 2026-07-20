@@ -81,7 +81,7 @@ let report = ValidationContext::builder()
     .build()
     .validate_lenient(&segs);
 
-println!("{} error(s)", report.errors.len());
+println!("{} error(s)", report.errors().len());
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
@@ -230,7 +230,7 @@ println!("ORDERS-DOC-P001 findings: {p001_count}");
 Instead of returning `ValidationIssue` to your application layer, map rule IDs to
 your own domain error type:
 
-```rust
+```rust,ignore
 use edifact_rs::{ProfileRulePack, ValidationContext, ValidationIssue, ValidationSeverity, from_bytes};
 
 #[derive(Debug)]
@@ -393,11 +393,11 @@ Use `group::group_segments_indexed` to build the tree, then pass it to
 For full control, supply a closure via `with_scoped_group_rule_fn(group_scope, rule_id, closure)`.
 The closure receives `(group: &SegmentGroupIndexed, segs: &[Segment], ctx: &ValidationRuleContext, issues: &mut Vec<ValidationIssue>)`:
 
-```rust
+```rust,ignore
 use edifact_rs::{
     ProfileRulePack, ValidationIssue, ValidationSeverity,
     group::SegmentGroupIndexed,
-    validator::ValidationRuleContext,
+    ValidationRuleContext,
     Segment,
 };
 

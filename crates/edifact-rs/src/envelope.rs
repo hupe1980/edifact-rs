@@ -382,7 +382,6 @@ impl ValidatedInterchange {
     /// Equivalent to `self.messages.iter()` but communicates intent clearly
     /// and is stable regardless of future internal layout changes.
     #[inline]
-    #[must_use]
     pub fn iter_messages(&self) -> impl Iterator<Item = &MessageEnvelope> {
         self.messages.iter()
     }
@@ -426,7 +425,6 @@ impl ValidatedInterchange {
     /// [`messages_by_type`](Self::messages_by_type) which collects eagerly and releases the string reference
     /// immediately.
     #[inline]
-    #[must_use]
     pub fn iter_messages_by_type<'s, 'q: 's>(
         &'s self,
         message_type: &'q str,
@@ -674,14 +672,15 @@ impl LenientResult {
     ///
     /// The partial interchange (when present alongside errors) is discarded on the
     /// `Err` path.  Use the fields directly when you need both simultaneously.
-    #[must_use]
+    ///
+    /// This conversion is total.  Because [`errors`](Self::errors) is a public
+    /// field, callers may legitimately filter out violations they tolerate before
+    /// converting; if that leaves no errors but also no interchange, the result is
+    /// an empty `Err` rather than a panic.
     pub fn into_strict(self) -> Result<ValidatedInterchange, Vec<EdifactError>> {
-        if self.errors.is_empty() {
-            Ok(self.interchange.expect(
-                "LenientResult: no errors but interchange is None — this is a bug in edifact-rs",
-            ))
-        } else {
-            Err(self.errors)
+        match self.interchange {
+            Some(interchange) if self.errors.is_empty() => Ok(interchange),
+            _ => Err(self.errors),
         }
     }
 }
@@ -709,10 +708,70 @@ pub fn validate_envelope_lenient_from_owned(segments: &[OwnedSegment]) -> Lenien
 
 // ── Core implementation ───────────────────────────────────────────────────────
 
-fn validate_envelope_impl<S: SegmentReader>(
+/// Collector for **recoverable** envelope violations.
+///
+/// Extraction distinguishes two error classes:
+///
+/// * *Recoverable* — the violation is recorded here and extraction substitutes a
+///   fallback value, so later checks still run.  Control-reference mismatches,
+///   missing mandatory components, and unparseable counts are all recoverable.
+/// * *Fatal* — the structure cannot be interpreted at all (no `UNB`/`UNZ`, a
+///   stray segment outside any message, an unterminated message).  These are
+///   still returned via `Err` and abort extraction.
+///
+/// Strict and lenient validation share one implementation over this sink, which
+/// is what keeps them from diverging: strict reports the first error the sink
+/// collected, lenient reports all of them.
+#[derive(Default)]
+struct ErrorSink {
+    errors: Vec<EdifactError>,
+}
+
+impl ErrorSink {
+    #[inline]
+    fn push(&mut self, error: EdifactError) {
+        self.errors.push(error);
+    }
+
+    /// Record a recoverable failure and continue with `fallback`.
+    #[inline]
+    fn recover<T>(&mut self, result: Result<T, EdifactError>, fallback: T) -> T {
+        match result {
+            Ok(value) => value,
+            Err(error) => {
+                self.errors.push(error);
+                fallback
+            }
+        }
+    }
+
+    /// Read a mandatory component, recording `MissingRequiredComponent` if absent.
+    #[inline]
+    fn required<S: SegmentReader>(&mut self, seg: &S, element: usize, component: usize) -> String {
+        self.recover(
+            seg.required_component_field(element, component)
+                .map(str::to_owned),
+            String::new(),
+        )
+    }
+}
+
+/// Shared extraction used by both the strict and the lenient entry points.
+///
+/// Returns the interchange when the structure was interpretable at all, plus
+/// every violation found in discovery order.
+fn validate_envelope_collecting<S: SegmentReader>(
     segments: &[S],
-) -> Result<ValidatedInterchange, EdifactError> {
-    let mut interchange_env = extract_interchange(segments)?;
+) -> (Option<ValidatedInterchange>, Vec<EdifactError>) {
+    let mut sink = ErrorSink::default();
+
+    let mut interchange_env = match extract_interchange(segments, &mut sink) {
+        Ok(env) => env,
+        Err(fatal) => {
+            sink.push(fatal);
+            return (None, sink.errors);
+        }
+    };
 
     let inner = if segments.len() >= 2 {
         &segments[1..segments.len() - 1]
@@ -720,7 +779,13 @@ fn validate_envelope_impl<S: SegmentReader>(
         &[]
     };
 
-    let (functional_groups, messages) = extract_content(inner)?;
+    let (functional_groups, messages) = match extract_content(inner, &mut sink) {
+        Ok(pair) => pair,
+        Err(fatal) => {
+            sink.push(fatal);
+            return (None, sink.errors);
+        }
+    };
 
     // UNZ unit count semantics (ISO 9735-1 §9.2):
     //   with groups    → counts groups
@@ -730,13 +795,15 @@ fn validate_envelope_impl<S: SegmentReader>(
     } else {
         functional_groups.len()
     };
-    interchange_env.actual_unit_count =
+    interchange_env.actual_unit_count = sink.recover(
         u32::try_from(actual_unit_count).map_err(|_| EdifactError::InterchangeTooLarge {
             count: actual_unit_count as u64,
-        })?;
+        }),
+        u32::MAX,
+    );
 
     if interchange_env.declared_unit_count != interchange_env.actual_unit_count {
-        return Err(EdifactError::MessageCountMismatch {
+        sink.push(EdifactError::MessageCountMismatch {
             expected: interchange_env.declared_unit_count,
             actual: interchange_env.actual_unit_count,
         });
@@ -744,7 +811,7 @@ fn validate_envelope_impl<S: SegmentReader>(
 
     for msg in &messages {
         if msg.declared_segment_count != msg.actual_segment_count {
-            return Err(EdifactError::SegmentCountMismatch {
+            sink.push(EdifactError::SegmentCountMismatch {
                 expected: msg.declared_segment_count,
                 actual: msg.actual_segment_count,
                 message_ref: msg.message_ref.clone(),
@@ -752,91 +819,35 @@ fn validate_envelope_impl<S: SegmentReader>(
         }
     }
 
-    Ok(ValidatedInterchange {
-        interchange: interchange_env,
-        functional_groups,
-        messages,
-    })
+    (
+        Some(ValidatedInterchange {
+            interchange: interchange_env,
+            functional_groups,
+            messages,
+        }),
+        sink.errors,
+    )
+}
+
+fn validate_envelope_impl<S: SegmentReader>(
+    segments: &[S],
+) -> Result<ValidatedInterchange, EdifactError> {
+    match validate_envelope_collecting(segments) {
+        (Some(result), errors) if errors.is_empty() => Ok(result),
+        (_, mut errors) => Err(errors
+            .drain(..)
+            .next()
+            .unwrap_or(EdifactError::MissingSegment {
+                tag: "UNB".to_owned(),
+                expected_position: "first segment of interchange".to_owned(),
+            })),
+    }
 }
 
 fn validate_envelope_lenient_impl<S: SegmentReader>(segments: &[S]) -> LenientResult {
-    // Fast path: if strict validation passes there is nothing more to do.
-    match validate_envelope_impl(segments) {
-        Ok(result) => {
-            return LenientResult {
-                interchange: Some(result),
-                errors: Vec::new(),
-            };
-        }
-        Err(_) => {}
-    }
-
-    // Structural extraction: if UNB/UNZ are missing or unreadable we cannot
-    // build any useful result.
-    let mut ie = match extract_interchange(segments) {
-        Ok(ie) => ie,
-        Err(e) => {
-            return LenientResult {
-                interchange: None,
-                errors: vec![e],
-            };
-        }
-    };
-
-    let inner = if segments.len() >= 2 {
-        &segments[1..segments.len() - 1]
-    } else {
-        &[]
-    };
-
-    // Content extraction: structural errors (missing UNH/UNT, stray segments,
-    // etc.) mean we cannot build a usable interchange either.
-    let (functional_groups, messages) = match extract_content(inner) {
-        Ok(pair) => pair,
-        Err(e) => {
-            return LenientResult {
-                interchange: None,
-                errors: vec![e],
-            };
-        }
-    };
-
-    // From here we have a parseable structure.  Collect count violations as
-    // errors but still return the (partial) interchange so that diagnostic
-    // tooling can display what was actually found.
-    let mut errors: Vec<EdifactError> = Vec::new();
-
-    let actual_unit_count = if functional_groups.is_empty() {
-        messages.len()
-    } else {
-        functional_groups.len()
-    };
-    ie.actual_unit_count = u32::try_from(actual_unit_count).unwrap_or(u32::MAX);
-
-    if ie.declared_unit_count != ie.actual_unit_count {
-        errors.push(EdifactError::MessageCountMismatch {
-            expected: ie.declared_unit_count,
-            actual: ie.actual_unit_count,
-        });
-    }
-
-    for msg in &messages {
-        if msg.declared_segment_count != msg.actual_segment_count {
-            errors.push(EdifactError::SegmentCountMismatch {
-                expected: msg.declared_segment_count,
-                actual: msg.actual_segment_count,
-                message_ref: msg.message_ref.clone(),
-            });
-        }
-    }
-
-    let result = ValidatedInterchange {
-        interchange: ie,
-        functional_groups,
-        messages,
-    };
+    let (interchange, errors) = validate_envelope_collecting(segments);
     LenientResult {
-        interchange: Some(result),
+        interchange,
         errors,
     }
 }
@@ -845,6 +856,7 @@ fn validate_envelope_lenient_impl<S: SegmentReader>(segments: &[S]) -> LenientRe
 
 fn extract_interchange<S: SegmentReader>(
     segments: &[S],
+    sink: &mut ErrorSink,
 ) -> Result<InterchangeEnvelope, EdifactError> {
     if segments.first().map(|s| s.tag()) != Some("UNB") {
         return Err(EdifactError::MissingSegment {
@@ -862,18 +874,18 @@ fn extract_interchange<S: SegmentReader>(
     let unb = &segments[0];
     let unz = &segments[segments.len() - 1];
 
-    let syntax_identifier = unb.required_component_field(0, 0)?.to_owned();
+    let syntax_identifier = sink.required(unb, 0, 0);
     let syntax_version = unb.component(0, 1).unwrap_or("").to_owned();
 
     // Validate DE 0001 against the ISO 9735-1 §3.1 list of defined syntax identifiers.
     const VALID_SYNTAX_IDS: &[&str] = &["UNOA", "UNOB", "UNOC", "UNOD", "UNOE", "UNOF", "KECA"];
     if !VALID_SYNTAX_IDS.contains(&syntax_identifier.as_str()) {
-        return Err(EdifactError::UnrecognisedSyntaxIdentifier(
-            syntax_identifier,
+        sink.push(EdifactError::UnrecognisedSyntaxIdentifier(
+            syntax_identifier.clone(),
         ));
     }
 
-    let sender_id = unb.required_component_field(1, 0)?.to_owned();
+    let sender_id = sink.required(unb, 1, 0);
     let sender_qualifier = unb.component(1, 1).unwrap_or("").to_owned();
     // UNB S002 comp[2]: DE 0014 — sender routing address
     let sender_routing_address = unb
@@ -881,7 +893,7 @@ fn extract_interchange<S: SegmentReader>(
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
 
-    let recipient_id = unb.required_component_field(2, 0)?.to_owned();
+    let recipient_id = sink.required(unb, 2, 0);
     let recipient_qualifier = unb.component(2, 1).unwrap_or("").to_owned();
     // UNB S003 comp[2]: DE 0014 — recipient routing address
     let recipient_routing_address = unb
@@ -889,7 +901,7 @@ fn extract_interchange<S: SegmentReader>(
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
 
-    let date = unb.required_component_field(3, 0)?.to_owned();
+    let date = sink.required(unb, 3, 0);
     let time_raw = unb.component(3, 1).unwrap_or("");
     let time = if time_raw.is_empty() {
         None
@@ -897,7 +909,7 @@ fn extract_interchange<S: SegmentReader>(
         Some(time_raw.to_owned())
     };
 
-    let control_ref = unb.required_component_field(4, 0)?.to_owned();
+    let control_ref = sink.required(unb, 4, 0);
 
     // UNB element [5]: S005 — recipient's reference/password (DE 0022, comp 0) + qualifier (DE 0025, comp 1)
     let recipient_password = unb
@@ -919,31 +931,34 @@ fn extract_interchange<S: SegmentReader>(
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
     // UNB element [8]: DE 0031 — acknowledgement request ("1" = requested)
-    let acknowledgement_request = unb.component(8, 0).map_or(false, |v| v == "1");
+    let acknowledgement_request = unb.component(8, 0) == Some("1");
     // UNB element [9]: DE 0032 — communications agreement ID
     let communications_agreement_id = unb
         .component(9, 0)
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
     // UNB element [10]: DE 0035 — test indicator ("1" = test)
-    let test_indicator = unb.component(10, 0).map_or(false, |v| v == "1");
+    let test_indicator = unb.component(10, 0) == Some("1");
 
-    let unz_control_ref = unz.required_component_field(1, 0)?;
+    let unz_control_ref = sink.required(unz, 1, 0);
     if unz_control_ref != control_ref {
-        return Err(EdifactError::QualifierMismatch {
+        sink.push(EdifactError::QualifierMismatch {
             tag: "UNZ".to_owned(),
-            actual: unz_control_ref.to_owned(),
-            expected: control_ref,
+            actual: unz_control_ref,
+            expected: control_ref.clone(),
             offset: unz.span_start(),
         });
     }
 
-    let declared_unit_count: u32 =
-        unz.required_component_field(0, 0)?
+    let declared_unit_count_raw = sink.required(unz, 0, 0);
+    let declared_unit_count: u32 = sink.recover(
+        declared_unit_count_raw
             .parse()
             .map_err(|_| EdifactError::InvalidText {
                 offset: unz.span_start(),
-            })?;
+            }),
+        0,
+    );
 
     Ok(InterchangeEnvelope {
         syntax_identifier,
@@ -973,19 +988,21 @@ fn extract_interchange<S: SegmentReader>(
 
 fn extract_content<S: SegmentReader>(
     inner: &[S],
+    sink: &mut ErrorSink,
 ) -> Result<(Vec<FunctionalGroupEnvelope>, Vec<MessageEnvelope>), EdifactError> {
     // A UNG as the first inner segment means the interchange uses functional groups.
     // Checking only the first tag is O(1) and correct: if UNG is present it must
     // always be first; a stray UNE without a preceding UNG is caught downstream.
-    if inner.first().map_or(false, |s| s.tag() == "UNG") {
-        let groups = extract_with_groups(inner)?;
+    if inner.first().is_some_and(|s| s.tag() == "UNG") {
+        let groups = extract_with_groups(inner, sink)?;
         let messages = groups
             .iter()
             .flat_map(|g| g.messages.iter().cloned())
             .collect();
         Ok((groups, messages))
     } else {
-        let messages = extract_messages_flat(inner)?;
+        let mut seen_refs: Vec<String> = Vec::new();
+        let messages = extract_messages_flat(inner, sink, &mut seen_refs)?;
         Ok((vec![], messages))
     }
 }
@@ -995,14 +1012,14 @@ fn find_matching_une<S: SegmentReader>(
     segments: &[S],
     start: usize,
 ) -> Result<usize, EdifactError> {
-    for i in start..segments.len() {
-        match segments[i].tag() {
-            "UNE" => return Ok(i),
+    for (offset, seg) in segments[start..].iter().enumerate() {
+        match seg.tag() {
+            "UNE" => return Ok(start + offset),
             "UNG" => {
                 return Err(EdifactError::InvalidSegmentForMessage {
                     tag: "UNG".to_owned(),
                     message_type: "ENVELOPE".to_owned(),
-                    offset: segments[i].span_start(),
+                    offset: seg.span_start(),
                 });
             }
             _ => {}
@@ -1016,8 +1033,13 @@ fn find_matching_une<S: SegmentReader>(
 
 fn extract_with_groups<S: SegmentReader>(
     inner: &[S],
+    sink: &mut ErrorSink,
 ) -> Result<Vec<FunctionalGroupEnvelope>, EdifactError> {
     let mut groups: Vec<FunctionalGroupEnvelope> = Vec::new();
+    // DE 0048 must be unique within the interchange (ISO 9735-1 §8); DE 0062
+    // must be unique across the whole interchange, so the set spans all groups.
+    let mut seen_group_refs: Vec<String> = Vec::new();
+    let mut seen_message_refs: Vec<String> = Vec::new();
     let mut i = 0;
 
     while i < inner.len() {
@@ -1041,7 +1063,16 @@ fn extract_with_groups<S: SegmentReader>(
                     Some(time_raw.to_owned())
                 };
                 // UNG DE 0048 — group reference number (mandatory per ISO 9735-1 §8)
-                let group_ref = ung.required_component_field(4, 0)?.to_owned();
+                let group_ref = sink.required(ung, 4, 0);
+                if seen_group_refs.contains(&group_ref) {
+                    sink.push(EdifactError::DuplicateReference {
+                        tag: "UNG".to_owned(),
+                        reference: group_ref.clone(),
+                        offset: ung.span_start(),
+                    });
+                } else {
+                    seen_group_refs.push(group_ref.clone());
+                }
                 let controlling_agency = ung.component(5, 0).unwrap_or("").to_owned();
                 // UNG S008 — version (DE 0052, comp 0) + release (DE 0054, comp 1)
                 // S008 is always at element index [6]; there is no element [7] in ISO 9735-1 §8.
@@ -1049,33 +1080,34 @@ fn extract_with_groups<S: SegmentReader>(
                 let release = ung.component(6, 1).unwrap_or("").to_owned();
 
                 let une = &inner[une_idx];
-                let declared_str = une.required_component_field(0, 0)?;
-                let declared_message_count: u32 =
-                    declared_str
-                        .parse()
-                        .map_err(|_| EdifactError::InvalidText {
-                            offset: une.span_start(),
-                        })?;
-                let une_ref = une.required_component_field(1, 0)?;
+                let declared_str = sink.required(une, 0, 0);
+                let declared_message_count: u32 = sink.recover(
+                    declared_str.parse().map_err(|_| EdifactError::InvalidText {
+                        offset: une.span_start(),
+                    }),
+                    0,
+                );
+                let une_ref = sink.required(une, 1, 0);
                 if une_ref != group_ref {
-                    return Err(EdifactError::QualifierMismatch {
+                    sink.push(EdifactError::QualifierMismatch {
                         tag: "UNE".to_owned(),
-                        actual: une_ref.to_owned(),
+                        actual: une_ref,
                         expected: group_ref.clone(),
                         offset: une.span_start(),
                     });
                 }
 
                 let group_content = &inner[ung_idx + 1..une_idx];
-                let messages = extract_messages_flat(group_content)?;
-                let actual_message_count = u32::try_from(messages.len()).map_err(|_| {
-                    EdifactError::InterchangeTooLarge {
+                let messages = extract_messages_flat(group_content, sink, &mut seen_message_refs)?;
+                let actual_message_count = sink.recover(
+                    u32::try_from(messages.len()).map_err(|_| EdifactError::InterchangeTooLarge {
                         count: messages.len() as u64,
-                    }
-                })?;
+                    }),
+                    u32::MAX,
+                );
 
                 if declared_message_count != actual_message_count {
-                    return Err(EdifactError::MessageCountMismatch {
+                    sink.push(EdifactError::MessageCountMismatch {
                         expected: declared_message_count,
                         actual: actual_message_count,
                     });
@@ -1130,6 +1162,8 @@ fn extract_with_groups<S: SegmentReader>(
 /// Extract `UNH`/`UNT` message pairs from a flat slice (no UNB/UNZ/UNG/UNE expected).
 fn extract_messages_flat<S: SegmentReader>(
     segments: &[S],
+    sink: &mut ErrorSink,
+    seen_refs: &mut Vec<String>,
 ) -> Result<Vec<MessageEnvelope>, EdifactError> {
     let mut messages: Vec<MessageEnvelope> = Vec::new();
     let mut in_message = false;
@@ -1154,11 +1188,20 @@ fn extract_messages_flat<S: SegmentReader>(
                 let u_idx = unh_idx.take().unwrap();
                 let unh = &segments[u_idx];
 
-                let message_ref = unh.required_component_field(0, 0)?.to_owned();
-                let message_type = unh.required_component_field(1, 0)?.to_owned();
-                let version = unh.required_component_field(1, 1)?.to_owned();
-                let release = unh.required_component_field(1, 2)?.to_owned();
-                let controlling_agency = unh.required_component_field(1, 3)?.to_owned();
+                let message_ref = sink.required(unh, 0, 0);
+                if seen_refs.contains(&message_ref) {
+                    sink.push(EdifactError::DuplicateReference {
+                        tag: "UNH".to_owned(),
+                        reference: message_ref.clone(),
+                        offset: unh.span_start(),
+                    });
+                } else {
+                    seen_refs.push(message_ref.clone());
+                }
+                let message_type = sink.required(unh, 1, 0);
+                let version = sink.required(unh, 1, 1);
+                let release = sink.required(unh, 1, 2);
+                let controlling_agency = sink.required(unh, 1, 3);
                 let association_code = unh.component(1, 4).unwrap_or("").to_owned();
                 // UNH element [2]: DE 0068 — common access reference (optional)
                 let common_access_ref = unh
@@ -1176,27 +1219,30 @@ fn extract_messages_flat<S: SegmentReader>(
                     .filter(|s| !s.is_empty())
                     .map(str::to_owned);
 
-                let declared_segment_count: u32 = seg
-                    .required_component_field(0, 0)?
-                    .parse()
-                    .map_err(|_| EdifactError::InvalidText {
+                let declared_raw = sink.required(seg, 0, 0);
+                let declared_segment_count: u32 = sink.recover(
+                    declared_raw.parse().map_err(|_| EdifactError::InvalidText {
                         offset: seg.span_start(),
-                    })?;
-                let unt_ref = seg.required_component_field(1, 0)?;
+                    }),
+                    0,
+                );
+                let unt_ref = sink.required(seg, 1, 0);
                 if unt_ref != message_ref {
-                    return Err(EdifactError::QualifierMismatch {
+                    sink.push(EdifactError::QualifierMismatch {
                         tag: "UNT".to_owned(),
-                        actual: unt_ref.to_owned(),
+                        actual: unt_ref,
                         expected: message_ref.clone(),
                         offset: seg.span_start(),
                     });
                 }
 
-                let actual_segment_count = u32::try_from(i - msg_start_idx + 1).map_err(|_| {
-                    EdifactError::InterchangeTooLarge {
-                        count: u64::try_from(i - msg_start_idx + 1).unwrap_or(u64::MAX),
-                    }
-                })?;
+                let segment_span = i - msg_start_idx + 1;
+                let actual_segment_count = sink.recover(
+                    u32::try_from(segment_span).map_err(|_| EdifactError::InterchangeTooLarge {
+                        count: segment_span as u64,
+                    }),
+                    u32::MAX,
+                );
 
                 in_message = false;
                 messages.push(MessageEnvelope {
@@ -1262,6 +1308,101 @@ mod tests {
         let owned = parse(input);
         let segs: Vec<Segment<'_>> = owned.iter().map(crate::OwnedSegment::as_borrowed).collect();
         validate_envelope(&segs)
+    }
+
+    fn parse_and_validate_lenient(input: &[u8]) -> LenientResult {
+        let owned = parse(input);
+        let segs: Vec<Segment<'_>> = owned.iter().map(crate::OwnedSegment::as_borrowed).collect();
+        validate_envelope_lenient(&segs)
+    }
+
+    #[test]
+    fn lenient_collects_every_violation_not_just_the_first() {
+        // Two independent violations: a UNZ control-reference mismatch and a
+        // UNT segment-count mismatch.  The lenient path used to abort on the
+        // first and report only one.
+        let input = b"UNB+UNOA:1+S+R+200101:0900+CTRL1'\
+                      UNH+1+ORDERS:D:96A:UN'BGM+220'UNT+99+1'\
+                      UNZ+1+CTRL2'";
+        let result = parse_and_validate_lenient(input);
+        assert!(
+            result.errors.len() >= 2,
+            "expected both violations, got {:?}",
+            result.errors
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, EdifactError::QualifierMismatch { tag, .. } if tag == "UNZ")),
+            "missing UNZ control-ref mismatch in {:?}",
+            result.errors
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e, EdifactError::SegmentCountMismatch { .. })),
+            "missing UNT segment-count mismatch in {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn strict_reports_the_first_error_lenient_collects() {
+        // Strict and lenient share one implementation, so strict's error must
+        // always be the head of the lenient error list.
+        for input in [
+            &b"UNB+UNOA:1+S+R+200101:0900+C1'UNH+1+ORDERS:D:96A:UN'UNT+2+1'UNZ+9+C1'"[..],
+            &b"UNB+UNOA:1+S+R+200101:0900+C1'UNH+1+ORDERS:D:96A:UN'UNT+99+1'UNZ+1+C1'"[..],
+            &b"UNB+UNOA:1+S+R+200101:0900+C1'UNH+1+ORDERS:D:96A:UN'UNT+2+9'UNZ+1+C1'"[..],
+        ] {
+            let strict = parse_and_validate(input);
+            let lenient = parse_and_validate_lenient(input);
+            match strict {
+                Err(e) => assert_eq!(
+                    Some(&e),
+                    lenient.errors.first(),
+                    "strict/lenient diverged for {:?}",
+                    std::str::from_utf8(input).unwrap()
+                ),
+                Ok(_) => assert!(lenient.errors.is_empty()),
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_message_references_are_rejected() {
+        let input = b"UNB+UNOA:1+S+R+200101:0900+C1'\
+                      UNH+1+ORDERS:D:96A:UN'BGM+220'UNT+3+1'\
+                      UNH+1+ORDERS:D:96A:UN'BGM+221'UNT+3+1'\
+                      UNZ+2+C1'";
+        let err = parse_and_validate(input).expect_err("duplicate UNH refs must fail");
+        assert!(
+            matches!(&err, EdifactError::DuplicateReference { tag, reference, .. }
+                     if tag == "UNH" && reference == "1"),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn distinct_message_references_are_accepted() {
+        let input = b"UNB+UNOA:1+S+R+200101:0900+C1'\
+                      UNH+1+ORDERS:D:96A:UN'BGM+220'UNT+3+1'\
+                      UNH+2+ORDERS:D:96A:UN'BGM+221'UNT+3+2'\
+                      UNZ+2+C1'";
+        parse_and_validate(input).expect("distinct refs must validate");
+    }
+
+    #[test]
+    fn into_strict_is_total_after_the_caller_filters_errors() {
+        // `errors` is a public field, so filtering tolerated violations before
+        // converting must not panic.
+        let input = b"UNB+UNOA:1+S+R+200101:0900+C1'UNZ+1+C2'";
+        let mut lenient = parse_and_validate_lenient(input);
+        lenient.errors.clear();
+        // Either outcome is acceptable; the contract is only that it does not panic.
+        let _ = lenient.into_strict();
     }
 
     fn parse_and_validate_owned(input: &[u8]) -> Result<ValidatedInterchange, EdifactError> {

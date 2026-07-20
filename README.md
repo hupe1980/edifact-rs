@@ -28,13 +28,13 @@
 
 ```toml
 [dependencies]
-edifact-rs = "0.10"
+edifact-rs = "0.12"
 
 # Optional: derive macros (included by default)
-# edifact-rs = { version = "0.10", features = ["derive"] }
+# edifact-rs = { version = "0.12", features = ["derive"] }
 
 # Optional: rich miette diagnostics
-# edifact-rs = { version = "0.10", features = ["diagnostics"] }
+# edifact-rs = { version = "0.12", features = ["diagnostics"] }
 ```
 
 ### Feature flags
@@ -43,6 +43,7 @@ edifact-rs = "0.10"
 |---|---|---|
 | `derive` | ✅ yes | Re-exports `EdifactDeserialize` / `EdifactSerialize` derive macros |
 | `diagnostics` | ❌ no | Adds `miette::Diagnostic` to `EdifactError` for human-readable output |
+| `serde` | ❌ no | Derives `Serialize` / `Deserialize` for `ValidationReport`, `ValidationIssue`, and the envelope types |
 
 ---
 
@@ -133,7 +134,7 @@ use edifact_rs::ser;
 # #[edifact(segment = "BGM")]
 # struct Bgm { #[edifact(element = 0)] doc_code: String }
 let bgm = Bgm { doc_code: "220".into() };
-let wire = ser::to_string(&bgm)?;
+let wire = to_edifact_string(&bgm)?;
 assert_eq!(wire, "BGM+220'");
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
@@ -278,7 +279,7 @@ let context = ValidationContext::builder()
 Enable the `diagnostics` feature for human-readable, span-annotated error output powered by [`miette`](https://docs.rs/miette):
 
 ```toml
-edifact-rs = { version = "0.10", features = ["diagnostics"] }
+edifact-rs = { version = "0.12", features = ["diagnostics"] }
 ```
 
 ```
@@ -337,7 +338,7 @@ edifact-rs workspace
 | `Segment<'a>` | Zero-copy view with `tag: &'a str` and borrowed elements |
 | `OwnedSegment` | Heap-owned copy; `.borrow()` returns O(1) `BorrowedSegment` |
 | `BorrowedSegment<'a>` | Zero-allocation view of `OwnedSegment` |
-| `EdifactError` | Stable error codes (E001–E026) with byte offsets |
+| `EdifactError` | Stable error codes (E001–E032) with byte offsets |
 | `ValidationReport` | Collected issues with lenient/strict modes |
 | `ProfileRulePack` | Composable, filterable business-rule bundles |
 | `MessageWindow<'a>` | Zero-copy window: `message_type`, `association_code`, borrowed `segments` |
@@ -379,7 +380,7 @@ let segments = from_bufread_stream_with_config(reader, config)?;
 ### Write segments
 
 ```rust
-use edifact_rs::{Writer, Segment, model::Element};
+use edifact_rs::{Writer, Segment, Element};
 
 let mut buf: Vec<u8> = Vec::new();
 let mut writer = Writer::new(&mut buf);

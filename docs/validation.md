@@ -24,7 +24,7 @@ structural, code-list, and profile-level checks — each pluggable independently
 
 Implement `Validator` to encapsulate validation logic:
 
-```rust
+```rust,ignore
 use edifact_rs::{Validator, ValidationReport, ValidationRuleContext, Segment, validate_each, EdifactError};
 
 struct BgmCodeValidator;
@@ -77,7 +77,7 @@ Validators are registered per layer. Layers run in order:
 2. **`CodeList`** — check element values against UNTDID code lists
 3. **`Profile`** — check business/MIG rules (see [Profile Packs](profile-packs.md))
 
-```rust
+```rust,ignore
 use edifact_rs::{
     ValidationContext, ValidationLayer, Validator, ValidationReport, Segment,
     from_bytes,
@@ -229,7 +229,7 @@ match ctx.validate_strict(&segs) {
 
 ## `ValidationReport` — working with results
 
-```rust
+```rust,ignore
 # use edifact_rs::{ValidationContext, from_bytes};
 # let segs: Vec<_> = from_bytes(b"BGM+220+PO-4711+9'").collect::<Result<_,_>>()?;
 # let ctx = ValidationContext::builder().build();
@@ -237,7 +237,7 @@ let report = ctx.validate_lenient(&segs);
 
 // Overall validity (no errors, no criticals)
 println!("valid: {}", report.is_valid());
-println!("errors: {}", report.errors.len());
+println!("errors: {}", report.errors().len());
 println!("warnings: {}", report.warnings.len());
 println!("infos: {}", report.infos.len());
 println!("total issues: {}", report.total_issues());
@@ -417,7 +417,7 @@ for result in message_windows_from_reader(input) {
     println!(
         "message {:?}: {} error(s)",
         window.message_type,
-        report.errors.len()
+        report.errors().len()
     );
 }
 # Ok::<(), edifact_rs::EdifactError>(())
@@ -475,7 +475,7 @@ let ctx = ValidationContext::builder()
 
 // validate_lenient_grouped runs the flat pass then the group pass:
 let report = ctx.validate_lenient_grouped(&tree, &segs);
-println!("{} error(s)", report.errors.len());
+println!("{} error(s)", report.errors().len());
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 

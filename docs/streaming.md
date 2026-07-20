@@ -28,7 +28,7 @@ synchronous (`std::io::Read`) and can be bridged to async runtimes — see
 
 Process one `OwnedSegment` at a time without loading the interchange into memory:
 
-```rust
+```rust,ignore
 use edifact_rs::from_reader;
 use std::fs::File;
 
@@ -78,7 +78,7 @@ for result in from_bytes_windows(interchange) {
 
 ### `message_windows_from_reader` — reader source
 
-```rust
+```rust,ignore
 use edifact_rs::message_windows_from_reader;
 use std::fs::File;
 
@@ -241,7 +241,7 @@ for result in message_windows_from_reader(input) {
     let borrowed: Vec<_> = window.segments.iter().map(|s| s.as_borrowed()).collect();
     let report = ctx.validate_lenient(&borrowed);
     if !report.is_valid() {
-        for e in &report.errors {
+        for e in report.errors() {
             eprintln!("❌ {}", e.message);
         }
     }

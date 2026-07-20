@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.11.0"
+version = "0.12.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["hupe1980"]
@@ -28,7 +28,16 @@ serde = { version = "1", features = ["derive", "rc"] }
 smallvec = { version = "1", features = ["union"] }
 syn = { version = "2", features = ["full"] }
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync"] }
+# dev-only. `fs` and `io-util` back the async-integration guide's snippets,
+# which are compiled as doctests.
+tokio = { version = "1", features = [
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "sync",
+    "fs",
+    "io-util",
+] }
 trybuild = "1"
 expect-test = "1"
 

@@ -1,7 +1,7 @@
 # Error Reference 🔴
 
 All errors returned by `edifact-rs` are variants of `EdifactError`. Every variant
-carries a stable, semver-protected code (`E001`–`E026`) accessible via
+carries a stable, semver-protected code (`E001`–`E032`) accessible via
 `err.stable_code()`. The enum is marked `#[non_exhaustive]` so future variants can
 be added without breaking existing match arms.
 
@@ -38,8 +38,9 @@ be added without breaking existing match arms.
 | E026 | `IncompatibleReleaseScopes` | Profile pack composer | — |
 | E027 | `InvalidFieldValue` | Typed deserializer | — |
 | E028 | `UnexpectedDataToken` | Parser | `offset` |
-| E029 | `FunctionalGroupNotSupported` | Envelope validator | `offset` |
 | E030 | `ValidationErrors` | Profile / directory validator | — |
+| E031 | `UnrecognisedSyntaxIdentifier` | Envelope validator | — |
+| E032 | `DuplicateReference` | Envelope validator | `offset` |
 
 ---
 
@@ -47,7 +48,7 @@ be added without breaking existing match arms.
 
 ### E001 — `UnexpectedEof`
 
-```
+```text
 unexpected end of input at byte offset {offset}
 ```
 
@@ -63,7 +64,7 @@ the payload was not truncated.
 
 ### E002 — `InvalidDelimiter`
 
-```
+```text
 invalid delimiter byte 0x{byte:02X} at offset {offset}
 ```
 
@@ -78,7 +79,7 @@ ASCII delimiter.
 
 ### E003 — `InvalidText`
 
-```
+```text
 invalid EDIFACT text at byte offset {offset}
 ```
 
@@ -93,7 +94,7 @@ must be transcoded before passing to `edifact-rs`.
 
 ### E004 — `MessageCountMismatch`
 
-```
+```text
 interchange message count mismatch: UNZ declared {expected}, found {actual}
 ```
 
@@ -109,7 +110,7 @@ extra `UNH..UNT` pairs.
 
 ### E005 — `SegmentCountMismatch`
 
-```
+```text
 segment count mismatch in message {message_ref}: UNT declared {expected}, found {actual}
 ```
 
@@ -124,7 +125,7 @@ does not match the actual count.
 
 ### E006 — `InvalidSegmentTag`
 
-```
+```text
 invalid segment tag {0:?}
 ```
 
@@ -139,7 +140,7 @@ lowercase letters.
 
 ### E007 — `InvalidUna`
 
-```
+```text
 invalid UNA service string advice: must be exactly 9 bytes
 ```
 
@@ -152,7 +153,7 @@ characters).
 
 ### E008 — `MissingRequiredElement`
 
-```
+```text
 missing required element {element_index} in segment {tag}
 ```
 
@@ -168,7 +169,7 @@ is truly optional.
 
 ### E009 — `InvalidUtf8`
 
-```
+```text
 serialized output contains invalid UTF-8
 ```
 
@@ -179,7 +180,7 @@ This should never occur in correct usage — file a bug if you see it.
 
 ### E010 — `Io`
 
-```
+```text
 (transparent — wraps std::io::Error)
 ```
 
@@ -194,7 +195,7 @@ the underlying I/O source.
 
 ### E011 — `InvalidSegmentForMessage`
 
-```
+```text
 segment {tag} is not valid for message type {message_type}
 ```
 
@@ -209,7 +210,7 @@ message type.
 
 ### E012 — `InvalidElementCount`
 
-```
+```text
 segment {tag} has {actual} elements, expected between {min} and {max}
 ```
 
@@ -224,7 +225,7 @@ range.
 
 ### E013 — `InvalidComponentCount`
 
-```
+```text
 segment {tag} element {element_index} has {actual} components, expected {expected}
 ```
 
@@ -238,7 +239,7 @@ segment {tag} element {element_index} has {actual} components, expected {expecte
 
 ### E014 — `InvalidCodeValue`
 
-```
+```text
 segment {tag} element {element_index}: '{value}' is not a valid code (code list {code_list})
 ```
 
@@ -253,7 +254,7 @@ it will contain a remediation hint.
 
 ### E015 — `MissingSegment`
 
-```
+```text
 required segment {tag} is missing from message (position {expected_position})
 ```
 
@@ -267,7 +268,7 @@ required segment {tag} is missing from message (position {expected_position})
 
 ### E016 — `QualifierMismatch`
 
-```
+```text
 segment {tag} has qualifier '{actual}', expected '{expected}'
 ```
 
@@ -282,7 +283,7 @@ not match the expected value.
 
 ### E017 — `ConditionalRequirementNotMet`
 
-```
+```text
 segment {tag} element {element_index}: conditional requirement not met ({condition})
 ```
 
@@ -298,7 +299,7 @@ triggered the condition.
 
 ### E019 — `InvalidReleaseSequence`
 
-```
+```text
 invalid release sequence at byte offset {offset}: dangling release character
 ```
 
@@ -314,7 +315,7 @@ escaped.
 
 ### E020 — `SegmentTooLong`
 
-```
+```text
 segment starting at byte offset {offset} exceeded maximum length of {limit} bytes
 ```
 
@@ -331,7 +332,7 @@ large, or investigate why the terminator is missing.
 
 ### E021 — `MissingRequiredComponent`
 
-```
+```text
 missing required component {component_index} in element {element_index} of segment {tag}
 ```
 
@@ -347,7 +348,7 @@ field `Option<T>` if it is truly optional.
 
 ### E022 — `UnexpectedMessageType`
 
-```
+```text
 no handler registered for message type {message_type}
 ```
 
@@ -363,7 +364,7 @@ catch-all fallback handler.
 
 ### E023 — `InterchangeTooLarge`
 
-```
+```text
 interchange too large: count {count} exceeds u32::MAX
 ```
 
@@ -380,7 +381,7 @@ interchanges, partition the input into smaller batches.
 
 ### E024 — `InvalidEventSequence`
 
-```
+```text
 invalid event sequence: {message}
 ```
 
@@ -398,7 +399,7 @@ caller's serialization code.
 
 ### E025 — `InvalidElementPosition`
 
-```
+```text
 element definition contains invalid position 0; positions must be >= 1 (one-based)
 ```
 
@@ -415,7 +416,7 @@ immediately rather than returning this error.
 
 ### E026 — `IncompatibleReleaseScopes`
 
-```
+```text
 incompatible release scopes: cannot compose {current:?} with {incoming:?}
 ```
 
@@ -434,7 +435,7 @@ composing.
 
 ### E027 — `InvalidFieldValue`
 
-```
+```text
 segment {tag} element {element_index}: invalid field value "{value}"
 ```
 
@@ -450,7 +451,7 @@ held an empty or otherwise invalid value.
 
 ### E028 — `UnexpectedDataToken`
 
-```
+```text
 unexpected data token at byte offset {offset}: data element before segment tag
 ```
 
@@ -465,27 +466,9 @@ ASCII letters) and that no data or component separators appear before it.
 
 ---
 
-### E029 — `FunctionalGroupNotSupported`
-
-```
-functional group segments (UNG/UNE) at byte offset {offset} are not supported; strip them before calling validate_envelope
-```
-
-**When**: `validate_envelope` (or `EnvelopeValidator`) found a `UNG` or `UNE`
-segment.  Functional groups are a legacy EDIFACT envelope layer that this
-library does not process.
-
-**Fields**: `offset: usize`.
-
-**Fix**: Strip the `UNG`/`UNE` wrapper segments before calling
-`validate_envelope`, or pre-process the interchange to remove functional-group
-nesting.
-
----
-
 ### E030 — `ValidationErrors`
 
-```
+```text
 validation failed with {error_count} error(s)
 ```
 
@@ -536,7 +519,7 @@ fn handle(err: EdifactError) {
 
 Use `err.stable_code()` to emit a stable, searchable error code in structured logs:
 
-```rust
+```rust,ignore
 use edifact_rs::from_bytes;
 
 match from_bytes(b"BAD").collect::<Result<Vec<_>, _>>() {
@@ -561,3 +544,48 @@ Enable the `diagnostics` feature to get `miette::Diagnostic` on all variants wit
 - [Diagnostics](diagnostics.md) — miette span-annotated rendering
 - [Validation](validation.md) — `ValidationReport` vs `EdifactError`
 - [Performance](performance.md) — error-free fast paths
+
+---
+
+### E031 — `UnrecognisedSyntaxIdentifier`
+
+```text
+unrecognised syntax identifier '{0}': expected UNOA/UNOB/UNOC/UNOD/UNOE/UNOF (or KECA)
+```
+
+**When**: `UNB` DE 0001 holds a value that is not one of the syntax identifiers
+defined in ISO 9735-1 §3.1.
+
+**Fields**: `0: String` — the offending identifier.
+
+**Fix**: Use one of `UNOA`, `UNOB`, `UNOC`, `UNOD`, `UNOE`, `UNOF`, or `KECA`.
+
+---
+
+### E032 — `DuplicateReference`
+
+```text
+duplicate {tag} reference '{reference}' at byte offset {offset}
+```
+
+**When**: Two messages in one interchange share a `UNH` reference (DE 0062), or
+two functional groups share a `UNG` reference (DE 0048).  ISO 9735-1 requires
+both to be unique within the interchange; duplicates make a message
+unaddressable, because a receiver keying on the reference processes one
+occurrence and silently drops the rest.
+
+**Fields**: `tag: String` (`UNH` or `UNG`), `reference: String`, `offset: usize`.
+
+**Fix**: Assign a distinct control reference to every message and group.
+
+---
+
+## Retired codes
+
+These codes were used by variants that no longer exist.  They are never reissued,
+so a stored code always identifies the same condition:
+
+| Code | Former variant | Retired because |
+|---|---|---|
+| E018 | `ValidationFailed` | Superseded by `ValidationErrors` (E030). |
+| E029 | `FunctionalGroupNotSupported` | Functional groups (`UNG`/`UNE`) are now parsed and validated natively. |

@@ -195,13 +195,12 @@ where
 /// | Variant | Severity |
 /// |---|---|
 /// | `InvalidCodeValue` | `Warning` |
-/// | `QualifierMismatch` | `Warning` |
 /// | *(everything else)* | `Error` |
 ///
-/// Rationale: code-list and qualifier mismatches indicate a value that *could*
-/// be intentional (non-standard extension codes are common in practice).  All
-/// structural violations — missing segments, wrong element counts, parse errors
-/// — are hard errors.
+/// Rationale: a code-list mismatch indicates a value that *could* be intentional,
+/// since non-standard extension codes are common in practice.  Everything else —
+/// structural violations, control-reference mismatches, parse errors — is a hard
+/// error.
 pub(crate) fn report_error(report: &mut ValidationReport, err: EdifactError) {
     let issue = issue_from_error(err);
     match issue.severity {
@@ -227,7 +226,11 @@ impl Validator for EnvelopeValidator {
         report: &mut ValidationReport,
         _ctx: &ValidationRuleContext<'_>,
     ) {
-        if let Err(e) = crate::envelope::validate_envelope(segments) {
+        // Use the lenient path so a single report surfaces every envelope
+        // violation.  The strict path stops at the first, which made
+        // `ValidationContext::validate_lenient` — whose whole purpose is
+        // exhaustive reporting — yield at most one envelope issue per batch.
+        for e in crate::envelope::validate_envelope_lenient(segments).errors {
             report_error(report, e);
         }
     }
@@ -335,9 +338,14 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
 
 fn severity_for(err: &EdifactError) -> ValidationSeverity {
     match err {
-        EdifactError::InvalidCodeValue { .. } | EdifactError::QualifierMismatch { .. } => {
-            ValidationSeverity::Warning
-        }
+        // A value outside a known code list may be an intentional non-standard
+        // extension, which is common in practice — so this is advisory.
+        //
+        // `QualifierMismatch` is deliberately *not* grouped here: it is only ever
+        // produced for UNZ/UNE/UNT control-reference mismatches, which are hard
+        // ISO 9735-1 structural violations.  Downgrading it let a spliced or
+        // truncated interchange pass `validate_strict`.
+        EdifactError::InvalidCodeValue { .. } => ValidationSeverity::Warning,
         _ => ValidationSeverity::Error,
     }
 }

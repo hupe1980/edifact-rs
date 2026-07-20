@@ -133,10 +133,9 @@ pub enum EdifactError {
     /// If present, the UNA segment must be exactly 9 bytes: `"UNA"` followed by
     /// 6 service characters.  The five active characters (`element_sep`,
     /// `component_sep`, `decimal_mark`, `release_char`, and `segment_term`) must
-    /// all be mutually distinct and in the printable ASCII range `0x21–0x7E`.
-    /// Only the **repetition separator** (UNA byte 7) is not validated by this
-    /// check — it is read and stored but excluded from the uniqueness and
-    /// printability assertions.
+    /// all be mutually distinct and printable, non-alphanumeric ASCII.  The
+    /// **repetition separator** (UNA byte 7) is validated on the same terms
+    /// unless it is a space, the conventional "not used" sentinel.
     #[error("invalid UNA service string advice")]
     InvalidUna,
 
@@ -426,6 +425,23 @@ pub enum EdifactError {
         "unrecognised syntax identifier '{0}': expected UNOA/UNOB/UNOC/UNOD/UNOE/UNOF (or KECA)"
     )]
     UnrecognisedSyntaxIdentifier(String),
+
+    /// A control reference was reused within the scope that requires it to be unique.
+    ///
+    /// ISO 9735-1 requires the message reference number (`UNH` DE 0062) to be
+    /// unique within an interchange, and the group reference number (`UNG`
+    /// DE 0048) to be unique within an interchange.  Duplicates make a message
+    /// unaddressable: a receiver keying on the reference silently processes one
+    /// occurrence and drops the rest.
+    #[error("duplicate {tag} reference '{reference}' at byte offset {offset}")]
+    DuplicateReference {
+        /// Segment tag that carries the duplicated reference (`UNH` or `UNG`).
+        tag: String,
+        /// The reference value that appeared more than once.
+        reference: String,
+        /// Byte offset of the duplicate occurrence.
+        offset: usize,
+    },
 }
 
 impl From<std::io::Error> for EdifactError {
@@ -471,6 +487,7 @@ impl EdifactError {
             // full UNG/UNE support was added — functional groups are now parsed natively)
             Self::ValidationErrors { .. } => "E030",
             Self::UnrecognisedSyntaxIdentifier(_) => "E031",
+            Self::DuplicateReference { .. } => "E032",
         }
     }
 
@@ -539,6 +556,9 @@ impl EdifactError {
             ),
             Self::UnexpectedDataToken { .. } => Some(
                 "A data element appeared before any segment tag; check for partial writes or encoding corruption",
+            ),
+            Self::DuplicateReference { .. } => Some(
+                "Assign a unique control reference to every UNH (DE 0062) and UNG (DE 0048) within an interchange",
             ),
             Self::ValidationErrors { .. }
             | Self::MessageCountMismatch { .. }
@@ -725,6 +745,10 @@ impl miette::Diagnostic for EdifactError {
             Self::UnrecognisedSyntaxIdentifier(id) => Some(Box::new(format!(
                 "Syntax identifier '{id}' is not defined in ISO 9735-1. \
                  Valid values are UNOA, UNOB, UNOC, UNOD, UNOE, UNOF (or KECA for KEC-A profile)",
+            ))),
+            Self::DuplicateReference { tag, reference, .. } => Some(Box::new(format!(
+                "Reference '{reference}' is used by more than one {tag} in this interchange; \
+                 each must be unique so receivers can address messages unambiguously",
             ))),
         }
     }

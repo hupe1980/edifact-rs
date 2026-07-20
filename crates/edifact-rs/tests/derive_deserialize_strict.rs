@@ -210,3 +210,49 @@ fn optional_component_returns_none_when_absent() {
     assert_eq!(pia.item_identifier, Some("ITEM1".to_owned()));
     assert_eq!(pia.item_scheme, None);
 }
+
+// ── borrowed / owned deserialization parity ───────────────────────────────────
+
+#[derive(Debug, PartialEq, EdifactDeserialize)]
+#[edifact(segment = "NAD", qualifier = "MS")]
+struct ParityNadMs {
+    #[edifact(element = 1)]
+    party: String,
+}
+
+#[derive(Debug, PartialEq, EdifactDeserialize)]
+struct ParityMessage {
+    #[edifact(group)]
+    parties: Vec<ParityNadMs>,
+}
+
+/// The derive used to override only `matches_segment`, leaving
+/// `matches_owned_segment` matching on tag alone.  The owned path then picked up
+/// `NAD+BY`, handed it to a `qualifier = "MS"` type, and hard-errored.
+#[test]
+fn qualified_group_deserializes_identically_borrowed_and_owned() {
+    let raw = b"UNH+1+ORDERS:D:96A:UN'NAD+MS+SUP1'NAD+BY+BUY1'NAD+MS+SUP2'UNT+5+1'";
+
+    let borrowed_segs: Vec<edifact_rs::Segment<'_>> = edifact_rs::from_bytes(raw)
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let owned_segs: Vec<edifact_rs::OwnedSegment> = edifact_rs::from_bytes_owned(raw)
+        .collect::<Result<_, _>>()
+        .unwrap();
+
+    let borrowed =
+        ParityMessage::edifact_deserialize(&borrowed_segs).expect("borrowed path must deserialize");
+    let owned =
+        ParityMessage::edifact_deserialize_owned(&owned_segs).expect("owned path must deserialize");
+
+    assert_eq!(borrowed, owned);
+    assert_eq!(
+        borrowed
+            .parties
+            .iter()
+            .map(|p| p.party.as_str())
+            .collect::<Vec<_>>(),
+        vec!["SUP1", "SUP2"],
+        "the NAD+BY segment must not be collected"
+    );
+}

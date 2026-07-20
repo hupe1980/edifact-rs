@@ -5,7 +5,12 @@ use crate::{EdifactError, Segment, ValidationIssue, ValidationReport, Validation
 use std::sync::Arc;
 
 /// Mandatory/Conditional status of a data element within a segment.
+///
+/// Marked `#[non_exhaustive]` because UN/EDIFACT also defines Required, Advised,
+/// Dependent, and Not-used statuses; adding one must not break downstream `match`
+/// arms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Status {
     /// Element must be present.
     Mandatory,
@@ -99,7 +104,11 @@ impl ElementRef {
 }
 
 /// Definition of an EDIFACT segment (tag + element structure).
+///
+/// Construct with [`SegmentDefinition::new`] rather than a struct literal, so
+/// that future fields (max repeat, description, …) are not a breaking change.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct SegmentDefinition {
     /// Segment tag.
     pub tag: &'static str,
@@ -107,6 +116,25 @@ pub struct SegmentDefinition {
     pub name: &'static str,
     /// Ordered element definitions.
     pub elements: &'static [ElementRef],
+}
+
+impl SegmentDefinition {
+    /// Create a segment definition.
+    ///
+    /// `const` so directory tables can still be built at compile time despite
+    /// the `#[non_exhaustive]` attribute blocking external struct literals.
+    #[must_use]
+    pub const fn new(
+        tag: &'static str,
+        name: &'static str,
+        elements: &'static [ElementRef],
+    ) -> Self {
+        Self {
+            tag,
+            name,
+            elements,
+        }
+    }
 }
 
 /// Owned runtime equivalent of [`ElementRef`].
@@ -458,6 +486,9 @@ pub struct DirectoryValidator {
     ///
     /// When `Some`, takes precedence over `segment_lookup` for tag resolution.
     owned_defs: Option<Arc<Vec<OwnedSegmentDef>>>,
+    /// Tag -> index into `owned_defs`.  Without this, `resolve_def` was a linear
+    /// scan per segment, making validation O(n_segments x n_definitions).
+    owned_index: Option<Arc<std::collections::HashMap<String, usize>>>,
     is_code_valid: IsCodeValidFn,
     suggest_code: SuggestCodeFn,
     expected_components: ExpectedComponentsFn,
@@ -497,6 +528,7 @@ impl DirectoryValidator {
             directory_id: directory_id.to_owned(),
             segment_lookup: Arc::new(segment_lookup),
             owned_defs: None,
+            owned_index: None,
             is_code_valid: Arc::new(is_code_valid),
             suggest_code: Arc::new(suggest_code),
             expected_components: Arc::new(expected_components),
@@ -536,6 +568,7 @@ impl DirectoryValidator {
             directory_id: "custom".to_owned(),
             segment_lookup: Arc::new(move |tag: &str| lookup_map.get(tag).copied()),
             owned_defs: None,
+            owned_index: None,
             is_code_valid: Arc::new(|_de: &str, _code: &str| true),
             suggest_code: Arc::new(|_de: &str, _code: &str| None),
             expected_components: Arc::new(|_tag: &str, _idx: usize| None),
@@ -578,6 +611,13 @@ impl DirectoryValidator {
             directory_id: "custom".to_owned(),
             // The static lookup is never consulted when `owned_defs` is `Some`.
             segment_lookup: Arc::new(|_| None),
+            owned_index: Some(Arc::new(
+                definitions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| (d.tag.clone(), i))
+                    .collect(),
+            )),
             owned_defs: Some(Arc::new(definitions)),
             is_code_valid: Arc::new(|_de: &str, _code: &str| true),
             suggest_code: Arc::new(|_de: &str, _code: &str| None),
@@ -738,10 +778,8 @@ impl DirectoryValidator {
 impl DirectoryValidator {
     fn resolve_def<'a>(&'a self, tag: &str) -> Option<SegmentDefRef<'a>> {
         if let Some(owned) = &self.owned_defs {
-            owned
-                .iter()
-                .find(|d| d.tag == tag)
-                .map(SegmentDefRef::Owned)
+            let index = self.owned_index.as_ref()?;
+            owned.get(*index.get(tag)?).map(SegmentDefRef::Owned)
         } else {
             (self.segment_lookup)(tag).map(SegmentDefRef::Static)
         }
@@ -827,8 +865,19 @@ impl Validator for DirectoryValidator {
 
         if self.structure_checks {
             if let Some(message_type) = self.detect_message_type(segments) {
-                for required_tag in (self.required_segments)(&message_type) {
-                    if segments.iter().all(|s| s.tag != *required_tag) {
+                // One pass recording each tag's first index answers both the
+                // presence and the ordering question.  The previous shape ran two
+                // full scans *per required tag* and invoked `required_segments`
+                // twice, which is O(|required| x n) on every batch.
+                let mut first_index: std::collections::HashMap<&str, usize> =
+                    std::collections::HashMap::with_capacity(segments.len());
+                for (i, seg) in segments.iter().enumerate() {
+                    first_index.entry(seg.tag).or_insert(i);
+                }
+
+                let required = (self.required_segments)(&message_type);
+                for required_tag in required {
+                    if !first_index.contains_key(*required_tag) {
                         report.add_error(
                             ValidationIssue::new(
                                 ValidationSeverity::Error,
@@ -843,10 +892,9 @@ impl Validator for DirectoryValidator {
                     }
                 }
 
-                let seq = (self.required_segments)(&message_type);
                 let mut last_idx = None;
-                for tag in seq {
-                    if let Some(idx) = segments.iter().position(|s| s.tag == *tag) {
+                for tag in required {
+                    if let Some(&idx) = first_index.get(*tag) {
                         if let Some(prev) = last_idx {
                             if idx < prev {
                                 report.add_error(
@@ -947,11 +995,8 @@ mod tests {
 
     static TEST_ELEMENTS: &[ElementRef] = &[ElementRef::new(1, "C507", Status::Mandatory, 1)];
 
-    static TEST_SEGMENT: SegmentDefinition = SegmentDefinition {
-        tag: "TST",
-        name: "Test segment",
-        elements: TEST_ELEMENTS,
-    };
+    static TEST_SEGMENT: SegmentDefinition =
+        SegmentDefinition::new("TST", "Test segment", TEST_ELEMENTS);
 
     fn segment_lookup(tag: &str) -> Option<&'static SegmentDefinition> {
         match tag {

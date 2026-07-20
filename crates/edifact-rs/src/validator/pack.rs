@@ -615,6 +615,12 @@ impl ProfileRulePack {
             }
             let errors_before = report.errors.len();
             (named.rule)(group, group_segs, context, &mut rule_issues);
+            // Apply the same per-rule cap as the flat path.  Group rules fire
+            // once per group occurrence, so they are the most likely to flood a
+            // report — exactly what `max_issues_per_rule` exists to prevent.
+            if let Some(limit) = self.max_issues_per_rule {
+                rule_issues.truncate(limit);
+            }
             for mut issue in rule_issues.drain(..) {
                 // Auto-stamp the group name if the rule didn't set it explicitly.
                 if issue.segment_group.is_none() {
@@ -779,7 +785,7 @@ impl ProfileRulePack {
 
         self.rules.append(&mut to_append);
         for mt in other.message_types.drain(..) {
-            if !self.message_types.iter().any(|x| *x == mt) {
+            if !self.message_types.contains(&mt) {
                 self.message_types.push(mt);
             }
         }

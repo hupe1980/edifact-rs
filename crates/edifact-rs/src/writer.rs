@@ -14,6 +14,30 @@ pub struct Writer<W: Write> {
     /// Running count of segments written.  `u64` to prevent silent overflow on
     /// pathological inputs (a `u32` would wrap after ~4 billion segments).
     segment_count: u64,
+    /// `segment_count` as of the most recent `UNH`, used by [`Writer::finish_unt`]
+    /// to derive a per-message DE 0074 rather than a writer-lifetime total.
+    message_start_count: u64,
+}
+
+/// Return the offset of the first byte in `hay` that must be release-escaped.
+///
+/// The escape set is the four splitting delimiters plus the repetition separator
+/// when the active UNA declares one.  A space at UNA position 7 is the
+/// conventional "not used" sentinel and is never escaped.
+#[inline]
+fn find_escape(ssa: &ServiceStringAdvice, hay: &[u8]) -> Option<usize> {
+    let first = memchr::memchr3(ssa.element_sep, ssa.component_sep, ssa.release_char, hay);
+    let second = if ssa.repetition_sep == b' ' {
+        memchr::memchr(ssa.segment_term, hay)
+    } else {
+        memchr::memchr2(ssa.segment_term, ssa.repetition_sep, hay)
+    };
+    match (first, second) {
+        (None, None) => None,
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (Some(a), Some(b)) => Some(a.min(b)),
+    }
 }
 
 impl<W: Write> Writer<W> {
@@ -23,6 +47,7 @@ impl<W: Write> Writer<W> {
             inner,
             ssa: ServiceStringAdvice::default(),
             segment_count: 0,
+            message_start_count: 0,
         }
     }
 
@@ -50,6 +75,7 @@ impl<W: Write> Writer<W> {
             inner,
             ssa,
             segment_count: 0,
+            message_start_count: 0,
         })
     }
 
@@ -119,6 +145,9 @@ impl<W: Write> Writer<W> {
             }
         }
         self.inner.write_all(&[self.ssa.segment_term])?;
+        if tag == "UNH" {
+            self.message_start_count = self.segment_count;
+        }
         self.segment_count += 1;
         Ok(())
     }
@@ -149,6 +178,51 @@ impl<W: Write> Writer<W> {
         Ok(())
     }
 
+    /// Write a segment from a tag and borrowed element/component slices.
+    ///
+    /// Unlike [`Self::write_raw`], component boundaries are given explicitly
+    /// rather than inferred by splitting on the active component separator, so
+    /// values containing a literal separator byte are escaped instead of being
+    /// silently reinterpreted as a composite boundary.  Unlike
+    /// [`Self::write_segment_parts`], no `String` allocation is required.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::Writer;
+    /// let mut w = Writer::new(Vec::new());
+    /// // The `:` inside the sender id stays part of the value.
+    /// w.write_composites("NAD", &[&["MS"][..], &["ACME:INC"][..]])?;
+    /// assert_eq!(w.finish()?, b"NAD+MS+ACME?:INC'".to_vec());
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError`] if the underlying writer fails.
+    pub fn write_composites(
+        &mut self,
+        tag: &str,
+        elements: &[&[&str]],
+    ) -> Result<(), EdifactError> {
+        self.inner.write_all(tag.as_bytes())?;
+        for element in elements {
+            self.inner.write_all(&[self.ssa.element_sep])?;
+            for (i, comp) in element.iter().enumerate() {
+                if i > 0 {
+                    self.inner.write_all(&[self.ssa.component_sep])?;
+                }
+                self.write_escaped(comp)?;
+            }
+        }
+        self.inner.write_all(&[self.ssa.segment_term])?;
+        if tag == "UNH" {
+            self.message_start_count = self.segment_count;
+        }
+        self.segment_count += 1;
+        Ok(())
+    }
+
     /// Flush and return the underlying writer.
     pub fn finish(mut self) -> Result<W, EdifactError> {
         self.inner.flush()?;
@@ -157,19 +231,25 @@ impl<W: Write> Writer<W> {
 
     /// Write the `UNT` segment and return the inner writer.
     ///
-    /// The segment count written into `UNT` element 1 (DE 0074) is the number of
-    /// segments already written **plus one** for the `UNT` segment itself, which
-    /// EDIFACT requires to be included in the count alongside `UNH`.
+    /// The count written into `UNT` DE 0074 covers the current message only:
+    /// `UNH`, every segment written since it, and `UNT` itself.  Segments written
+    /// before the message's `UNH` — an interchange-level `UNB`, or a preceding
+    /// message — are excluded, as EDIFACT requires.
+    ///
+    /// If no `UNH` has been written, the count falls back to every segment
+    /// written so far plus one.
     ///
     /// # Errors
     ///
     /// Returns an error if writing fails.  Do **not** call [`write_raw`][Self::write_raw] or
     /// [`write_segment`][Self::write_segment] after `finish_unt` — the writer is consumed.
     pub fn finish_unt(mut self, message_ref: &str) -> Result<W, EdifactError> {
-        // DE 0074: count includes UNH and UNT themselves.
-        let count = self.segment_count + 1;
+        // DE 0074 counts UNH + content + UNT.  `message_start_count` is the
+        // absolute segment count immediately after UNH, so content is
+        // `segment_count - message_start_count` and the total adds UNH and UNT.
+        let count = self.segment_count - self.message_start_count + 1;
         let count_str = count.to_string();
-        self.write_raw("UNT", &[count_str.as_str(), message_ref])?;
+        self.write_composites("UNT", &[&[count_str.as_str()], &[message_ref]])?;
         self.finish()
     }
 
@@ -200,31 +280,17 @@ impl<W: Write> Writer<W> {
     /// assert_eq!(writer.escape_value("price+tax"), "price?+tax");
     /// ```
     pub fn escape_value<'v>(&self, value: &'v str) -> Cow<'v, str> {
-        let (elem, comp, release, term) = (
-            self.ssa.element_sep,
-            self.ssa.component_sep,
-            self.ssa.release_char,
-            self.ssa.segment_term,
-        );
+        let release = self.ssa.release_char;
         let bytes = value.as_bytes();
-        let needs_escape = bytes
-            .iter()
-            .any(|&b| b == elem || b == comp || b == release || b == term);
-        if !needs_escape {
+        if find_escape(&self.ssa, bytes).is_none() {
             return Cow::Borrowed(value);
         }
         let mut out = Vec::with_capacity(value.len() + 4);
         let mut last = 0;
         let mut pos = 0;
         while pos < bytes.len() {
-            let remaining = &bytes[pos..];
-            let hit_ecr = memchr::memchr3(elem, comp, release, remaining);
-            let hit_t = memchr::memchr(term, remaining);
-            let hit = match (hit_ecr, hit_t) {
-                (None, None) => break,
-                (Some(a), None) => a,
-                (None, Some(b)) => b,
-                (Some(a), Some(b)) => a.min(b),
+            let Some(hit) = find_escape(&self.ssa, &bytes[pos..]) else {
+                break;
             };
             let abs = pos + hit;
             out.extend_from_slice(&bytes[last..abs]);
@@ -283,26 +349,13 @@ impl<W: Write> Writer<W> {
 
     /// Write a value, escaping any delimiter characters.
     pub(crate) fn write_escaped(&mut self, value: &str) -> Result<(), EdifactError> {
-        let (elem, comp, release, term) = (
-            self.ssa.element_sep,
-            self.ssa.component_sep,
-            self.ssa.release_char,
-            self.ssa.segment_term,
-        );
+        let release = self.ssa.release_char;
         let bytes = value.as_bytes();
         let mut last = 0;
         let mut pos = 0;
         while pos < bytes.len() {
-            // Use memchr3 for three delimiters + memchr for the fourth to avoid
-            // a manual byte-by-byte scan.
-            let remaining = &bytes[pos..];
-            let hit_ecr = memchr::memchr3(elem, comp, release, remaining);
-            let hit_t = memchr::memchr(term, remaining);
-            let hit = match (hit_ecr, hit_t) {
-                (None, None) => break,
-                (Some(a), None) => a,
-                (None, Some(b)) => b,
-                (Some(a), Some(b)) => a.min(b),
+            let Some(hit) = find_escape(&self.ssa, &bytes[pos..]) else {
+                break;
             };
             let abs = pos + hit;
             if abs > last {
@@ -322,31 +375,54 @@ impl<W: Write> Writer<W> {
     ///
     /// Generates:
     /// ```text
-    /// UNB+<syntax_id>+<sender>+<recipient>+<datetime>+<control_ref>'
+    /// UNB+<syntax_id>:<syntax_version>+<sender>+<recipient>+<date>:<time>+<control_ref>'
     /// ```
     ///
-    /// The caller is responsible for:
-    /// - Formatting `syntax_id` as a composite (e.g. `"UNOA:1"` for UN/EDIFACT syntax
-    ///   version 1 of set A).
-    /// - Formatting `datetime` as a composite date-time (e.g. `"200101:0900"`).
+    /// Composite components (S001 syntax identifier/version, S004 date/time) are
+    /// passed separately rather than pre-joined with `:`, so they are written
+    /// with the writer's *active* component separator and so a literal separator
+    /// inside `sender`, `recipient`, or `control_ref` is escaped rather than
+    /// silently promoted to a component boundary.
     ///
     /// Track the `control_ref` — it must be repeated in the matching
     /// [`end_interchange`](Self::end_interchange) call.
     ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::Writer;
+    /// let mut w = Writer::new(Vec::new());
+    /// w.begin_interchange("UNOA", "1", "SENDER", "RECEIVER", "200101", "0900", "IC1")?;
+    /// assert_eq!(
+    ///     w.finish()?,
+    ///     b"UNB+UNOA:1+SENDER+RECEIVER+200101:0900+IC1'".to_vec(),
+    /// );
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns [`EdifactError`] if writing fails.
+    #[allow(clippy::too_many_arguments)]
     pub fn begin_interchange(
         &mut self,
         syntax_id: &str,
+        syntax_version: &str,
         sender: &str,
         recipient: &str,
-        datetime: &str,
+        date: &str,
+        time: &str,
         control_ref: &str,
     ) -> Result<(), EdifactError> {
-        self.write_raw(
+        self.write_composites(
             "UNB",
-            &[syntax_id, sender, recipient, datetime, control_ref],
+            &[
+                &[syntax_id, syntax_version],
+                &[sender],
+                &[recipient],
+                &[date, time],
+                &[control_ref],
+            ],
         )
     }
 
@@ -374,8 +450,16 @@ impl<W: Write> Writer<W> {
         release: &str,
         controlling_agency: &str,
     ) -> Result<MessageWriter<'w, W>, EdifactError> {
-        let msg_id = format!("{message_type}:{version}:{release}:{controlling_agency}");
-        self.write_raw("UNH", &[message_ref, &msg_id])?;
+        // Build S009 as an explicit composite.  Formatting it with a literal `:`
+        // and handing it to `write_raw` produced a single collapsed component
+        // whenever the writer used a non-default component separator.
+        self.write_composites(
+            "UNH",
+            &[
+                &[message_ref],
+                &[message_type, version, release, controlling_agency],
+            ],
+        )?;
         // Capture `segment_count` after writing UNH so `MessageWriter` knows
         // the absolute count that includes UNH.
         let unh_count = self.segment_count;
@@ -406,7 +490,7 @@ impl<W: Write> Writer<W> {
         control_ref: &str,
     ) -> Result<(), EdifactError> {
         let msg_count_str = message_count.to_string();
-        self.write_raw("UNZ", &[&msg_count_str, control_ref])
+        self.write_composites("UNZ", &[&[msg_count_str.as_str()], &[control_ref]])
     }
 }
 
@@ -426,7 +510,7 @@ impl<W: Write> Writer<W> {
 /// # use edifact_rs::{Writer, Segment};
 /// # fn example() -> Result<(), edifact_rs::EdifactError> {
 /// let mut writer = Writer::new(Vec::new());
-/// writer.begin_interchange("UNOA:1", "SENDER", "RECEIVER", "200101:0900", "1")?;
+/// writer.begin_interchange("UNOA", "1", "SENDER", "RECEIVER", "200101", "0900", "1")?;
 /// {
 ///     let mut msg = writer.begin_message("1", "ORDERS", "D", "96A", "UN")?;
 ///     msg.write_raw("BGM", &["220", "PO001", "9"])?;
@@ -446,7 +530,7 @@ pub struct MessageWriter<'w, W: Write> {
     finished: bool,
 }
 
-impl<'w, W: Write> MessageWriter<'w, W> {
+impl<W: Write> MessageWriter<'_, W> {
     /// Write a segment within this message.
     ///
     /// Delegates to [`Writer::write_raw`].
@@ -480,12 +564,14 @@ impl<'w, W: Write> MessageWriter<'w, W> {
         // Total = 1 (UNH) + content + 1 (UNT) = content + 2.
         let count = self.writer.segment_count - self.unh_count + 2;
         let count_str = count.to_string();
-        self.writer
-            .write_raw("UNT", &[&count_str, &self.message_ref])
+        self.writer.write_composites(
+            "UNT",
+            &[&[count_str.as_str()], &[self.message_ref.as_str()]],
+        )
     }
 }
 
-impl<'w, W: Write> Drop for MessageWriter<'w, W> {
+impl<W: Write> Drop for MessageWriter<'_, W> {
     fn drop(&mut self) {
         if !self.finished {
             // Best-effort: write UNT; errors cannot be propagated from drop.
@@ -498,6 +584,121 @@ impl<'w, W: Write> Drop for MessageWriter<'w, W> {
 mod tests {
     use super::*;
     use crate::model::Element;
+
+    /// A non-default UNA whose delimiters share no byte with the defaults.
+    fn exotic_ssa() -> ServiceStringAdvice {
+        ServiceStringAdvice {
+            component_sep: b'|',
+            element_sep: b'!',
+            decimal_mark: b',',
+            release_char: b'#',
+            repetition_sep: b'*',
+            segment_term: b'~',
+        }
+    }
+
+    #[test]
+    fn unh_composite_uses_the_active_component_separator() {
+        // `begin_message` used to `format!` the S009 composite with a literal
+        // `:`, collapsing it into one component under a custom UNA.
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer::with_una(&mut buf, exotic_ssa()).unwrap();
+            let msg = w
+                .begin_message("1", "ORDERS", "D", "96A", "UN")
+                .expect("UNH");
+            msg.finish().expect("UNT");
+        }
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("UNH!1!ORDERS|D|96A|UN~"),
+            "S009 must use `|`, got {out}"
+        );
+    }
+
+    #[test]
+    fn round_trips_through_a_custom_una() {
+        // The library must be able to re-read its own output verbatim.
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer::with_una(&mut buf, exotic_ssa()).unwrap();
+            w.begin_interchange("UNOA", "1", "SENDER", "RECEIVER", "200101", "0900", "IC1")
+                .unwrap();
+            let mut msg = w.begin_message("1", "ORDERS", "D", "96A", "UN").unwrap();
+            msg.write_raw("BGM", &["220"]).unwrap();
+            msg.finish().unwrap();
+            w.end_interchange(1, "IC1").unwrap();
+        }
+        let segs: Vec<_> = crate::from_bytes(&buf)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("own output must reparse");
+        let unh = segs.iter().find(|s| s.tag == "UNH").unwrap();
+        assert_eq!(unh.get_element(1).unwrap().get_component(0), Some("ORDERS"));
+        assert_eq!(unh.get_element(1).unwrap().get_component(2), Some("96A"));
+        crate::validate_envelope(&segs).expect("own output must pass envelope validation");
+    }
+
+    #[test]
+    fn finish_unt_counts_only_the_current_message() {
+        // `finish_unt` used the writer-lifetime segment total, so a preceding
+        // UNB inflated DE 0074 and the interchange failed its own validation.
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer::new(&mut buf);
+            w.begin_interchange("UNOA", "1", "S", "R", "200101", "0900", "IC1")
+                .unwrap();
+            w.write_composites("UNH", &[&["1"], &["ORDERS", "D", "96A", "UN"]])
+                .unwrap();
+            w.write_raw("BGM", &["220"]).unwrap();
+            w.finish_unt("1").unwrap();
+        }
+        let out = String::from_utf8(buf).unwrap();
+        // UNH + BGM + UNT == 3
+        assert!(out.contains("UNT+3+1'"), "expected UNT+3, got {out}");
+    }
+
+    #[test]
+    fn repetition_separator_is_escaped_when_declared() {
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer::with_una(
+                &mut buf,
+                ServiceStringAdvice {
+                    repetition_sep: b'*',
+                    ..ServiceStringAdvice::default()
+                },
+            )
+            .unwrap();
+            w.write_composites("FTX", &[&["a*b"]]).unwrap();
+        }
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.ends_with("FTX+a?*b'"), "rep-sep unescaped in {out}");
+    }
+
+    #[test]
+    fn repetition_separator_sentinel_is_not_escaped() {
+        // Space at UNA position 7 means "not used" and must never be escaped.
+        let w = Writer::new(std::io::sink());
+        assert_eq!(w.escape_value("a b"), "a b");
+    }
+
+    #[test]
+    fn write_composites_escapes_a_literal_component_separator() {
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer::new(&mut buf);
+            w.write_composites("NAD", &[&["MS"], &["ACME:INC"]])
+                .unwrap();
+        }
+        let segs: Vec<_> = crate::from_bytes(&buf)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        // The `:` stays inside the value instead of splitting the element.
+        assert_eq!(
+            segs[0].get_element(1).unwrap().get_component(0),
+            Some("ACME:INC")
+        );
+    }
 
     #[test]
     fn write_and_parse_simple_segment() {

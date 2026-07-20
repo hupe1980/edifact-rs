@@ -112,7 +112,11 @@ impl<'a> Iterator for Parser<'a> {
             }
         };
 
-        let mut elements: Vec<Element<'a>> = Vec::with_capacity(8);
+        // Deliberately unallocated: `Element` is a large struct (inline component
+        // storage), so eagerly reserving 8 slots cost well over a kilobyte per
+        // segment while typical EDIFACT segments carry 2–5 elements.  Amortised
+        // growth costs at most two reallocations for the common case.
+        let mut elements: Vec<Element<'a>> = Vec::new();
         let mut current_components: SmallVec<[(Cow<'a, str>, Span); 4]> = SmallVec::new();
         let mut current_element_start: Option<usize> = None;
         let mut in_element = false;
@@ -757,7 +761,12 @@ fn read_remainder_of_segment<R: BufRead>(
 ) -> Result<Option<crate::tokenizer::RawSegment>, EdifactError> {
     let mut escaped = false;
     loop {
-        if out.bytes.len() >= max_segment_bytes {
+        // Strictly greater-than, matching the fast path (`pos > max_segment_bytes`)
+        // and the tokenizer guard.  Using `>=` here made a segment of exactly
+        // `max_segment_bytes` bytes parse on the fast path but fail on the slow
+        // path, so identical input succeeded or failed depending only on whether
+        // it happened to straddle a read-buffer boundary.
+        if out.bytes.len() > max_segment_bytes {
             return Err(EdifactError::SegmentTooLong {
                 offset: out.start_offset,
                 limit: max_segment_bytes,

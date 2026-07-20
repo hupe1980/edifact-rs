@@ -13,17 +13,9 @@ static NAD_ELEMENTS: &[ElementRef] = &[
     ElementRef::new(2, "C082", Status::Mandatory, 1),
 ];
 
-static DTM_DEF: SegmentDefinition = SegmentDefinition {
-    tag: "DTM",
-    name: "Date/time/period",
-    elements: DTM_ELEMENTS,
-};
+static DTM_DEF: SegmentDefinition = SegmentDefinition::new("DTM", "Date/time/period", DTM_ELEMENTS);
 
-static NAD_DEF: SegmentDefinition = SegmentDefinition {
-    tag: "NAD",
-    name: "Name and address",
-    elements: NAD_ELEMENTS,
-};
+static NAD_DEF: SegmentDefinition = SegmentDefinition::new("NAD", "Name and address", NAD_ELEMENTS);
 
 fn segment_lookup(tag: &str) -> Option<&'static SegmentDefinition> {
     match tag {

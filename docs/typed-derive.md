@@ -38,6 +38,7 @@ assert_eq!(bgm.function_code.as_deref(), Some("9"));
 ### `segment = "TAG"` — declare a segment struct
 
 ```rust
+# use edifact_rs::{EdifactDeserialize, EdifactSerialize};
 #[derive(EdifactDeserialize, EdifactSerialize)]
 #[edifact(segment = "DTM")]
 struct Dtm {
@@ -60,6 +61,7 @@ If `segment` is **absent**, the struct is treated as a **message struct** (see b
 ### `qualifier = "VALUE"` — fixed qualifier matching
 
 ```rust
+# use edifact_rs::{EdifactDeserialize, EdifactSerialize};
 #[derive(EdifactDeserialize, EdifactSerialize)]
 #[edifact(segment = "NAD", qualifier = "MS")]
 struct NadMs {
@@ -71,13 +73,14 @@ struct NadMs {
 The generated `matches_segment` impl checks that element 0 equals `"MS"`.
 Use wildcard suffix with `*` for prefix matching:
 
-```rust
+```rust,ignore
 #[edifact(segment = "NAD", qualifier = "M*")] // matches "MS", "MR", "MT", …
 ```
 
 ### `qualifier_from = N` — dynamic qualifier at runtime
 
 ```rust
+# use edifact_rs::{EdifactDeserialize, EdifactSerialize};
 #[derive(EdifactDeserialize, EdifactSerialize)]
 #[edifact(segment = "NAD", qualifier_from = 0)]
 struct Nad {
@@ -92,7 +95,8 @@ struct Nad {
 struct can represent any `NAD` qualifier. This is the pattern for message-level
 structs that hold multiple qualifier variants in separate fields:
 
-```rust
+```rust,ignore
+# use edifact_rs::{EdifactDeserialize, EdifactSerialize};
 #[derive(EdifactDeserialize)]
 struct OrderMessage {
     bgm: Option<Bgm>,
@@ -109,7 +113,7 @@ struct OrderMessage {
 
 ### `element = N` — positional element index (0-based)
 
-```rust
+```rust,ignore
 #[edifact(element = 2)]
 function_code: Option<String>,
 ```
@@ -119,7 +123,7 @@ use it for every simple (non-composite) field.
 
 ### `element = N, component = C` — composite component
 
-```rust
+```rust,ignore
 #[edifact(element = 0, component = 1)]
 date_value: String,
 ```
@@ -130,7 +134,8 @@ components 0/1/2).
 
 ### `composite` — full composite element
 
-```rust
+```rust,ignore
+# use edifact_rs::{EdifactDeserialize, EdifactSerialize};
 #[derive(EdifactCompositeDeserialize, EdifactCompositeSerialize)]
 struct PartyId {
     id: String,
@@ -153,7 +158,8 @@ struct Nad {
 
 ### `group` — repeated segment group
 
-```rust
+```rust,ignore
+# use edifact_rs::{EdifactDeserialize, EdifactSerialize};
 #[derive(EdifactDeserialize)]
 struct OrderMessage {
     bgm: Option<Bgm>,
@@ -167,7 +173,8 @@ struct OrderMessage {
 
 ### `qualifier = "VALUE"` — message-field qualifier filter
 
-```rust
+```rust,ignore
+# use edifact_rs::{EdifactDeserialize, EdifactSerialize};
 #[derive(EdifactDeserialize)]
 struct OrderMessage {
     #[edifact(qualifier = "BY")]
@@ -187,7 +194,8 @@ Within a message struct, `qualifier` on a field restricts which `Nad` segment
 A struct **without** `#[edifact(segment = "TAG")]` is a **message struct**.
 Each field maps to a segment type:
 
-```rust
+```rust,ignore
+# use edifact_rs::{EdifactDeserialize, EdifactSerialize};
 #[derive(Debug, EdifactDeserialize)]
 struct OrderMessage {
     bgm: Option<Bgm>,                // finds first BGM segment
