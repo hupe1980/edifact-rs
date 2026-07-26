@@ -184,9 +184,17 @@ pub mod edifact_rs {
     }
 
     pub mod helpers {
+        // Only a couple of UI cases reach for these, so in every other case
+        // rustc emits an unused-import warning — which trybuild captures into
+        // the blessed `.stderr`.  The *note* rustc attaches to that warning has
+        // been reworded since the MSRV, so it was the sole reason 24 of 26
+        // expectations mismatched on any newer toolchain, burying real
+        // regressions in noise.  Silencing it keeps the expectations to the
+        // derive's own diagnostics, which are stable across toolchains.
+        #[allow(unused_imports)]
         pub use super::{
-            composite_element, find_qualified_segment, find_qualified_segment_owned,
-            find_segment, find_segment_owned, find_segments_typed,
+            composite_element, find_qualified_segment, find_qualified_segment_owned, find_segment,
+            find_segment_owned, find_segments_typed,
         };
     }
 }

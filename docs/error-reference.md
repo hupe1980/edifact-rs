@@ -1,9 +1,24 @@
 # Error Reference 🔴
 
 All errors returned by `edifact-rs` are variants of `EdifactError`. Every variant
-carries a stable, semver-protected code (`E001`–`E032`) accessible via
+carries a stable, semver-protected code (`E001`–`E035`) accessible via
 `err.stable_code()`. The enum is marked `#[non_exhaustive]` so future variants can
 be added without breaking existing match arms.
+
+## Where an error points
+
+Two kinds of positional data appear, and the distinction is deliberate:
+
+- **`offset: usize`** — a single byte position, carried by the *lexical* variants
+  where the fault is a point in the stream and no end position exists.
+- **`span: Span`** — a half-open byte range, carried by every variant raised
+  while validating an already-parsed segment. A `ValidationIssue` built from one
+  of these keeps the full range, so `miette` and LSP tooling underline the
+  offending region instead of placing a zero-width caret.
+
+`ValidationIssue` itself has a single positional field, `span`; read
+`issue.span.map(|s| s.start)` (or `issue.start_offset()`) when only the start is
+needed.
 
 ---
 
@@ -21,13 +36,13 @@ be added without breaking existing match arms.
 | E008 | `MissingRequiredElement` | Deserializer | — |
 | E009 | `InvalidUtf8` | Writer | — |
 | E010 | `Io` | Reader / Writer | — |
-| E011 | `InvalidSegmentForMessage` | Directory validator | `offset` |
-| E012 | `InvalidElementCount` | Directory validator | `offset` |
-| E013 | `InvalidComponentCount` | Directory validator | `offset` |
-| E014 | `InvalidCodeValue` | Directory validator | `offset` |
+| E011 | `InvalidSegmentForMessage` | Directory validator | `span` |
+| E012 | `InvalidElementCount` | Directory validator | `span` |
+| E013 | `InvalidComponentCount` | Directory validator | `span` |
+| E014 | `InvalidCodeValue` | Directory validator | `span` |
 | E015 | `MissingSegment` | Directory validator | — |
-| E016 | `QualifierMismatch` | Typed deserializer | `offset` |
-| E017 | `ConditionalRequirementNotMet` | Profile validator | `offset` |
+| E016 | `QualifierMismatch` | Typed deserializer | `span` |
+| E017 | `ConditionalRequirementNotMet` | Profile validator | `span` |
 | E019 | `InvalidReleaseSequence` | Parser | `offset` |
 | E020 | `SegmentTooLong` | Reader parser | `offset` |
 | E021 | `MissingRequiredComponent` | Deserializer | — |
@@ -40,7 +55,10 @@ be added without breaking existing match arms.
 | E028 | `UnexpectedDataToken` | Parser | `offset` |
 | E030 | `ValidationErrors` | Profile / directory validator | — |
 | E031 | `UnrecognisedSyntaxIdentifier` | Envelope validator | — |
-| E032 | `DuplicateReference` | Envelope validator | `offset` |
+| E032 | `DuplicateReference` | Envelope validator | `span` |
+| E033 | `UnknownDataElement` | Code-addressed access | — |
+| E034 | `AmbiguousDataElement` | Code-addressed access | — |
+| E035 | `SegmentLayoutMismatch` | Code-addressed access | — |
 
 ---
 
@@ -202,7 +220,7 @@ segment {tag} is not valid for message type {message_type}
 **When**: Directory validation found a segment that is not permitted in the current
 message type.
 
-**Fields**: `tag: String`, `message_type: String`, `offset: usize`.
+**Fields**: `tag: String`, `message_type: String`, `span: Span`.
 
 **Fix**: Remove the unsupported segment or switch to the correct message type.
 
@@ -217,7 +235,7 @@ segment {tag} has {actual} elements, expected between {min} and {max}
 **When**: Directory validation found an element count outside the allowed `[min, max]`
 range.
 
-**Fields**: `tag`, `min`, `max`, `actual`, `offset`.
+**Fields**: `tag`, `min`, `max`, `actual`, `span: Span`.
 
 **Fix**: Adjust the element count to within the directory-defined bounds.
 
@@ -229,9 +247,18 @@ range.
 segment {tag} element {element_index} has {actual} components, expected {expected}
 ```
 
-**When**: A composite element has a different number of components than expected.
+**When**: Either of two checks in `DirectoryValidator`:
 
-**Fields**: `tag`, `element_index`, `expected: u8`, `actual: u8`, `offset`.
+1. An `expected_components` hook is registered for the element and the observed
+   count differs — the hook is an **exact** count.
+2. No hook applies, but the element is a composite whose components the directory
+   declares (`ElementRef::composite` / `OwnedElementRef::with_components`), and
+   the segment supplies **more** components than declared. Supplying fewer stays
+   valid: conditional components may be omitted, and trailing empty components
+   are stripped first per ISO 9735-1 §3.3.
+
+**Fields**: `tag`, `element_index`, `expected: u8` (the exact or maximum count),
+`actual: u8`, `span: Span`.
 
 **Fix**: Fix the composite element arity to match the directory definition.
 
@@ -245,7 +272,7 @@ segment {tag} element {element_index}: '{value}' is not a valid code (code list 
 
 **When**: A field that should hold a code-list value contains an unrecognised code.
 
-**Fields**: `tag`, `element_index`, `value`, `code_list`, `offset`, `suggestion: Option<&'static str>`.
+**Fields**: `tag`, `element_index`, `value`, `code_list`, `span: Span`, `suggestion: Option<&'static str>`.
 
 **Fix**: Use a valid code from the referenced code list. If `suggestion` is present,
 it will contain a remediation hint.
@@ -275,7 +302,7 @@ segment {tag} has qualifier '{actual}', expected '{expected}'
 **When**: A qualified-segment mapping (e.g. `NAD+BY`) found a qualifier that does
 not match the expected value.
 
-**Fields**: `tag`, `actual`, `expected`, `offset`.
+**Fields**: `tag`, `actual`, `expected`, `span: Span`.
 
 **Fix**: Correct the qualifier or use the right qualified segment type.
 
@@ -290,7 +317,7 @@ segment {tag} element {element_index}: conditional requirement not met ({conditi
 **When**: An element that is required by a conditional rule (e.g. "required when
 element 0 is `BY`") is absent.
 
-**Fields**: `tag`, `element_index`, `condition: String`, `offset`.
+**Fields**: `tag`, `element_index`, `condition: String`, `span: Span`.
 
 **Fix**: Provide the conditionally required element, or remove the element that
 triggered the condition.
@@ -535,7 +562,7 @@ match from_bytes(b"BAD").collect::<Result<Vec<_>, _>>() {
 ## Diagnostics (rich error output)
 
 Enable the `diagnostics` feature to get `miette::Diagnostic` on all variants with
-`offset` fields. See [Diagnostics](diagnostics.md) for details.
+`offset` / `span` fields. See [Diagnostics](diagnostics.md) for details.
 
 ---
 
@@ -565,7 +592,7 @@ defined in ISO 9735-1 §3.1.
 ### E032 — `DuplicateReference`
 
 ```text
-duplicate {tag} reference '{reference}' at byte offset {offset}
+duplicate {tag} reference '{reference}' at bytes {span}
 ```
 
 **When**: Two messages in one interchange share a `UNH` reference (DE 0062), or
@@ -574,9 +601,65 @@ both to be unique within the interchange; duplicates make a message
 unaddressable, because a receiver keying on the reference processes one
 occurrence and silently drops the rest.
 
-**Fields**: `tag: String` (`UNH` or `UNG`), `reference: String`, `offset: usize`.
+**Fields**: `tag: String` (`UNH` or `UNG`), `reference: String`, `span: Span`.
 
 **Fix**: Assign a distinct control reference to every message and group.
+
+---
+
+### E033 — `UnknownDataElement`
+
+```text
+segment {tag} has no data element {data_element} in its definition
+```
+
+**When**: A code-addressed accessor — `Segment::value_by_code`,
+`span_by_code`, `element_by_code`, or `SegmentLayout::resolve_code` — was given a
+UN/EDIFACT data element identifier that the supplied `SegmentDefinition` /
+`OwnedSegmentDef` does not declare.
+
+This is the variant that makes code-addressed access safer than positional
+access: a stale or mistyped reference fails here instead of reading whichever
+element happens to sit at the wrong index. The derive form
+(`#[edifact(element = "3055")]` under `#[edifact(layout = ...)]`) catches the
+same mistake at compile time, during const evaluation.
+
+**Fields**: `tag: String`, `data_element: String`.
+
+**Fix**: Check the identifier against the directory definition for that segment.
+
+---
+
+### E034 — `AmbiguousDataElement`
+
+```text
+segment {tag} defines data element {data_element} at more than one position
+```
+
+**When**: The identifier resolves to more than one position in the definition,
+so code-addressed access cannot pick one.
+
+**Fields**: `tag: String`, `data_element: String`.
+
+**Fix**: Address the element positionally (`element_str` / `component_str`), or
+split the definition so the identifier is unique.
+
+---
+
+### E035 — `SegmentLayoutMismatch`
+
+```text
+segment layout is for {expected}, but the segment is {actual}
+```
+
+**When**: A `SegmentLayout` was applied to a segment with a different tag — for
+example passing the `NAD` definition to a `DTM` segment. Resolving against the
+wrong table is exactly the class of mistake code-addressed access exists to
+prevent, so it is rejected before any lookup.
+
+**Fields**: `expected: String` (the layout's tag), `actual: String`.
+
+**Fix**: Look the definition up by the segment's own tag.
 
 ---
 

@@ -17,6 +17,7 @@
 | 🚀 **Zero-copy parsing** | Borrows directly from the input `&[u8]` — no intermediate allocations |
 | 🔄 **Streaming I/O** | Reader-based APIs process gigabyte interchanges in constant memory |
 | 🎯 **Typed mapping** | `#[derive(EdifactDeserialize, EdifactSerialize)]` for segments and messages |
+| 🔎 **Named data elements** | Address fields by UN/EDIFACT identifier (`"3055"`), not by hand-counted index — checked at compile time |
 | ✅ **Composable validation** | `ProfileRulePack` with multi-layer, rule-ID-filtered reporting |
 | 🩺 **Rich diagnostics** | Optional `miette` integration for human-friendly error output |
 | 🛡️ **DOS hardening** | Configurable `max_segment_bytes` guard enforced on all read paths |
@@ -105,6 +106,15 @@ struct Nad {
     party_id: Option<String>,
 }
 
+#[derive(Debug, EdifactDeserialize, EdifactSerialize)]
+#[edifact(segment = "BGM")]
+struct Bgm {
+    #[edifact(element = 0)]
+    doc_code: String,
+    #[edifact(element = 1)]
+    doc_number: String,
+}
+
 #[derive(Debug, EdifactDeserialize)]
 struct OrderMessage {
     bgm: Option<Bgm>,
@@ -127,9 +137,9 @@ println!("supplier: {:?}", msg.supplier.as_ref().and_then(|n| n.party_id.as_dere
 ### Serialize to wire format
 
 ```rust
-use edifact_rs::ser;
+use edifact_rs::to_edifact_string;
 
-# use edifact_rs::{EdifactSerialize};
+# use edifact_rs::EdifactSerialize;
 # #[derive(EdifactSerialize)]
 # #[edifact(segment = "BGM")]
 # struct Bgm { #[edifact(element = 0)] doc_code: String }
@@ -282,7 +292,7 @@ Enable the `diagnostics` feature for human-readable, span-annotated error output
 edifact-rs = { version = "0.12", features = ["diagnostics"] }
 ```
 
-```
+```text
 Error: invalid code value "999" at offset 42
   ╭─ input.edi:2:5
   │
@@ -305,7 +315,7 @@ See [`cookbook_diagnostics.rs`](crates/edifact-rs/examples/cookbook_diagnostics.
 
 ## 🏗️ Architecture
 
-```
+```text
 edifact-rs workspace
 │
 ├── edifact-rs              ← core library
@@ -362,6 +372,49 @@ assert_eq!(buyer.get_element(1).and_then(|e| e.get_component(0)), Some("40000010
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
+### Access by data element identifier
+
+Positional indices are a silent-misread hazard: transpose one and you read the
+wrong data element, and it still validates clean. Given a segment definition,
+address the value by its UN/EDIFACT identifier instead — a wrong reference is
+then a lookup error against the directory:
+
+```rust
+use edifact_rs::{ComponentRef, ElementRef, SegmentDefinition, Status, from_bytes};
+
+static C082: &[ComponentRef] = &[
+    ComponentRef::new(1, "3039", Status::Mandatory),
+    ComponentRef::new(2, "1131", Status::Conditional),
+    ComponentRef::new(3, "3055", Status::Conditional),
+];
+static NAD_ELEMENTS: &[ElementRef] = &[
+    ElementRef::new(1, "3035", Status::Mandatory, 1),
+    ElementRef::composite(2, "C082", Status::Conditional, 1, C082),
+];
+static NAD: SegmentDefinition = SegmentDefinition::new("NAD", "Name and address", NAD_ELEMENTS);
+
+let segs: Vec<_> = from_bytes(b"NAD+BY+4000001000002::9'").collect::<Result<Vec<_>, _>>()?;
+
+assert_eq!(segs[0].value_by_code(&NAD, "3039")?, Some("4000001000002"));
+assert_eq!(segs[0].value_by_code(&NAD, "3055")?, Some("9"));
+assert!(segs[0].value_by_code(&NAD, "2380").is_err()); // DE 2380 is a DTM element
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+The derive does the same resolution at **compile time** — see
+[Typed Derive](docs/typed-derive.md#element--3055--data-element-identifier):
+
+```rust,ignore
+#[derive(EdifactDeserialize, EdifactSerialize)]
+#[edifact(segment = "NAD", qualifier = "BY", layout = NAD)]
+struct Buyer {
+    #[edifact(element = "3039")]
+    gln: String,
+    #[edifact(element = "3055")]
+    agency: Option<String>,
+}
+```
+
 ### Reader with DOS guard
 
 ```rust
@@ -373,7 +426,11 @@ let config = ReaderConfig {
     ..Default::default()
 };
 let reader = BufReader::new(std::io::Cursor::new(b"BGM+220+test'"));
-let segments = from_bufread_stream_with_config(reader, config)?;
+// The stream yields `Result<OwnedSegment, _>`; a segment longer than
+// `max_segment_bytes` ends it with `EdifactError::SegmentTooLong`.
+let segments: Vec<_> =
+    from_bufread_stream_with_config(reader, config).collect::<Result<_, _>>()?;
+assert_eq!(segments.len(), 1);
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
@@ -390,6 +447,23 @@ writer.write_segment(&Segment::new(
 ))?;
 writer.finish()?;
 assert_eq!(buf, b"BGM+220+PO-4711'");
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+Real segments mix simple and composite data elements; `write_elements` (and its
+`elements!` shorthand) writes that shape in one call, with component boundaries
+explicit so a literal `:` in a value is escaped rather than promoted to a
+boundary:
+
+```rust
+use edifact_rs::{Writer, elements};
+
+let mut buf: Vec<u8> = Vec::new();
+let mut writer = Writer::new(&mut buf);
+writer.write_elements("NAD", elements!["MS", ["9900112233445", "", "293"]])?;
+writer.write_elements("DTM", elements![["137", "20260101", "102"]])?;
+writer.finish()?;
+assert_eq!(buf, b"NAD+MS+9900112233445::293'DTM+137:20260101:102'");
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
@@ -419,6 +493,29 @@ let messages = tokio::task::spawn_blocking(move || {
 
 ---
 
+## 📖 Documentation
+
+**[CHANGELOG.md](CHANGELOG.md)** records every release: new public APIs, new
+`ValidationIssue` fields, and any wire or derive behaviour change — so you can
+adopt a release deliberately instead of reading the git log.
+
+| Guide | Covers |
+|---|---|
+| [Getting Started](docs/getting-started.md) | Install, parse, validate, write — end to end |
+| [Core Concepts](docs/core-concepts.md) | Segments, elements, spans, borrowed vs owned |
+| [Parsing](docs/parsing.md) | Every parse entry point and when to use it |
+| [Typed Derive](docs/typed-derive.md) | `#[derive(EdifactDeserialize, EdifactSerialize)]`, `layout`, identifier-based fields |
+| [Writing](docs/writing.md) | `Writer`, `write_elements`, custom UNA |
+| [Validation](docs/validation.md) | Layers, `ValidationIssue`, code-addressed access |
+| [Profile Packs](docs/profile-packs.md) | Composable business-rule bundles |
+| [Streaming](docs/streaming.md) | Constant-memory processing of large interchanges |
+| [Diagnostics](docs/diagnostics.md) | `miette` integration |
+| [Error Reference](docs/error-reference.md) | Every stable code `E001`–`E035` |
+| [Performance](docs/performance.md) | Benchmarks and allocation behaviour |
+| [Async Integration](docs/async-integration.md) | Bridging to `tokio` |
+
+---
+
 ## 📚 Examples
 
 Run any example with `cargo run -p edifact-rs --example <name>`:
@@ -437,25 +534,39 @@ Run any example with `cargo run -p edifact-rs --example <name>`:
 
 ## 🧪 Testing
 
+Recipes live in the [`justfile`](justfile) and mirror
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) job for job, so a green
+`just ci` means a green CI. Install with `cargo install just` (or
+`brew install just`), then:
+
 ```bash
-# Run all tests (unit + integration + doc-tests + derive UI tests):
-cargo test --workspace --all-features
-
-# Clippy (zero warnings policy):
-cargo clippy --all-targets --all-features -- -D warnings
-
-# Benchmarks (criterion + custom):
-cargo bench -p edifact-rs
-
-# Fuzz (requires cargo-bolero):
-cargo bolero test -p edifact-rs fuzz_parse_write_parse_invariant_small_message
+just                # list every recipe
+just pre-commit     # fmt + clippy + tests — run before every commit
+just ci             # everything CI runs, on this toolchain
+just ci-full        # `just ci` plus the MSRV job and the benchmarks
 ```
+
+| Recipe | What it covers |
+|---|---|
+| `just test` | Unit, integration, doc-tests, and the derive UI expectations |
+| `just clippy` | Zero-warnings lint gate |
+| `just doc` | Public docs with warnings denied |
+| `just ui` / `just ui-msrv` | Derive compile-fail suite on stable / MSRV |
+| `just ui-bless` | Re-bless `.stderr` after an intentional diagnostic change |
+| `just msrv` | Full suite on the MSRV toolchain (`just msrv-install` first) |
+| `just deny` | Advisory, licence, and dependency-ban audit |
+| `just fuzz` | `bolero` property targets, release build |
+| `just bench` / `just bench-smoke` | Divan microbenchmarks / criterion smoke run |
+| `just release-check` | Package dry-run and cross-crate version match |
+
+Every recipe is a thin wrapper over `cargo`, so the underlying command is always
+visible in the justfile if you would rather run it directly.
 
 ---
 
 ## 📋 Workspace layout
 
-```
+```text
 edifact-rs/
 ├── crates/
 │   ├── edifact-rs/          core library crate
@@ -466,7 +577,8 @@ edifact-rs/
 │   └── edifact-rs-derive/   proc-macro crate
 │       ├── src/
 │       └── tests/ui/        trybuild compile-fail test suite
-└── scripts/                 UNECE source download helpers
+├── docs/                    guides (compiled as doctests)
+└── justfile                 task runner, mirroring CI
 ```
 
 ---

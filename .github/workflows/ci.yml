@@ -46,9 +46,10 @@ jobs:
         with:
           toolchain: 1.85.0
       - uses: Swatinem/rust-cache@v2
-      # The derive UI suite runs only here: its blessed .stderr files capture
-      # rustc's exact diagnostic rendering, which drifts between releases, so
-      # they are pinned to the MSRV toolchain.
+      # The derive UI suite runs here and on the stable feature-matrix job.
+      # Its blessed .stderr files hold only the derive's own diagnostics — the
+      # one rustc-rendered warning they used to capture is now silenced at the
+      # source — so the expectations no longer drift between toolchains.
       - name: Verify workspace builds and tests on MSRV
         env:
           EDIFACT_UI_TESTS: "1"
@@ -82,6 +83,11 @@ jobs:
             command: cargo test -p edifact-rs --no-default-features --locked
           - name: test-all-features
             command: cargo test -p edifact-rs --all-features --locked
+          # The UI expectations are toolchain-portable, so run them on stable
+          # too: pinning them to MSRV alone meant a regression in the derive's
+          # diagnostics went unseen until that one job ran.
+          - name: test-derive-ui
+            command: EDIFACT_UI_TESTS=1 cargo test -p edifact-rs-derive --locked
           - name: test-all-features-examples
             command: cargo test -p edifact-rs --all-features --examples --locked
           # `cargo test` does not build `harness = false` bench targets, so a

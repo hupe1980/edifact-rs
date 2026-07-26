@@ -18,11 +18,83 @@ pub enum Status {
     Conditional,
 }
 
+/// Reference to a component data element within a composite data element.
+///
+/// Composites such as `C507` (DTM date/time/period) are addressed by the
+/// identifier of their *own* components (`2005`, `2380`, `2379`), which is what
+/// makes code-addressed access — [`Segment::value_by_code`][crate::Segment::value_by_code]
+/// and `#[edifact(element = "2005")]` — resolve to the right slot instead of a
+/// hand-counted index.
+///
+/// Fields are private to enforce the one-based position invariant.
+#[derive(Debug, Clone, Copy)]
+pub struct ComponentRef {
+    /// One-based component position within the composite.
+    position: u8,
+    /// UN/EDIFACT component data element identifier.
+    data_element: &'static str,
+    /// Requirement status of the component.
+    status: Status,
+}
+
+impl ComponentRef {
+    /// Construct a `ComponentRef` with compile-time position validation.
+    ///
+    /// `position` must be ≥ 1 (one-based).  In a `const` context a zero
+    /// `position` is a **compile-time error**; at runtime it panics.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `position == 0`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use edifact_rs::{ComponentRef, Status};
+    ///
+    /// const DTM_2005: ComponentRef = ComponentRef::new(1, "2005", Status::Mandatory);
+    /// ```
+    #[must_use]
+    pub const fn new(position: u8, data_element: &'static str, status: Status) -> Self {
+        assert!(
+            position != 0,
+            "ComponentRef position must be >= 1 (one-based)"
+        );
+        Self {
+            position,
+            data_element,
+            status,
+        }
+    }
+
+    /// One-based component position within the composite.
+    #[must_use]
+    #[inline]
+    pub const fn position(&self) -> u8 {
+        self.position
+    }
+
+    /// UN/EDIFACT component data element identifier.
+    #[must_use]
+    #[inline]
+    pub const fn data_element(&self) -> &'static str {
+        self.data_element
+    }
+
+    /// Requirement status of the component.
+    #[must_use]
+    #[inline]
+    pub const fn status(&self) -> Status {
+        self.status
+    }
+}
+
 /// Reference to a data element within a segment definition.
 ///
 /// Fields are private to enforce the one-based position invariant through the
-/// [`ElementRef::new`] constructor.  Use [`ElementRef::new`] for compile-time
-/// literals (panics at compile time when `position == 0`).
+/// [`ElementRef::new`] constructor.  Use [`ElementRef::new`] for a simple data
+/// element and [`ElementRef::composite`] for a composite whose components are
+/// themselves named (panics at compile time when `position == 0`).
 ///
 /// Use [`OwnedElementRef`] for runtime-constructed element refs.
 #[derive(Debug, Clone, Copy)]
@@ -35,14 +107,20 @@ pub struct ElementRef {
     status: Status,
     /// Maximum repetition count for this element.
     max_repeat: u8,
+    /// Component definitions when this element is a composite; empty for a
+    /// simple data element.
+    components: &'static [ComponentRef],
 }
 
 impl ElementRef {
-    /// Construct an `ElementRef` with compile-time position validation.
+    /// Construct an `ElementRef` for a simple data element.
     ///
     /// `position` must be ≥ 1 (one-based).  When called in a `const` context
     /// (e.g. inside a `static` array initialiser), a zero `position` causes a
     /// **compile-time error**.  At runtime it panics.
+    ///
+    /// Use [`composite`][Self::composite] when the element is a composite whose
+    /// components carry their own UN/EDIFACT identifiers.
     ///
     /// # Panics
     ///
@@ -71,6 +149,53 @@ impl ElementRef {
             data_element,
             status,
             max_repeat,
+            components: &[],
+        }
+    }
+
+    /// Construct an `ElementRef` for a composite data element with named components.
+    ///
+    /// Declaring components is what lets code-addressed access reach *inside* a
+    /// composite: `value_by_code(&DTM, "2380")` resolves to element 1,
+    /// component 2 without the caller counting positions.  Declared components
+    /// also make the mandatory-component check in [`DirectoryValidator`] active
+    /// for this element.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `position == 0`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use edifact_rs::{ComponentRef, ElementRef, Status};
+    ///
+    /// static C507: &[ComponentRef] = &[
+    ///     ComponentRef::new(1, "2005", Status::Mandatory),
+    ///     ComponentRef::new(2, "2380", Status::Conditional),
+    ///     ComponentRef::new(3, "2379", Status::Conditional),
+    /// ];
+    /// const DTM_C507: ElementRef =
+    ///     ElementRef::composite(1, "C507", Status::Mandatory, 1, C507);
+    /// ```
+    #[must_use]
+    pub const fn composite(
+        position: u8,
+        data_element: &'static str,
+        status: Status,
+        max_repeat: u8,
+        components: &'static [ComponentRef],
+    ) -> Self {
+        assert!(
+            position != 0,
+            "ElementRef position must be >= 1 (one-based)"
+        );
+        Self {
+            position,
+            data_element,
+            status,
+            max_repeat,
+            components,
         }
     }
 
@@ -101,6 +226,13 @@ impl ElementRef {
     pub const fn max_repeat(&self) -> u8 {
         self.max_repeat
     }
+
+    /// Component definitions; empty when this is a simple data element.
+    #[must_use]
+    #[inline]
+    pub const fn components(&self) -> &'static [ComponentRef] {
+        self.components
+    }
 }
 
 /// Definition of an EDIFACT segment (tag + element structure).
@@ -116,6 +248,118 @@ pub struct SegmentDefinition {
     pub name: &'static str,
     /// Ordered element definitions.
     pub elements: &'static [ElementRef],
+}
+
+/// Byte-wise string equality usable in a `const` context.
+///
+/// `str::eq` is not `const`, and code resolution has to run at compile time so
+/// that a mistyped data element identifier in `#[edifact(element = "3055")]`
+/// fails the build rather than reading the wrong slot at runtime.
+const fn const_str_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// The resolved position of a UN/EDIFACT data element within a segment.
+///
+/// Produced by [`SegmentLayout::resolve_code`] and consumed by the `*_at`
+/// accessors on [`crate::Segment`], [`crate::BorrowedSegment`] and
+/// [`crate::OwnedSegment`].
+///
+/// Both indices are **zero-based**, matching the positional accessors — the
+/// one-based positions used in directory definitions are converted during
+/// resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ElementPath {
+    /// Zero-based index of the data element within the segment.
+    pub element: usize,
+    /// Zero-based index of the component within a composite.
+    ///
+    /// `None` when the code names the data element itself (a simple element, or
+    /// a composite addressed as a whole).  Value lookups treat `None` as
+    /// component 0, which is the first — and for a simple element, only —
+    /// component.
+    pub component: Option<usize>,
+}
+
+impl ElementPath {
+    /// Path to a whole data element.
+    #[must_use]
+    #[inline]
+    pub const fn element(element: usize) -> Self {
+        Self {
+            element,
+            component: None,
+        }
+    }
+
+    /// Path to a component within a composite data element.
+    #[must_use]
+    #[inline]
+    pub const fn component(element: usize, component: usize) -> Self {
+        Self {
+            element,
+            component: Some(component),
+        }
+    }
+
+    /// Zero-based component index, treating "whole element" as component 0.
+    #[must_use]
+    #[inline]
+    pub const fn component_index(&self) -> usize {
+        match self.component {
+            Some(c) => c,
+            None => 0,
+        }
+    }
+}
+
+/// Directory metadata that maps UN/EDIFACT data element identifiers to positions.
+///
+/// Implemented by [`SegmentDefinition`] (compile-time tables) and
+/// [`OwnedSegmentDef`] (runtime-loaded definitions), so the same code-addressed
+/// accessors work against either source.
+///
+/// # Example
+///
+/// ```rust
+/// use edifact_rs::{ElementRef, SegmentDefinition, SegmentLayout, Status};
+///
+/// static BGM_ELEMENTS: &[ElementRef] = &[
+///     ElementRef::new(1, "C002", Status::Conditional, 1),
+///     ElementRef::new(2, "C106", Status::Conditional, 1),
+///     ElementRef::new(3, "1225", Status::Conditional, 1),
+/// ];
+/// static BGM: SegmentDefinition =
+///     SegmentDefinition::new("BGM", "Beginning of message", BGM_ELEMENTS);
+///
+/// let path = BGM.resolve_code("1225")?;
+/// assert_eq!(path.element, 2);
+/// assert!(BGM.resolve_code("9999").is_err());
+/// # Ok::<(), edifact_rs::EdifactError>(())
+/// ```
+pub trait SegmentLayout {
+    /// The segment tag this layout describes (e.g. `"NAD"`).
+    fn layout_tag(&self) -> &str;
+
+    /// Resolve a UN/EDIFACT data element identifier to a position.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError::UnknownDataElement`] when the identifier does not
+    /// appear in this definition, and [`EdifactError::AmbiguousDataElement`]
+    /// when it appears at more than one position.
+    fn resolve_code(&self, data_element: &str) -> Result<ElementPath, EdifactError>;
 }
 
 impl SegmentDefinition {
@@ -134,6 +378,191 @@ impl SegmentDefinition {
             name,
             elements,
         }
+    }
+
+    /// Number of positions in this definition that carry `data_element`.
+    ///
+    /// `0` means unknown, `1` means unambiguously addressable, and anything
+    /// larger means the identifier is repeated and cannot be code-addressed.
+    /// `const`, so a derive macro can assert on it at compile time.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use edifact_rs::{ElementRef, SegmentDefinition, Status};
+    /// # static E: &[ElementRef] = &[ElementRef::new(1, "3035", Status::Mandatory, 1)];
+    /// static NAD: SegmentDefinition = SegmentDefinition::new("NAD", "Name and address", E);
+    /// const _: () = assert!(NAD.code_positions("3035") == 1);
+    /// ```
+    #[must_use]
+    pub const fn code_positions(&self, data_element: &str) -> usize {
+        let mut hits = 0;
+        let mut i = 0;
+        while i < self.elements.len() {
+            let el = &self.elements[i];
+            if const_str_eq(el.data_element, data_element) {
+                hits += 1;
+            }
+            let mut c = 0;
+            while c < el.components.len() {
+                if const_str_eq(el.components[c].data_element, data_element) {
+                    hits += 1;
+                }
+                c += 1;
+            }
+            i += 1;
+        }
+        hits
+    }
+
+    /// Zero-based element index for `data_element`, resolved at compile time.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identifier is unknown or appears at more than one
+    /// position.  In a `const` context — which is how the derive macro uses it —
+    /// that panic is a **compile error**, so a mistyped identifier can never
+    /// reach runtime.  Guard with [`code_positions`][Self::code_positions] for a
+    /// message that names the offending field.
+    #[must_use]
+    pub const fn element_slot(&self, data_element: &str) -> usize {
+        assert!(
+            self.code_positions(data_element) == 1,
+            "data element identifier is unknown or ambiguous in this segment definition"
+        );
+        let mut i = 0;
+        while i < self.elements.len() {
+            let el = &self.elements[i];
+            if const_str_eq(el.data_element, data_element) {
+                return el.position as usize - 1;
+            }
+            let mut c = 0;
+            while c < el.components.len() {
+                if const_str_eq(el.components[c].data_element, data_element) {
+                    return el.position as usize - 1;
+                }
+                c += 1;
+            }
+            i += 1;
+        }
+        unreachable!()
+    }
+
+    /// Zero-based component index for `data_element`, resolved at compile time.
+    ///
+    /// Returns `0` when the identifier names a data element rather than a
+    /// component inside a composite — component 0 is the first (and for a simple
+    /// element, only) component, so the same accessor works for both shapes.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the identifier is unknown or appears at more than one
+    /// position; see [`element_slot`][Self::element_slot].
+    #[must_use]
+    pub const fn component_slot(&self, data_element: &str) -> usize {
+        assert!(
+            self.code_positions(data_element) == 1,
+            "data element identifier is unknown or ambiguous in this segment definition"
+        );
+        let mut i = 0;
+        while i < self.elements.len() {
+            let el = &self.elements[i];
+            if const_str_eq(el.data_element, data_element) {
+                return 0;
+            }
+            let mut c = 0;
+            while c < el.components.len() {
+                if const_str_eq(el.components[c].data_element, data_element) {
+                    return el.components[c].position as usize - 1;
+                }
+                c += 1;
+            }
+            i += 1;
+        }
+        unreachable!()
+    }
+
+    /// `true` when `data_element` names a component *inside* a composite rather
+    /// than a data element of the segment.
+    ///
+    /// Lets a caller — the derive macro, in practice — pick the right
+    /// "missing required" error variant without a second lookup:
+    /// [`EdifactError::MissingRequiredComponent`] rather than
+    /// [`EdifactError::MissingRequiredElement`]. `component_slot` alone cannot
+    /// answer this, because a code naming the *first* component of a composite
+    /// also resolves to component index 0.
+    ///
+    /// Returns `false` for an unknown identifier; pair with
+    /// [`code_positions`][Self::code_positions] when that case matters.
+    #[must_use]
+    pub const fn code_is_component(&self, data_element: &str) -> bool {
+        let mut i = 0;
+        while i < self.elements.len() {
+            let el = &self.elements[i];
+            let mut c = 0;
+            while c < el.components.len() {
+                if const_str_eq(el.components[c].data_element, data_element) {
+                    return true;
+                }
+                c += 1;
+            }
+            i += 1;
+        }
+        false
+    }
+}
+
+impl SegmentLayout for SegmentDefinition {
+    #[inline]
+    fn layout_tag(&self) -> &str {
+        self.tag
+    }
+
+    fn resolve_code(&self, data_element: &str) -> Result<ElementPath, EdifactError> {
+        // One pass, not four: this runs per lookup on hot validation paths, and
+        // composing the `const` helpers would rescan the table for each of the
+        // count, the element index, and the component index.
+        let mut hits = 0usize;
+        let mut found = None;
+        for el in self.elements {
+            if el.data_element == data_element {
+                hits += 1;
+                found.get_or_insert(ElementPath::element(el.position as usize - 1));
+            }
+            for comp in el.components {
+                if comp.data_element == data_element {
+                    hits += 1;
+                    found.get_or_insert(ElementPath::component(
+                        el.position as usize - 1,
+                        comp.position as usize - 1,
+                    ));
+                }
+            }
+        }
+        resolve_outcome(self.tag, data_element, hits, found)
+    }
+}
+
+/// Turn a resolution scan's `(hit count, first match)` into a `Result`.
+///
+/// Shared by both [`SegmentLayout`] impls so the static and runtime tables
+/// cannot drift on which condition maps to which error.
+fn resolve_outcome(
+    tag: &str,
+    data_element: &str,
+    hits: usize,
+    found: Option<ElementPath>,
+) -> Result<ElementPath, EdifactError> {
+    match (hits, found) {
+        (1, Some(path)) => Ok(path),
+        (0, _) => Err(EdifactError::UnknownDataElement {
+            tag: tag.to_owned(),
+            data_element: data_element.to_owned(),
+        }),
+        _ => Err(EdifactError::AmbiguousDataElement {
+            tag: tag.to_owned(),
+            data_element: data_element.to_owned(),
+        }),
     }
 }
 
@@ -157,6 +586,82 @@ pub struct OwnedElementRef {
     status: Status,
     /// Maximum repetition count.
     max_repeat: u8,
+    /// Component definitions when this element is a composite; empty for a
+    /// simple data element.
+    components: Vec<OwnedComponentRef>,
+}
+
+/// Owned runtime equivalent of [`ComponentRef`].
+///
+/// Attach these to an [`OwnedElementRef`] with
+/// [`OwnedElementRef::with_components`] so that runtime-loaded definitions
+/// support code-addressed access into composites, exactly like compile-time
+/// [`SegmentDefinition`] tables do.
+#[derive(Debug, Clone)]
+pub struct OwnedComponentRef {
+    /// One-based component position within the composite.
+    position: u8,
+    /// UN/EDIFACT component data element identifier.
+    data_element: String,
+    /// Requirement status.
+    status: Status,
+}
+
+impl OwnedComponentRef {
+    /// Construct an owned component reference.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `position` is `0` (positions are one-based).
+    pub fn new_unchecked(position: u8, data_element: String, status: Status) -> Self {
+        assert!(
+            position != 0,
+            "OwnedComponentRef::new_unchecked: position must be >= 1 (one-based), got 0"
+        );
+        Self {
+            position,
+            data_element,
+            status,
+        }
+    }
+
+    /// Construct an owned component reference, returning an error for position `0`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError::InvalidElementPosition`] if `position` is `0`.
+    pub fn try_new(
+        position: u8,
+        data_element: String,
+        status: Status,
+    ) -> Result<Self, EdifactError> {
+        if position == 0 {
+            return Err(EdifactError::InvalidElementPosition);
+        }
+        Ok(Self {
+            position,
+            data_element,
+            status,
+        })
+    }
+
+    /// One-based component position (always >= 1).
+    #[inline]
+    pub fn position(&self) -> u8 {
+        self.position
+    }
+
+    /// UN/EDIFACT component data element identifier.
+    #[inline]
+    pub fn data_element(&self) -> &str {
+        &self.data_element
+    }
+
+    /// Requirement status of this component.
+    #[inline]
+    pub fn status(&self) -> Status {
+        self.status
+    }
 }
 
 /// Owned runtime equivalent of [`SegmentDefinition`].
@@ -246,6 +751,51 @@ impl OwnedSegmentDef {
     pub fn elements(&self) -> &[OwnedElementRef] {
         &self.elements
     }
+
+    /// Number of positions in this definition that carry `data_element`.
+    ///
+    /// Runtime counterpart of [`SegmentDefinition::code_positions`].
+    #[must_use]
+    pub fn code_positions(&self, data_element: &str) -> usize {
+        self.elements
+            .iter()
+            .map(|el| {
+                usize::from(el.data_element == data_element)
+                    + el.components
+                        .iter()
+                        .filter(|c| c.data_element == data_element)
+                        .count()
+            })
+            .sum()
+    }
+}
+
+impl SegmentLayout for OwnedSegmentDef {
+    #[inline]
+    fn layout_tag(&self) -> &str {
+        &self.tag
+    }
+
+    fn resolve_code(&self, data_element: &str) -> Result<ElementPath, EdifactError> {
+        let mut hits = 0usize;
+        let mut found = None;
+        for el in &self.elements {
+            if el.data_element == data_element {
+                hits += 1;
+                found.get_or_insert(ElementPath::element(el.position as usize - 1));
+            }
+            for comp in &el.components {
+                if comp.data_element == data_element {
+                    hits += 1;
+                    found.get_or_insert(ElementPath::component(
+                        el.position as usize - 1,
+                        comp.position as usize - 1,
+                    ));
+                }
+            }
+        }
+        resolve_outcome(&self.tag, data_element, hits, found)
+    }
 }
 
 impl OwnedElementRef {
@@ -277,6 +827,7 @@ impl OwnedElementRef {
             data_element,
             status,
             max_repeat,
+            components: Vec::new(),
         }
     }
 
@@ -303,7 +854,38 @@ impl OwnedElementRef {
             data_element,
             status,
             max_repeat,
+            components: Vec::new(),
         })
+    }
+
+    /// Attach component definitions, marking this element as a composite.
+    ///
+    /// Declared components make code-addressed access resolve *into* the
+    /// composite and activate the mandatory-component check in
+    /// [`DirectoryValidator`].
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use edifact_rs::{OwnedComponentRef, OwnedElementRef, Status};
+    ///
+    /// let dtm = OwnedElementRef::new_unchecked(1, "C507".to_owned(), Status::Mandatory, 1)
+    ///     .with_components(vec![
+    ///         OwnedComponentRef::new_unchecked(1, "2005".to_owned(), Status::Mandatory),
+    ///         OwnedComponentRef::new_unchecked(2, "2380".to_owned(), Status::Conditional),
+    ///     ]);
+    /// assert_eq!(dtm.components().len(), 2);
+    /// ```
+    #[must_use]
+    pub fn with_components(mut self, components: Vec<OwnedComponentRef>) -> Self {
+        self.components = components;
+        self
+    }
+
+    /// Component definitions; empty when this is a simple data element.
+    #[inline]
+    pub fn components(&self) -> &[OwnedComponentRef] {
+        &self.components
     }
 
     /// One-based element position (always >= 1).
@@ -430,6 +1012,77 @@ impl SegmentDefRef<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Iterate over mandatory *component* positions without heap allocation.
+    ///
+    /// Calls `f(element_index, component_index, data_element_id)` — both indices
+    /// zero-based — for every declared component whose status is
+    /// [`Status::Mandatory`].  Definitions that declare no components (the shape
+    /// every pre-0.13 directory table had) yield nothing, so this check is
+    /// inert until a directory opts in by declaring composites with
+    /// [`ElementRef::composite`].
+    fn for_each_mandatory_component<E, F>(&self, mut f: F) -> Result<(), E>
+    where
+        F: FnMut(usize, usize, &str) -> Result<(), E>,
+    {
+        match self {
+            Self::Static(d) => {
+                for e in d.elements {
+                    for c in e
+                        .components
+                        .iter()
+                        .filter(|c| c.status == Status::Mandatory)
+                    {
+                        f(
+                            (e.position as usize).saturating_sub(1),
+                            (c.position as usize).saturating_sub(1),
+                            c.data_element,
+                        )?;
+                    }
+                }
+            }
+            Self::Owned(d) => {
+                for e in &d.elements {
+                    for c in e
+                        .components
+                        .iter()
+                        .filter(|c| c.status == Status::Mandatory)
+                    {
+                        f(
+                            (e.position as usize).saturating_sub(1),
+                            (c.position as usize).saturating_sub(1),
+                            c.data_element.as_str(),
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Number of declared components for the element at zero-based `index`.
+    ///
+    /// `None` when the element is not defined, or is defined without
+    /// components — in which case its arity is not constrained by the layout.
+    fn declared_component_count(&self, index: usize) -> Option<u8> {
+        let position = u8::try_from(index.checked_add(1)?).ok()?;
+        let count = match self {
+            Self::Static(d) => d
+                .elements
+                .iter()
+                .find(|e| e.position == position)
+                .map(|e| e.components.len())?,
+            Self::Owned(d) => d
+                .elements
+                .iter()
+                .find(|e| e.position == position)
+                .map(|e| e.components.len())?,
+        };
+        if count == 0 {
+            return None;
+        }
+        u8::try_from(count).ok()
     }
 }
 
@@ -732,17 +1385,37 @@ impl DirectoryValidator {
         u8::try_from(count).ok()
     }
 
-    fn validate_component_counts(&self, seg: &Segment<'_>) -> Result<(), EdifactError> {
+    fn validate_component_counts(
+        &self,
+        seg: &Segment<'_>,
+        def: &SegmentDefRef<'_>,
+    ) -> Result<(), EdifactError> {
         for idx in 0..seg.elements.len() {
+            let actual = Self::effective_component_count(seg, idx).unwrap_or(0);
+            // The `expected_components` hook is an exact count and wins when set.
             if let Some(expected) = (self.expected_components)(seg.tag, idx) {
-                let actual = Self::effective_component_count(seg, idx).unwrap_or(0);
                 if actual != expected {
                     return Err(EdifactError::InvalidComponentCount {
                         tag: seg.tag.to_owned(),
                         element_index: idx,
                         expected,
                         actual,
-                        offset: seg.span.start,
+                        span: seg.element_span(idx).unwrap_or(seg.span),
+                    });
+                }
+                continue;
+            }
+            // Otherwise a composite that declares its components caps them:
+            // more components than the directory defines is a structural error,
+            // while fewer is normal (conditional components may be omitted).
+            if let Some(declared) = def.declared_component_count(idx) {
+                if actual > declared {
+                    return Err(EdifactError::InvalidComponentCount {
+                        tag: seg.tag.to_owned(),
+                        element_index: idx,
+                        expected: declared,
+                        actual,
+                        span: seg.element_span(idx).unwrap_or(seg.span),
                     });
                 }
             }
@@ -760,12 +1433,18 @@ impl DirectoryValidator {
                 .unwrap_or("");
             if !value.is_empty() && !(self.is_code_valid)(de, value) {
                 let suggestion = (self.suggest_code)(de, value);
+                // Point at the offending *value*, not the whole segment, so
+                // rendered diagnostics underline the code that failed.
+                let span = seg
+                    .get_element(*elem_idx)
+                    .and_then(|e| e.component_span(*comp_idx))
+                    .unwrap_or(seg.span);
                 return Err(EdifactError::InvalidCodeValue {
                     tag: seg.tag.to_owned(),
                     element_index: *elem_idx,
                     value: value.to_owned(),
                     code_list: (*de).to_owned(),
-                    offset: seg.span.start,
+                    span,
                     suggestion,
                 });
             }
@@ -798,7 +1477,7 @@ impl DirectoryValidator {
                         .message_type
                         .clone()
                         .unwrap_or_else(|| self.directory_id.clone()),
-                    offset: seg.tag_span.start,
+                    span: seg.tag_span,
                 });
             }
             return Ok(());
@@ -814,7 +1493,7 @@ impl DirectoryValidator {
                 min: min_elements,
                 max: max_elements,
                 actual,
-                offset: seg.span.start,
+                span: seg.span,
             });
         }
 
@@ -831,7 +1510,27 @@ impl DirectoryValidator {
                 }
                 Ok(())
             })?;
-            self.validate_component_counts(seg)?;
+            // Mandatory *components* inside declared composites.  Only fires for
+            // definitions built with `ElementRef::composite` / `with_components`;
+            // an element that is absent entirely is already reported above as a
+            // missing element, so only present elements are checked here.
+            def.for_each_mandatory_component(|elem_idx, comp_idx, _de| {
+                let Some(elem) = seg.elements.get(elem_idx) else {
+                    return Ok(());
+                };
+                let present = elem
+                    .get_component(comp_idx)
+                    .is_some_and(|value| !value.is_empty());
+                if !present {
+                    return Err(EdifactError::MissingRequiredComponent {
+                        tag: seg.tag.to_owned(),
+                        element_index: elem_idx,
+                        component_index: comp_idx,
+                    });
+                }
+                Ok(())
+            })?;
+            self.validate_component_counts(seg, &def)?;
 
             if let Some(rule) = &self.additional_structure_rule {
                 rule(seg)?;

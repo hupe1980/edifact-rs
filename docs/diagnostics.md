@@ -124,8 +124,9 @@ println!("{rendered}");
 
 ## Error structure (with `diagnostics`)
 
-Each `EdifactError` variant that includes a byte offset exposes it as a miette
-`SourceSpan`:
+Variants carry either a single `offset: usize` (lexical faults, where there is no
+meaningful end position) or a `span: Span` (validation faults, where the exact
+source range is known):
 
 | Variant | Span source |
 |---|---|
@@ -133,7 +134,7 @@ Each `EdifactError` variant that includes a byte offset exposes it as a miette
 | `InvalidDelimiter { byte, offset }` | Single byte at `offset` |
 | `InvalidText { offset }` | Start of invalid byte sequence |
 | `InvalidReleaseSequence { offset }` | The dangling `?` character |
-| `InvalidCodeValue { offset, … }` | The element start position |
+| `InvalidCodeValue { span, … }` | The offending value's byte range |
 | `SegmentTooLong { offset, … }` | Start of the oversized segment |
 
 ---

@@ -4,6 +4,197 @@ use crate::{error::EdifactError, model::Segment, tokenizer::ServiceStringAdvice}
 use std::borrow::Cow;
 use std::io::Write;
 
+/// One data element of a segment being written: simple or composite.
+///
+/// The everyday EDIFACT segment mixes both shapes — `NAD+MS+id::agency`,
+/// `DTM+137:20260101:102` — and this enum lets a single call express that
+/// without pre-joining components into a string (which loses the distinction
+/// between a separator and a literal `:` in a value).
+///
+/// `From` impls cover the common literals, so `"MS".into()` and
+/// `["a", "", "b"].into()` both work; the [`elements!`][crate::elements] macro
+/// wraps that up entirely.
+///
+/// # Example
+///
+/// ```rust
+/// use edifact_rs::{DataElement, Writer};
+///
+/// let mut w = Writer::new(Vec::new());
+/// w.write_elements(
+///     "NAD",
+///     &[
+///         DataElement::Simple("MS"),
+///         DataElement::Composite(&["9900112233445", "", "293"]),
+///     ],
+/// )?;
+/// assert_eq!(w.finish()?, b"NAD+MS+9900112233445::293'".to_vec());
+/// # Ok::<(), edifact_rs::EdifactError>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataElement<'a> {
+    /// A simple data element — one value, no component separators.
+    Simple(&'a str),
+    /// A composite data element — components written in order, separated by the
+    /// active component separator.  A separator byte *inside* a component value
+    /// is escaped rather than promoted to a boundary.
+    Composite(&'a [&'a str]),
+}
+
+impl<'a> DataElement<'a> {
+    /// The components of this element, as a slice.
+    #[inline]
+    #[must_use]
+    pub fn components(&self) -> &[&'a str] {
+        match self {
+            Self::Simple(value) => std::slice::from_ref(value),
+            Self::Composite(components) => components,
+        }
+    }
+}
+
+impl<'a> From<&'a str> for DataElement<'a> {
+    #[inline]
+    fn from(value: &'a str) -> Self {
+        Self::Simple(value)
+    }
+}
+
+impl<'a> From<&'a [&'a str]> for DataElement<'a> {
+    #[inline]
+    fn from(components: &'a [&'a str]) -> Self {
+        Self::Composite(components)
+    }
+}
+
+impl<'a, const N: usize> From<&'a [&'a str; N]> for DataElement<'a> {
+    #[inline]
+    fn from(components: &'a [&'a str; N]) -> Self {
+        Self::Composite(components)
+    }
+}
+
+/// Borrow a value as a [`DataElement`], choosing simple or composite by type.
+///
+/// A single string borrows as [`DataElement::Simple`]; an array, slice, or `Vec`
+/// of strings borrows as [`DataElement::Composite`]. This is what lets the
+/// [`elements!`][crate::elements] macro accept both shapes from arbitrary
+/// expressions rather than only from literals.
+///
+/// # Example
+///
+/// ```rust
+/// use edifact_rs::{AsDataElement, DataElement};
+///
+/// let qualifier = String::from("MS");
+/// let party = ["9900112233445", "", "293"];
+///
+/// assert_eq!(qualifier.as_data_element(), DataElement::Simple("MS"));
+/// assert_eq!(
+///     party.as_data_element(),
+///     DataElement::Composite(&["9900112233445", "", "293"]),
+/// );
+/// ```
+pub trait AsDataElement {
+    /// Borrow `self` as a [`DataElement`].
+    fn as_data_element(&self) -> DataElement<'_>;
+}
+
+impl AsDataElement for str {
+    #[inline]
+    fn as_data_element(&self) -> DataElement<'_> {
+        DataElement::Simple(self)
+    }
+}
+
+impl AsDataElement for &str {
+    #[inline]
+    fn as_data_element(&self) -> DataElement<'_> {
+        DataElement::Simple(self)
+    }
+}
+
+impl AsDataElement for String {
+    #[inline]
+    fn as_data_element(&self) -> DataElement<'_> {
+        DataElement::Simple(self.as_str())
+    }
+}
+
+impl AsDataElement for Cow<'_, str> {
+    #[inline]
+    fn as_data_element(&self) -> DataElement<'_> {
+        DataElement::Simple(self.as_ref())
+    }
+}
+
+impl<const N: usize> AsDataElement for [&str; N] {
+    #[inline]
+    fn as_data_element(&self) -> DataElement<'_> {
+        DataElement::Composite(self)
+    }
+}
+
+impl AsDataElement for [&str] {
+    #[inline]
+    fn as_data_element(&self) -> DataElement<'_> {
+        DataElement::Composite(self)
+    }
+}
+
+impl AsDataElement for Vec<&str> {
+    #[inline]
+    fn as_data_element(&self) -> DataElement<'_> {
+        DataElement::Composite(self)
+    }
+}
+
+impl AsDataElement for DataElement<'_> {
+    #[inline]
+    fn as_data_element(&self) -> DataElement<'_> {
+        *self
+    }
+}
+
+/// Build a `&[`[`DataElement`]`]` from a mix of simple values and component lists.
+///
+/// Each entry is an arbitrary expression borrowed through
+/// [`AsDataElement`]: a string becomes a simple data element, an array or slice
+/// of strings becomes a composite. This is the shorthand for the mixed-segment
+/// shape that dominates real EDIFACT:
+///
+/// ```rust
+/// use edifact_rs::{Writer, elements};
+///
+/// // Runtime values, not just literals — the everyday builder shape.
+/// let qualifier = String::from("MS");
+/// let gln = "9900112233445";
+///
+/// let mut w = Writer::new(Vec::new());
+/// w.write_elements("NAD", elements![qualifier.as_str(), [gln, "", "293"]])?;
+/// w.write_elements("DTM", elements![["137", "20260101", "102"]])?;
+/// assert_eq!(
+///     w.finish()?,
+///     b"NAD+MS+9900112233445::293'DTM+137:20260101:102'".to_vec(),
+/// );
+/// # Ok::<(), edifact_rs::EdifactError>(())
+/// ```
+///
+/// Composite components must be string *slices*: a `[String; N]` cannot borrow
+/// as `&[&str]` without allocating, so write `[id.as_str(), "", agency]`.
+///
+/// The expansion borrows temporaries, so the result must be consumed within the
+/// same statement — passing it directly as an argument, as above, always is.
+#[macro_export]
+macro_rules! elements {
+    () => {
+        &[] as &[$crate::DataElement<'_>]
+    };
+    ($($element:expr),+ $(,)?) => {
+        &[$($crate::AsDataElement::as_data_element(&$element)),+][..]
+    };
+}
+
 /// Streaming EDIFACT writer.
 ///
 /// Wraps any [`Write`] implementation and serializes segments one at a time.
@@ -122,7 +313,9 @@ impl<W: Write> Writer<W> {
     /// [`ServiceStringAdvice`][crate::ServiceStringAdvice] must therefore hold ASCII byte values.
     ///
     /// To produce correct output regardless of the active delimiter, prefer
-    /// [`Self::write_segment_parts`] which accepts pre-split component slices.
+    /// [`Self::write_elements`] — it takes component boundaries explicitly and
+    /// handles the mixed simple/composite shape that most real segments have.
+    /// [`Self::write_segment_parts`] is the equivalent for owned data.
     pub fn write_raw(&mut self, tag: &str, elements: &[&str]) -> Result<(), EdifactError> {
         self.inner.write_all(tag.as_bytes())?;
         let comp_sep = self.ssa.component_sep;
@@ -209,6 +402,66 @@ impl<W: Write> Writer<W> {
         for element in elements {
             self.inner.write_all(&[self.ssa.element_sep])?;
             for (i, comp) in element.iter().enumerate() {
+                if i > 0 {
+                    self.inner.write_all(&[self.ssa.component_sep])?;
+                }
+                self.write_escaped(comp)?;
+            }
+        }
+        self.inner.write_all(&[self.ssa.segment_term])?;
+        if tag == "UNH" {
+            self.message_start_count = self.segment_count;
+        }
+        self.segment_count += 1;
+        Ok(())
+    }
+
+    /// Write a segment whose data elements mix simple and composite shapes.
+    ///
+    /// This is the general form of segment emission and the one that matches
+    /// how EDIFACT segments are actually specified: `NAD` takes a simple
+    /// qualifier followed by a composite party identification, `DTM` takes a
+    /// single composite.  [`write_raw`][Self::write_raw] (all-simple, with
+    /// separators inferred by splitting) and
+    /// [`write_composites`][Self::write_composites] (all-composite) are the two
+    /// special cases.
+    ///
+    /// Component boundaries are explicit, so a value containing the active
+    /// component separator is escaped rather than silently promoted to a
+    /// boundary.  Nothing is allocated.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use edifact_rs::{DataElement, Writer, elements};
+    ///
+    /// let mut w = Writer::new(Vec::new());
+    /// // Explicit form …
+    /// w.write_elements(
+    ///     "NAD",
+    ///     &[DataElement::Simple("MS"), DataElement::Composite(&["ACME:INC", "", "9"])],
+    /// )?;
+    /// // … or the `elements!` shorthand.
+    /// w.write_elements("DTM", elements![["137", "20260101", "102"]])?;
+    /// assert_eq!(
+    ///     w.finish()?,
+    ///     b"NAD+MS+ACME?:INC::9'DTM+137:20260101:102'".to_vec(),
+    /// );
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError`] if the underlying writer fails.
+    pub fn write_elements(
+        &mut self,
+        tag: &str,
+        elements: &[DataElement<'_>],
+    ) -> Result<(), EdifactError> {
+        self.inner.write_all(tag.as_bytes())?;
+        for element in elements {
+            self.inner.write_all(&[self.ssa.element_sep])?;
+            for (i, comp) in element.components().iter().enumerate() {
                 if i > 0 {
                     self.inner.write_all(&[self.ssa.component_sep])?;
                 }
@@ -538,6 +791,52 @@ impl<W: Write> MessageWriter<'_, W> {
         self.writer.write_raw(tag, elements)
     }
 
+    /// Write a segment mixing simple and composite data elements within this message.
+    ///
+    /// Delegates to [`Writer::write_elements`] — the general form, and the one
+    /// to reach for when a segment is not uniformly simple or uniformly
+    /// composite.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError`] if the underlying writer fails.
+    pub fn write_elements(
+        &mut self,
+        tag: &str,
+        elements: &[DataElement<'_>],
+    ) -> Result<(), EdifactError> {
+        self.writer.write_elements(tag, elements)
+    }
+
+    /// Write a segment from borrowed element/component slices within this message.
+    ///
+    /// Delegates to [`Writer::write_composites`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError`] if the underlying writer fails.
+    pub fn write_composites(
+        &mut self,
+        tag: &str,
+        elements: &[&[&str]],
+    ) -> Result<(), EdifactError> {
+        self.writer.write_composites(tag, elements)
+    }
+
+    /// Write a segment from pre-split, owned element/component data within this message.
+    ///
+    /// Delegates to [`Writer::write_segment_parts`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError`] if the underlying writer fails.
+    pub fn write_segment_parts<E>(&mut self, tag: &str, elements: &[E]) -> Result<(), EdifactError>
+    where
+        E: AsRef<[String]>,
+    {
+        self.writer.write_segment_parts(tag, elements)
+    }
+
     /// Write a fully-typed segment within this message.
     ///
     /// Delegates to [`Writer::write_segment`].
@@ -698,6 +997,134 @@ mod tests {
             segs[0].get_element(1).unwrap().get_component(0),
             Some("ACME:INC")
         );
+    }
+
+    #[test]
+    fn write_elements_mixes_simple_and_composite() {
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer::new(&mut buf);
+            w.write_elements(
+                "NAD",
+                &[
+                    DataElement::Simple("MS"),
+                    DataElement::Composite(&["9900112233445", "", "293"]),
+                ],
+            )
+            .unwrap();
+        }
+        assert_eq!(buf, b"NAD+MS+9900112233445::293'");
+    }
+
+    #[test]
+    fn elements_macro_matches_the_explicit_form() {
+        let mut macro_buf = Vec::new();
+        {
+            let mut w = Writer::new(&mut macro_buf);
+            w.write_elements("NAD", elements!["MS", ["ACME", "", "9"]])
+                .unwrap();
+            w.write_elements("DTM", elements![["137", "20260101", "102"]])
+                .unwrap();
+        }
+        let mut explicit_buf = Vec::new();
+        {
+            let mut w = Writer::new(&mut explicit_buf);
+            w.write_elements(
+                "NAD",
+                &[
+                    DataElement::Simple("MS"),
+                    DataElement::Composite(&["ACME", "", "9"]),
+                ],
+            )
+            .unwrap();
+            w.write_elements(
+                "DTM",
+                &[DataElement::Composite(&["137", "20260101", "102"])],
+            )
+            .unwrap();
+        }
+        assert_eq!(macro_buf, explicit_buf);
+        assert_eq!(macro_buf, b"NAD+MS+ACME::9'DTM+137:20260101:102'");
+    }
+
+    #[test]
+    fn elements_macro_accepts_arbitrary_expressions() {
+        // Builders emit runtime values, not literals.  A `tt`-based macro only
+        // matched single-token entries, so `qualifier.as_str()` failed to parse
+        // — which is precisely the shape this macro exists for.
+        let qualifier = String::from("MS");
+        let gln = "9900112233445";
+        let dtm: Vec<&str> = vec!["137", "20260101", "102"];
+
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer::new(&mut buf);
+            w.write_elements("NAD", elements![qualifier.as_str(), [gln, "", "293"]])
+                .unwrap();
+            w.write_elements("DTM", elements![dtm]).unwrap();
+            w.write_elements("FTX", elements![qualifier]).unwrap();
+            w.write_elements("UNS", elements![]).unwrap();
+        }
+        assert_eq!(
+            String::from_utf8(buf).unwrap(),
+            "NAD+MS+9900112233445::293'DTM+137:20260101:102'FTX+MS'UNS'"
+        );
+    }
+
+    #[test]
+    fn write_elements_escapes_a_literal_component_separator() {
+        // The `:` stays inside the value instead of splitting the element —
+        // the failure mode of pre-joining components into one string.
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer::new(&mut buf);
+            w.write_elements(
+                "NAD",
+                &[DataElement::Simple("MS"), DataElement::Simple("ACME:INC")],
+            )
+            .unwrap();
+        }
+        let segs: Vec<_> = crate::from_bytes(&buf)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            segs[0].get_element(1).unwrap().get_component(0),
+            Some("ACME:INC")
+        );
+    }
+
+    #[test]
+    fn write_elements_uses_the_active_component_separator() {
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer::with_una(&mut buf, exotic_ssa()).unwrap();
+            w.write_elements("DTM", elements![["137", "20260101", "102"]])
+                .unwrap();
+        }
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.ends_with("DTM!137|20260101|102~"),
+            "expected custom delimiters, got {out}"
+        );
+    }
+
+    #[test]
+    fn message_writer_counts_write_elements_segments() {
+        // `MessageWriter` had no mixed-emit delegate, so callers dropped to the
+        // raw writer and their segments escaped the UNT DE 0074 count.
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer::new(&mut buf);
+            let mut msg = w.begin_message("1", "ORDERS", "D", "96A", "UN").unwrap();
+            msg.write_elements("NAD", elements!["MS", ["ACME", "", "9"]])
+                .unwrap();
+            msg.write_composites("DTM", &[&["137", "20260101", "102"]])
+                .unwrap();
+            msg.finish().unwrap();
+        }
+        let out = String::from_utf8(buf).unwrap();
+        // UNH + NAD + DTM + UNT == 4
+        assert!(out.contains("UNT+4+1'"), "expected UNT+4, got {out}");
     }
 
     #[test]

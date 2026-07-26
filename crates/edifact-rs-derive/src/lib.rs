@@ -138,6 +138,20 @@ pub fn derive_edifact_deserialize(input: TokenStream) -> TokenStream {
 
 // ── attribute containers ───────────────────────────────────────────────────────
 
+/// How a field's element slot was written in the attribute.
+///
+/// `Index` is the historical positional form.  `Code` is a UN/EDIFACT data
+/// element identifier resolved against the struct's `layout` — during *const
+/// evaluation*, so a stale or mistyped identifier is a compile error rather
+/// than a silent read of the neighbouring element.
+#[derive(Clone)]
+enum Position {
+    /// `#[edifact(element = 4)]`
+    Index(u32),
+    /// `#[edifact(element = "3055")]`
+    Code(String),
+}
+
 #[derive(Default)]
 struct StructAttrs {
     /// `#[edifact(segment = "TAG")]`
@@ -148,12 +162,16 @@ struct StructAttrs {
     /// `#[edifact(qualifier_from = N)]` — zero-based element index; qualifier is dynamic at runtime.
     qualifier_from: Option<u32>,
     qualifier_from_span: Option<proc_macro2::Span>,
+    /// `#[edifact(layout = path::to::SEGMENT_DEFINITION)]` — the directory
+    /// definition that code-based `element` attributes resolve against.
+    layout: Option<syn::Path>,
+    layout_span: Option<proc_macro2::Span>,
 }
 
 #[derive(Default)]
 struct FieldAttrs {
-    /// `#[edifact(element = N)]` — zero-based element index
-    element: Option<u32>,
+    /// `#[edifact(element = N)]` or `#[edifact(element = "3055")]`
+    element: Option<Position>,
     element_span: Option<proc_macro2::Span>,
     /// `#[edifact(component = N)]` — component index within the element (for composite data elements)
     component: Option<u32>,
@@ -239,11 +257,31 @@ fn parse_struct_attrs(input: &DeriveInput) -> syn::Result<StructAttrs> {
                 check_index_bound(&lit, idx, "qualifier_from")?;
                 out.qualifier_from = Some(idx);
                 out.qualifier_from_span = Some(meta.path.span());
+            } else if meta.path.is_ident("layout") {
+                if out.layout.is_some() {
+                    return Err(meta.error("duplicate `layout`"));
+                }
+                out.layout_span = Some(meta.path.span());
+                let value = meta.value()?;
+                // Accept both `layout = crate::defs::NAD` and the string form
+                // `layout = "crate::defs::NAD"`, since attribute paths are
+                // commonly written either way.
+                out.layout = Some(if value.peek(syn::LitStr) {
+                    value.parse::<syn::LitStr>()?.parse()?
+                } else {
+                    value.parse::<syn::Path>()?
+                });
             } else {
-                return Err(meta.error("unknown struct-level `edifact` key; expected `segment`, `qualifier`, or `qualifier_from`"));
+                return Err(meta.error("unknown struct-level `edifact` key; expected `segment`, `qualifier`, `qualifier_from`, or `layout`"));
             }
             Ok(())
         })?;
+    }
+    if out.layout.is_some() && out.segment.is_none() {
+        return Err(syn::Error::new(
+            out.layout_span.unwrap_or_else(|| input.span()),
+            "#[edifact(layout = ...)] requires #[edifact(segment = ...)]: a layout describes one segment",
+        ));
     }
     if (out.qualifier.is_some() || out.qualifier_from.is_some()) && out.segment.is_none() {
         return Err(syn::Error::new(
@@ -275,20 +313,43 @@ fn parse_field_attrs(field: &Field) -> syn::Result<FieldAttrs> {
                 if out.element.is_some() {
                     return Err(meta.error("duplicate `element`"));
                 }
-                let lit = meta.value()?.parse::<syn::LitInt>()?;
-                let idx: u32 = lit.base10_parse()?;
-                check_index_bound(&lit, idx, "element")?;
-                out.element = Some(idx);
                 out.element_span = Some(meta.path.span());
+                let value = meta.value()?;
+                out.element = Some(if value.peek(syn::LitStr) {
+                    let lit = value.parse::<syn::LitStr>()?;
+                    let code = lit.value();
+                    if code.is_empty() {
+                        return Err(syn::Error::new(
+                            lit.span(),
+                            "`element` data element identifier must not be empty",
+                        ));
+                    }
+                    Position::Code(code)
+                } else {
+                    let lit = value.parse::<syn::LitInt>()?;
+                    let idx: u32 = lit.base10_parse()?;
+                    check_index_bound(&lit, idx, "element")?;
+                    Position::Index(idx)
+                });
             } else if meta.path.is_ident("component") {
                 if out.component.is_some() {
                     return Err(meta.error("duplicate `component`"));
                 }
-                let lit = meta.value()?.parse::<syn::LitInt>()?;
+                out.component_span = Some(meta.path.span());
+                let value = meta.value()?;
+                if value.peek(syn::LitStr) {
+                    let lit = value.parse::<syn::LitStr>()?;
+                    return Err(syn::Error::new(
+                        lit.span(),
+                        "put the data element identifier in `element`: \
+                         `#[edifact(element = \"3055\")]` resolves both the element and the \
+                         component position from the directory",
+                    ));
+                }
+                let lit = value.parse::<syn::LitInt>()?;
                 let idx: u32 = lit.base10_parse()?;
                 check_index_bound(&lit, idx, "component")?;
                 out.component = Some(idx);
-                out.component_span = Some(meta.path.span());
             } else if meta.path.is_ident("composite") {
                 out.composite = true;
                 out.composite_span = Some(meta.path.span());
@@ -311,6 +372,189 @@ fn parse_field_attrs(field: &Field) -> syn::Result<FieldAttrs> {
         })?;
     }
     Ok(out)
+}
+
+// ── slot resolution ────────────────────────────────────────────────────────────
+
+/// The element/component slot a field maps to, as token expressions.
+struct Slots {
+    /// `usize` expression for the zero-based element index.
+    element: TokenStream2,
+    /// `usize` expression for the zero-based component index.
+    component: TokenStream2,
+    /// Whether the field reads through a component accessor.
+    ///
+    /// Always true for a code-addressed field: whether the identifier landed on
+    /// a component or a whole element is only known after const evaluation, and
+    /// reading component 0 is equivalent to reading the element either way.
+    has_component: bool,
+    /// `bool` expression: does this field address a component *inside* a
+    /// composite?
+    ///
+    /// Decides between [`EdifactError::MissingRequiredComponent`] and
+    /// [`EdifactError::MissingRequiredElement`].  It cannot be folded into
+    /// `has_component`, because a code naming the first component of a composite
+    /// resolves to component index 0 just like a whole element does — and
+    /// reporting `E021` where `E008` belongs sends downstream routing to the
+    /// wrong branch.  For a code slot this is a `const` lookup, so the branch
+    /// folds away.
+    names_component: TokenStream2,
+}
+
+/// Resolve every field's slot, emitting the `const` items that code-addressed
+/// fields need.
+///
+/// The returned prelude must be placed at the top of each generated function
+/// body that uses the slots.  It carries three compile-time guarantees:
+/// every identifier exists in the layout, none is ambiguous, and no two fields
+/// claim the same slot.
+fn resolve_slots(
+    struct_attrs: &StructAttrs,
+    field_data: &[(&syn::Ident, &Type, FieldAttrs)],
+) -> syn::Result<(TokenStream2, Vec<Slots>)> {
+    let mut consts: Vec<TokenStream2> = Vec::new();
+    let mut slots: Vec<Slots> = Vec::with_capacity(field_data.len());
+    let mut slot_entries: Vec<TokenStream2> = Vec::new();
+
+    if struct_attrs.qualifier.is_some() {
+        // The struct-level qualifier owns element 0 / component 0.
+        slot_entries.push(quote! { (0usize, 0usize) });
+    }
+
+    for (i, (ident, _, attrs)) in field_data.iter().enumerate() {
+        if attrs.group {
+            slots.push(Slots {
+                element: quote! { 0usize },
+                component: quote! { 0usize },
+                has_component: false,
+                names_component: quote! { false },
+            });
+            continue;
+        }
+        let component_index = attrs.component.unwrap_or(0);
+        let slot = match &attrs.element {
+            Some(Position::Code(code)) => {
+                let Some(layout) = &struct_attrs.layout else {
+                    return Err(syn::Error::new(
+                        attrs.element_span.unwrap_or_else(|| ident.span()),
+                        format!(
+                            "field `{ident}`: `element = \"{code}\"` addresses a UN/EDIFACT data \
+                             element identifier, which needs a directory to resolve against; add \
+                             #[edifact(layout = path::to::SEGMENT_DEFINITION)] to the struct"
+                        ),
+                    ));
+                };
+                let slot_ident = syn::Ident::new(
+                    &format!("__EDIFACT_SLOT_{i}"),
+                    attrs.element_span.unwrap_or_else(|| ident.span()),
+                );
+                let unknown_msg = format!(
+                    "field `{ident}`: data element {code} is not defined exactly once in the \
+                     segment layout — check the identifier against the directory"
+                );
+                consts.push(quote! {
+                    const _: () = ::core::assert!(#layout.code_positions(#code) == 1, #unknown_msg);
+                });
+                if attrs.component.is_some() {
+                    let conflict_msg = format!(
+                        "field `{ident}`: `component = N` may only accompany an identifier that \
+                         names a whole data element, but {code} names a component inside one"
+                    );
+                    consts.push(quote! {
+                        const _: () =
+                            ::core::assert!(#layout.component_slot(#code) == 0, #conflict_msg);
+                    });
+                    consts.push(quote! {
+                        // The guard above already reported an unresolvable
+                        // identifier by name; short-circuit so `element_slot`
+                        // does not panic a second time with a vaguer message.
+                        const #slot_ident: (usize, usize) =
+                            if #layout.code_positions(#code) == 1 {
+                                (#layout.element_slot(#code), #component_index as usize)
+                            } else {
+                                (0, 0)
+                            };
+                    });
+                } else {
+                    consts.push(quote! {
+                        const #slot_ident: (usize, usize) =
+                            if #layout.code_positions(#code) == 1 {
+                                (#layout.element_slot(#code), #layout.component_slot(#code))
+                            } else {
+                                (0, 0)
+                            };
+                    });
+                }
+                slot_entries.push(quote! { #slot_ident });
+                let names_component = if attrs.component.is_some() {
+                    // `component = N` on a whole-element identifier: the field
+                    // does address a component inside that composite.
+                    quote! { true }
+                } else {
+                    quote! { #layout.code_is_component(#code) }
+                };
+                Slots {
+                    element: quote! { #slot_ident.0 },
+                    component: quote! { #slot_ident.1 },
+                    has_component: true,
+                    names_component,
+                }
+            }
+            Some(Position::Index(idx)) => {
+                let idx = *idx;
+                let explicit = attrs.component.is_some();
+                slot_entries.push(quote! { (#idx as usize, #component_index as usize) });
+                Slots {
+                    element: quote! { #idx as usize },
+                    component: quote! { #component_index as usize },
+                    has_component: explicit,
+                    names_component: quote! { #explicit },
+                }
+            }
+            None => {
+                // Declaration order is the implicit element index.
+                let idx = i as u32;
+                let explicit = attrs.component.is_some();
+                slot_entries.push(quote! { (#idx as usize, #component_index as usize) });
+                Slots {
+                    element: quote! { #idx as usize },
+                    component: quote! { #component_index as usize },
+                    has_component: explicit,
+                    names_component: quote! { #explicit },
+                }
+            }
+        };
+        slots.push(slot);
+    }
+
+    // Slot collisions between code-addressed fields (and between a code and a
+    // positional field) can only be seen after const evaluation, so the check
+    // itself has to run there.  Macro-time `check_duplicate_slots` still covers
+    // the all-positional case with a friendlier message.
+    if struct_attrs.layout.is_some() && !slot_entries.is_empty() {
+        let count = slot_entries.len();
+        consts.push(quote! {
+            const __EDIFACT_SLOTS: [(usize, usize); #count] = [#(#slot_entries),*];
+            const _: () = {
+                let mut i = 0;
+                while i < __EDIFACT_SLOTS.len() {
+                    let mut j = i + 1;
+                    while j < __EDIFACT_SLOTS.len() {
+                        ::core::assert!(
+                            !(__EDIFACT_SLOTS[i].0 == __EDIFACT_SLOTS[j].0
+                                && __EDIFACT_SLOTS[i].1 == __EDIFACT_SLOTS[j].1),
+                            "two fields resolve to the same element/component slot; \
+                             give each field a distinct data element identifier or index"
+                        );
+                        j += 1;
+                    }
+                    i += 1;
+                }
+            };
+        });
+    }
+
+    Ok((quote! { #(#consts)* }, slots))
 }
 
 // ── type helpers ───────────────────────────────────────────────────────────────
@@ -403,6 +647,10 @@ fn vec_inner_type(ty: &Type) -> Option<&Type> {
 /// Serialization keys its emit table by slot, so a duplicate silently dropped
 /// one field from the output while deserialization still read both — an
 /// asymmetric, compile-clean data loss.
+///
+/// Only positional fields are checked here; code-addressed fields have no
+/// macro-time index, and are covered by the const-evaluated uniqueness check
+/// emitted by [`resolve_slots`].
 fn check_duplicate_slots(
     field_data: &[(&syn::Ident, &Type, FieldAttrs)],
     is_segment_struct: bool,
@@ -416,10 +664,12 @@ fn check_duplicate_slots(
         if attrs.group {
             continue;
         }
-        let slot = (
-            attrs.element.unwrap_or(i as u32),
-            attrs.component.unwrap_or(0),
-        );
+        let element = match &attrs.element {
+            Some(Position::Index(idx)) => *idx,
+            Some(Position::Code(_)) => continue,
+            None => i as u32,
+        };
+        let slot = (element, attrs.component.unwrap_or(0));
         if let Some((_, first)) = seen.iter().find(|(s, _)| *s == slot) {
             return Err(syn::Error::new(
                 ident.span(),
@@ -565,6 +815,145 @@ fn validate_field_attrs(
 
 // ── EdifactSerialize ───────────────────────────────────────────────────────────
 
+/// Element index known at macro-expansion time; declaration order is the default.
+///
+/// Code-addressed fields have no such index — callers reach this only on the
+/// positional path, which `resolve_slots` keeps separate.
+fn static_element_index(attrs: &FieldAttrs, decl_index: usize) -> u32 {
+    match &attrs.element {
+        Some(Position::Index(idx)) => *idx,
+        _ => decl_index as u32,
+    }
+}
+
+/// Generate `EdifactSerialize` for a segment struct that addresses fields by
+/// UN/EDIFACT data element identifier.
+///
+/// The positional path lays out its emit order at macro-expansion time, which a
+/// code-addressed struct cannot do: its slots are only known once the `const`
+/// items in `slot_prelude` are evaluated.  So each field contributes a
+/// `(element, component, value)` triple and
+/// [`emit_sparse_segment`][edifact_rs::emit_sparse_segment] orders them.
+/// Absent optional values still contribute an empty triple, so a trailing `None`
+/// produces the same empty element the positional path emits.
+fn impl_serialize_sparse(
+    name: &syn::Ident,
+    seg_tag: &str,
+    struct_attrs: &StructAttrs,
+    field_data: &[(&syn::Ident, &Type, FieldAttrs)],
+    slots: &[Slots],
+    slot_prelude: &TokenStream2,
+) -> TokenStream2 {
+    let mut stmts: Vec<TokenStream2> = Vec::new();
+
+    if let Some(qual) = &struct_attrs.qualifier {
+        stmts.push(quote! {
+            __parts.push((0usize, 0usize, ::std::borrow::Cow::Borrowed(#qual)));
+        });
+    }
+
+    for ((ident, ty, attrs), slot) in field_data.iter().zip(slots) {
+        let (element, component) = (&slot.element, &slot.component);
+        if attrs.composite {
+            // A composite field owns its whole element; replay its own events
+            // into consecutive component slots.
+            let serialize_composite = if is_option_type(ty) {
+                quote! {
+                    if let ::core::option::Option::Some(__v) = &self.#ident {
+                        ::edifact_rs::EdifactCompositeSerialize::edifact_serialize_composite(
+                            __v, &mut __sub,
+                        )?;
+                    }
+                }
+            } else {
+                quote! {
+                    ::edifact_rs::EdifactCompositeSerialize::edifact_serialize_composite(
+                        &self.#ident, &mut __sub,
+                    )?;
+                }
+            };
+            stmts.push(quote! {
+                {
+                    let mut __sub = ::edifact_rs::VecEmitter::default();
+                    #serialize_composite
+                    let mut __comp = 0usize;
+                    let mut __any = false;
+                    for __event in __sub.events {
+                        match __event {
+                            ::edifact_rs::OwnedEdifactEvent::Element { value } => {
+                                __comp = 0;
+                                __any = true;
+                                __parts.push((#element, 0usize, ::std::borrow::Cow::Owned(value)));
+                            }
+                            ::edifact_rs::OwnedEdifactEvent::ComponentElement { value } => {
+                                __comp += 1;
+                                __any = true;
+                                __parts.push((#element, __comp, ::std::borrow::Cow::Owned(value)));
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !__any {
+                        __parts.push((#element, 0usize, ::std::borrow::Cow::Borrowed("")));
+                    }
+                }
+            });
+            continue;
+        }
+
+        let value_expr = if is_option_type(ty) {
+            let inner_is_str = option_inner_type(ty).is_some_and(is_str_like);
+            if inner_is_str {
+                quote! {
+                    match &self.#ident {
+                        ::core::option::Option::Some(__v) => ::std::borrow::Cow::Borrowed(__v.as_str()),
+                        ::core::option::Option::None => ::std::borrow::Cow::Borrowed(""),
+                    }
+                }
+            } else {
+                quote! {
+                    match &self.#ident {
+                        ::core::option::Option::Some(__v) => {
+                            ::std::borrow::Cow::Owned(::std::string::ToString::to_string(__v))
+                        }
+                        ::core::option::Option::None => ::std::borrow::Cow::Borrowed(""),
+                    }
+                }
+            }
+        } else if is_string_type(ty) {
+            quote! { ::std::borrow::Cow::Borrowed(self.#ident.as_str()) }
+        } else if is_str_ref_type(ty) {
+            quote! { ::std::borrow::Cow::Borrowed(self.#ident) }
+        } else {
+            quote! { ::std::borrow::Cow::Owned(::std::string::ToString::to_string(&self.#ident)) }
+        };
+
+        stmts.push(quote! {
+            __parts.push((#element, #component, #value_expr));
+        });
+    }
+
+    let capacity = field_data.len() + usize::from(struct_attrs.qualifier.is_some());
+
+    quote! {
+        impl ::edifact_rs::EdifactSerialize for #name {
+            fn edifact_serialize<__E: ::edifact_rs::EventEmitter>(
+                &self,
+                emitter: &mut __E,
+            ) -> ::core::result::Result<(), ::edifact_rs::EdifactError> {
+                #slot_prelude
+                let mut __parts: ::std::vec::Vec<(
+                    usize,
+                    usize,
+                    ::std::borrow::Cow<'_, str>,
+                )> = ::std::vec::Vec::with_capacity(#capacity);
+                #(#stmts)*
+                ::edifact_rs::emit_sparse_segment(emitter, #seg_tag, &mut __parts)
+            }
+        }
+    }
+}
+
 fn impl_serialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let struct_attrs = parse_struct_attrs(input)?;
@@ -586,8 +975,22 @@ fn impl_serialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
         })
         .collect::<syn::Result<_>>()?;
     check_duplicate_slots(&field_data, is_segment_struct)?;
+    let (slot_prelude, slots) = resolve_slots(&struct_attrs, &field_data)?;
+    let uses_code_slots = field_data
+        .iter()
+        .any(|(_, _, attrs)| matches!(attrs.element, Some(Position::Code(_))));
 
     let body = if let Some(seg_tag) = &struct_attrs.segment {
+        if uses_code_slots {
+            return Ok(impl_serialize_sparse(
+                name,
+                seg_tag,
+                &struct_attrs,
+                &field_data,
+                &slots,
+                &slot_prelude,
+            ));
+        }
         // ── Segment struct: emit one EDIFACT segment ──────────────────────────
         // When a struct-level qualifier is declared, inject it at slot 0.
         // Fields at (element=0, component>=1) extend it as composite components.
@@ -597,7 +1000,7 @@ fn impl_serialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
         {
             // Error only if a field claims element=0 with no component or component=0.
             for (i, (ident, _, attrs)) in field_data.iter().enumerate() {
-                let elem = attrs.element.unwrap_or(i as u32);
+                let elem = static_element_index(attrs, i);
                 let comp = attrs.component.unwrap_or(0);
                 if elem == 0 && comp == 0 {
                     return Err(syn::Error::new(
@@ -617,7 +1020,7 @@ fn impl_serialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 .iter()
                 .enumerate()
                 .filter_map(|(i, (_, _, attrs))| {
-                    let elem = attrs.element.unwrap_or(i as u32);
+                    let elem = static_element_index(attrs, i);
                     let comp = attrs.component.unwrap_or(0);
                     if elem == 0 && comp > 0 {
                         Some((comp, i))
@@ -647,7 +1050,7 @@ fn impl_serialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .iter()
             .enumerate()
             .filter_map(|(i, (_, _, attrs))| {
-                let elem = attrs.element.unwrap_or(i as u32);
+                let elem = static_element_index(attrs, i);
                 if elem < start_slot {
                     None
                 } else {
@@ -860,6 +1263,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
         })
         .collect::<syn::Result<_>>()?;
     check_duplicate_slots(&field_data, is_segment_struct)?;
+    let (slot_prelude, slots) = resolve_slots(&struct_attrs, &field_data)?;
 
     let field_names: Vec<&syn::Ident> = field_data.iter().map(|(id, _, _)| *id).collect();
 
@@ -914,9 +1318,9 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
         let field_inits: Vec<TokenStream2> = field_data
             .iter()
-            .enumerate()
-            .map(|(decl_i, (ident, ty, attrs))| -> syn::Result<TokenStream2> {
-                let idx = attrs.element.unwrap_or(decl_i as u32) as usize;
+            .zip(slots.iter())
+            .map(|((ident, ty, attrs), slot)| -> syn::Result<TokenStream2> {
+                let idx = &slot.element;
                 if attrs.composite {
                     if is_option_type(ty) {
                         let inner_ty = option_inner_type(ty)
@@ -936,34 +1340,34 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         let #ident = <#ty as ::edifact_rs::EdifactCompositeDeserialize>::edifact_deserialize_composite(
                             ::edifact_rs::composite_element(__seg, #idx).ok_or_else(|| ::edifact_rs::EdifactError::MissingRequiredElement {
                                 tag: #seg_tag.to_owned(),
-                                element_index: #idx as usize,
+                                element_index: #idx,
                             })?
                         )?;
                     });
                 }
-                let component_idx: Option<usize> = attrs.component.map(|c| c as usize);
-                let value_expr = if let Some(comp) = component_idx {
+                let comp = &slot.component;
+                let value_expr = if slot.has_component {
                     quote! {
                         __seg.get_element(#idx).and_then(|__e| __e.get_component(#comp))
                     }
                 } else {
                     quote! { __seg.element_str(#idx) }
                 };
-                // Build the correct "missing required" error depending on whether the
-                // field targets a component within an element or a whole element.
-                let missing_required_err = if let Some(comp) = component_idx {
-                    quote! {
+                // Report the variant that matches what the field actually
+                // addresses.  For a code slot `names_component` is a `const`
+                // lookup, so this branch folds away.
+                let names_component = &slot.names_component;
+                let missing_required_err = quote! {
+                    if #names_component {
                         ::edifact_rs::EdifactError::MissingRequiredComponent {
                             tag: #seg_tag.to_owned(),
-                            element_index: #idx as usize,
-                            component_index: #comp as usize,
+                            element_index: #idx,
+                            component_index: #comp,
                         }
-                    }
-                } else {
-                    quote! {
+                    } else {
                         ::edifact_rs::EdifactError::MissingRequiredElement {
                             tag: #seg_tag.to_owned(),
-                            element_index: #idx as usize,
+                            element_index: #idx,
                         }
                     }
                 };
@@ -1020,7 +1424,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                             .filter(|__s| !__s.is_empty())
                             .ok_or_else(|| ::edifact_rs::EdifactError::MissingRequiredElement {
                                 tag: #seg_tag.to_owned(),
-                                element_index: #idx as usize,
+                                element_index: #idx,
                             })?
                             .to_owned();
                     }
@@ -1030,7 +1434,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                             .filter(|__s| !__s.is_empty())
                             .ok_or_else(|| ::edifact_rs::EdifactError::MissingRequiredElement {
                                 tag: #seg_tag.to_owned(),
-                                element_index: #idx as usize,
+                                element_index: #idx,
                             })?
                             .parse::<#ty>()
                             .map_err(|_| ::edifact_rs::EdifactError::InvalidText { offset: __seg.span.start })?;
@@ -1040,6 +1444,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .collect::<syn::Result<_>>()?;
 
         let body = quote! {
+            #slot_prelude
             let __seg = #find_seg
                 .ok_or_else(|| ::edifact_rs::EdifactError::MissingSegment {
                     tag: #seg_tag.to_owned(),
@@ -1107,9 +1512,9 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
         let field_inits_owned: Vec<TokenStream2> = field_data
             .iter()
-            .enumerate()
-            .map(|(decl_i, (ident, ty, attrs))| -> syn::Result<TokenStream2> {
-                let idx = attrs.element.unwrap_or(decl_i as u32) as usize;
+            .zip(slots.iter())
+            .map(|((ident, ty, attrs), slot)| -> syn::Result<TokenStream2> {
+                let idx = &slot.element;
                 if attrs.composite {
                     if is_option_type(ty) {
                         let inner_ty = option_inner_type(ty)
@@ -1135,7 +1540,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                             let __cows = __seg.elements.get(#idx)
                                 .ok_or_else(|| ::edifact_rs::EdifactError::MissingRequiredElement {
                                     tag: #seg_tag.to_owned(),
-                                    element_index: #idx as usize,
+                                    element_index: #idx,
                                 })?
                                 .components.iter()
                                 .map(|(s, _)| ::std::borrow::Cow::Borrowed(s.as_str()))
@@ -1146,26 +1551,26 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         };
                     });
                 }
-                let component_idx_owned: Option<usize> = attrs.component.map(|c| c as usize);
-                let value_expr_owned = if let Some(comp) = component_idx_owned {
+                let comp = &slot.component;
+                let value_expr_owned = if slot.has_component {
                     quote! { __seg.component_str(#idx, #comp) }
                 } else {
                     quote! { __seg.element_str(#idx) }
                 };
-                // Build the correct "missing required" error for the owned path.
-                let missing_required_err_owned = if let Some(comp) = component_idx_owned {
-                    quote! {
+                // Same variant selection as the borrowed path; the two must
+                // agree or the same input yields different error codes.
+                let names_component = &slot.names_component;
+                let missing_required_err_owned = quote! {
+                    if #names_component {
                         ::edifact_rs::EdifactError::MissingRequiredComponent {
                             tag: #seg_tag.to_owned(),
-                            element_index: #idx as usize,
-                            component_index: #comp as usize,
+                            element_index: #idx,
+                            component_index: #comp,
                         }
-                    }
-                } else {
-                    quote! {
+                    } else {
                         ::edifact_rs::EdifactError::MissingRequiredElement {
                             tag: #seg_tag.to_owned(),
-                            element_index: #idx as usize,
+                            element_index: #idx,
                         }
                     }
                 };
@@ -1225,7 +1630,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                             .filter(|__s| !__s.is_empty())
                             .ok_or_else(|| ::edifact_rs::EdifactError::MissingRequiredElement {
                                 tag: #seg_tag.to_owned(),
-                                element_index: #idx as usize,
+                                element_index: #idx,
                             })?
                             .to_owned();
                     }
@@ -1235,7 +1640,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                             .filter(|__s| !__s.is_empty())
                             .ok_or_else(|| ::edifact_rs::EdifactError::MissingRequiredElement {
                                 tag: #seg_tag.to_owned(),
-                                element_index: #idx as usize,
+                                element_index: #idx,
                             })?
                             .parse::<#ty>()
                             .map_err(|_| ::edifact_rs::EdifactError::InvalidText { offset: __seg.span.start })?;
@@ -1245,6 +1650,7 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .collect::<syn::Result<_>>()?;
 
         let owned_body = quote! {
+            #slot_prelude
             let __seg = #find_seg_owned
                 .ok_or_else(|| ::edifact_rs::EdifactError::MissingSegment {
                     tag: #seg_tag.to_owned(),
@@ -1479,13 +1885,17 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
 mod tests {
     /// Compile-fail / compile-pass suite for the derive macros.
     ///
-    /// The blessed `.stderr` files capture rustc's exact diagnostic rendering,
-    /// which changes between toolchain releases — so this suite is pinned to the
-    /// MSRV toolchain and skipped elsewhere.  Set `EDIFACT_UI_TESTS=1` to run it
-    /// (CI does so in the MSRV job; `scripts/check.sh` does so locally).
+    /// The blessed `.stderr` files hold only this crate's own diagnostics, so
+    /// they are stable across toolchains and CI runs the suite on both MSRV and
+    /// stable.  Keep it that way: an expectation that captures a *rustc*
+    /// warning or note will drift on the next release and drown real
+    /// regressions in noise.  If a UI case triggers an incidental lint, silence
+    /// it at the source (see `tests/ui/support.rs`) rather than blessing it.
     ///
-    /// Re-bless after intentional message changes with:
-    ///   `EDIFACT_UI_TESTS=1 TRYBUILD=overwrite cargo test -p edifact-rs-derive`
+    /// The suite is off by default because it is slow; set `EDIFACT_UI_TESTS=1`
+    /// to run it, or use `just ui` / `just ui-msrv`.
+    ///
+    /// Re-bless after intentional message changes with `just ui-bless`.
     #[test]
     fn trybuild_ui() {
         if std::env::var_os("EDIFACT_UI_TESTS").is_none() {

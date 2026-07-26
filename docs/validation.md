@@ -206,7 +206,7 @@ let report = ctx.validate_lenient(&segs);
 let report = ctx.validate_lenient(&segs);
 if !report.is_valid() {
     for issue in report.errors() {
-        eprintln!("error [{}]: {}", issue.error_code.unwrap_or("?"), issue.message);
+        eprintln!("error [{}]: {}", issue.error_code().unwrap_or("?"), issue.message);
     }
     for warn in report.warnings() {
         eprintln!("warn:  {}", warn.message);
@@ -218,7 +218,7 @@ match ctx.validate_strict(&segs) {
     Ok(report) => println!("valid, {} warnings", report.warnings().len()),
     Err(report) => {
         for issue in report.errors() {
-            eprintln!("error [{}]: {}", issue.error_code.unwrap_or("?"), issue.message);
+            eprintln!("error [{}]: {}", issue.error_code().unwrap_or("?"), issue.message);
         }
     }
 }
@@ -264,7 +264,7 @@ Within a `Validator` or `ProfileRulePack` rule, construct `ValidationIssue` with
 builder API:
 
 ```rust
-use edifact_rs::{ValidationIssue, ValidationSeverity};
+use edifact_rs::{Span, ValidationIssue, ValidationSeverity};
 
 let issue = ValidationIssue::new(
     ValidationSeverity::Error,
@@ -275,7 +275,7 @@ let issue = ValidationIssue::new(
 .with_element_index(0)                  // which element
 .with_error_code("E007")                // EDIFACT or application error code
 .with_suggestion("Use code 220, 231, or 261")
-.with_offset(42);                       // byte offset in the interchange
+.with_span(Span::new(42, 60));          // byte range of the offending region
 ```
 
 | Builder method | Type | Purpose |
@@ -283,9 +283,9 @@ let issue = ValidationIssue::new(
 | `.with_rule_id(id)` | `&str` | Stable ID for filtering and mapping |
 | `.with_segment(tag)` | `&str` | Segment tag where the issue was found |
 | `.with_element_index(n)` | `usize` | Element index (0-based) |
-| `.with_error_code(code)` | `&str` | Stable error code string (e.g. `"E007"`) |
+| `.with_error_code(code)` | `impl Into<Cow<'static, str>>` | Stable error code string (e.g. `"E007"`); a `&'static str` costs no allocation, and the field round-trips through `serde` |
 | `.with_suggestion(text)` | `&str` | Human-friendly remediation hint |
-| `.with_offset(n)` | `usize` | Byte offset of the issue in the input |
+| `.with_span(span)` | `Span` | Byte range of the issue in the input — the only positional field; read `issue.span.map(\|s\| s.start)` or `issue.start_offset()` for the start alone |
 | `.with_segment_occurrence(n)` | `u16` | Zero-based occurrence among segments with the same tag |
 | `.with_segment_group(name)` | `impl Into<String>` | Name of the segment group instance (e.g. `"SG5"`) — set automatically by group-scoped rules |
 | `.with_message_ref(r)` | `impl Into<String>` | `UNH` reference (DE 0062) — usually set automatically via `ValidationContextBuilder::with_message_ref` |
@@ -317,7 +317,7 @@ assert_eq!(pid, Some("13001"));
 For arbitrary domain metadata use `with_context_entry` instead:
 
 ```rust
-use edifact_rs::{ValidationIssue, ValidationSeverity};
+use edifact_rs::{Span, ValidationIssue, ValidationSeverity};
 
 let issue = ValidationIssue::new(ValidationSeverity::Error, "BGM code invalid")
     .with_rule_id("AHB-13001-BGM-M")
@@ -517,14 +517,78 @@ let validator = DirectoryValidatorBuilder::new("CUSTOM-D96A")
     .build();
 ```
 
+Declaring a composite's components with `ElementRef::composite` (or
+`OwnedElementRef::with_components`) does three things: it activates the
+mandatory-**component** check, it caps the composite's arity (more components
+than the directory declares is `E013`; fewer is normal, since conditional
+components may be omitted), and it makes the composite's contents reachable by
+identifier — see below. Definitions that declare no components behave exactly as
+before, so this is inert for any directory table that has not opted in.
+
+An `expected_components` hook, when set, still wins for that element: it is an
+exact count, whereas declared components are an upper bound.
+
 > **Scope note**: `DirectoryValidator` validates element presence and length within
 > individual segments. It does not enforce full EDIFACT message grammar (conditional
 > segment groups, repeat counts). Use `ProfileRulePack` for those cross-segment rules.
 
 ---
 
+## Code-addressed element access
+
+Positional accessors (`seg.element_str(4)`, `seg.component_str(1, 2)`) address
+data by index. A transposed index reads the wrong data element and still
+validates clean — silently. Given a `SegmentLayout` — implemented by both
+`SegmentDefinition` (compile-time tables) and `OwnedSegmentDef` (runtime-loaded
+definitions) — the same data can be addressed by its UN/EDIFACT identifier
+instead, and a wrong reference becomes a directory lookup error:
+
+```rust
+use edifact_rs::{ComponentRef, ElementRef, SegmentDefinition, Status, from_bytes};
+
+static C082: &[ComponentRef] = &[
+    ComponentRef::new(1, "3039", Status::Mandatory),
+    ComponentRef::new(2, "1131", Status::Conditional),
+    ComponentRef::new(3, "3055", Status::Conditional),
+];
+static NAD_ELEMENTS: &[ElementRef] = &[
+    ElementRef::new(1, "3035", Status::Mandatory, 1),
+    ElementRef::composite(2, "C082", Status::Conditional, 1, C082),
+];
+static NAD: SegmentDefinition =
+    SegmentDefinition::new("NAD", "Name and address", NAD_ELEMENTS);
+
+let segments: Vec<_> = from_bytes(b"NAD+MS+9900112233445::293'").collect::<Result<Vec<_>, _>>()?;
+let nad = &segments[0];
+
+assert_eq!(nad.value_by_code(&NAD, "3039")?, Some("9900112233445"));
+assert_eq!(nad.value_by_code(&NAD, "3055")?, Some("293"));
+
+// DE 2380 belongs to DTM, not NAD — an error, not a wrong-but-quiet read.
+assert!(nad.value_by_code(&NAD, "2380").is_err());
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+| Method | On | Returns |
+|---|---|---|
+| `value_by_code(layout, de)` | `Segment`, `BorrowedSegment`, `OwnedSegment` | `Result<Option<&str>, EdifactError>` |
+| `span_by_code(layout, de)` | `Segment`, `BorrowedSegment`, `OwnedSegment` | `Result<Option<Span>, EdifactError>` — attach to a `ValidationIssue` with `with_span` |
+| `element_by_code(layout, de)` | `Segment`, `BorrowedSegment`, `OwnedSegment` | `Result<Option<Element>, EdifactError>` — the enclosing composite when `de` names a component |
+| `SegmentLayout::resolve_code(de)` | `SegmentDefinition`, `OwnedSegmentDef` | `Result<ElementPath, EdifactError>` — resolve once, then read many segments with `value_at` / `span_at` |
+
+Three distinct failures are reported rather than silently tolerated:
+`UnknownDataElement` (`E033`), `AmbiguousDataElement` (`E034`) when a directory
+repeats a code, and `SegmentLayoutMismatch` (`E035`) when a layout is applied to
+a segment with a different tag.
+
+The derive has the same addressing under `#[edifact(layout = ...)]`, where
+resolution happens at compile time — see
+[Typed Derive](typed-derive.md#element--3055--data-element-identifier).
+
+---
+
 ## Next steps
 
 - [Profile Packs](profile-packs.md) — composable business-rule bundles
-- [Error Reference](error-reference.md) — stable codes for `ValidationIssue.error_code`
+- [Error Reference](error-reference.md) — stable codes for `ValidationIssue::error_code`
 - [Diagnostics](diagnostics.md) — human-readable error rendering

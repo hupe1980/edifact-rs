@@ -13,7 +13,7 @@ pub mod pack;
 pub use context::{ValidationContext, ValidationContextBuilder};
 pub use pack::{ProfileRule, ProfileRulePack};
 
-use crate::{EdifactError, Segment, ValidationIssue, ValidationReport, ValidationSeverity};
+use crate::{EdifactError, Segment, Span, ValidationIssue, ValidationReport, ValidationSeverity};
 use std::any::Any;
 
 /// Typed context injected into profile rule closures at validation time.
@@ -246,34 +246,34 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
     let default_hint = err.recovery_hint();
 
     match err {
-        EdifactError::InvalidSegmentForMessage { tag, offset, .. } => {
-            issue = issue.with_segment(tag).with_offset(offset);
+        EdifactError::InvalidSegmentForMessage { tag, span, .. } => {
+            issue = issue.with_segment(tag).with_span(span);
         }
-        EdifactError::InvalidElementCount { tag, offset, .. } => {
-            issue = issue.with_segment(tag).with_offset(offset);
+        EdifactError::InvalidElementCount { tag, span, .. } => {
+            issue = issue.with_segment(tag).with_span(span);
         }
         EdifactError::InvalidComponentCount {
             tag,
             element_index,
-            offset,
+            span,
             ..
         } => {
             issue = issue
                 .with_segment(tag)
                 .with_element_index(u8::try_from(element_index).unwrap_or(u8::MAX))
-                .with_offset(offset);
+                .with_span(span);
         }
         EdifactError::InvalidCodeValue {
             tag,
             element_index,
-            offset,
+            span,
             suggestion,
             ..
         } => {
             issue = issue
                 .with_segment(tag)
                 .with_element_index(u8::try_from(element_index).unwrap_or(u8::MAX))
-                .with_offset(offset);
+                .with_span(span);
             if let Some(s) = suggestion {
                 issue = issue.with_suggestion(s);
             }
@@ -281,22 +281,25 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
         EdifactError::MissingSegment { tag, .. } => {
             issue = issue.with_segment(tag);
         }
-        EdifactError::QualifierMismatch { tag, offset, .. } => {
+        EdifactError::QualifierMismatch { tag, span, .. } => {
             issue = issue
                 .with_segment(tag)
                 .with_element_index(0)
-                .with_offset(offset);
+                .with_span(span);
         }
         EdifactError::ConditionalRequirementNotMet {
             tag,
             element_index,
-            offset,
+            span,
             ..
         } => {
             issue = issue
                 .with_segment(tag)
                 .with_element_index(u8::try_from(element_index).unwrap_or(u8::MAX))
-                .with_offset(offset);
+                .with_span(span);
+        }
+        EdifactError::DuplicateReference { tag, span, .. } => {
+            issue = issue.with_segment(tag).with_span(span);
         }
         EdifactError::MissingRequiredElement { tag, element_index } => {
             issue = issue.with_segment(tag);
@@ -317,12 +320,15 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
                 issue = issue.with_component_index(ci);
             }
         }
+        // Lexical faults are a point in the byte stream, not a range: record a
+        // zero-width span so `span` stays the single positional field.
         EdifactError::InvalidReleaseSequence { offset }
         | EdifactError::InvalidDelimiter { offset, .. }
         | EdifactError::InvalidText { offset }
         | EdifactError::UnexpectedEof { offset }
-        | EdifactError::UnexpectedDataToken { offset } => {
-            issue = issue.with_offset(offset);
+        | EdifactError::UnexpectedDataToken { offset }
+        | EdifactError::SegmentTooLong { offset, .. } => {
+            issue = issue.with_span(Span::new(offset, offset));
         }
         _ => {}
     }
@@ -408,7 +414,7 @@ mod tests {
                     return Err(EdifactError::InvalidSegmentForMessage {
                         tag: "BGM".to_owned(),
                         message_type: "TEST".to_owned(),
-                        offset: segment.tag_span.start,
+                        span: segment.tag_span,
                     });
                 }
                 Ok(())
@@ -430,7 +436,7 @@ mod tests {
                         element_index: 0,
                         value: "XXX".to_owned(),
                         code_list: "1001".to_owned(),
-                        offset: segment.span.start,
+                        span: segment.span,
                         suggestion: None,
                     });
                 }
@@ -511,7 +517,7 @@ mod tests {
             .as_deref()
             .expect("expected default hint to be set");
         assert!(hint.contains("Release character"));
-        assert_eq!(issue.error_code, Some("E019"));
+        assert_eq!(issue.error_code(), Some("E019"));
     }
 
     #[test]
@@ -527,7 +533,7 @@ mod tests {
         );
 
         let issue = report.errors().first().expect("expected one issue");
-        assert_eq!(issue.error_code, Some("E021"));
+        assert_eq!(issue.error_code(), Some("E021"));
         assert_eq!(issue.segment_tag.as_deref(), Some("BGM"));
         assert_eq!(issue.element_index, Some(2));
         assert_eq!(issue.component_index, Some(1));

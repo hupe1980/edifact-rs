@@ -17,15 +17,15 @@ fn snapshot_profile_orders_demo_report_contract() {
 
     let mut report = ctx.validate_lenient(&segments);
 
-    // Freeze snapshot content across parser span-offset changes.
+    // Freeze snapshot content across parser span changes.
     for issue in report.errors_mut() {
-        issue.offset = None;
+        issue.span = None;
     }
     for issue in report.warnings_mut() {
-        issue.offset = None;
+        issue.span = None;
     }
     for issue in report.infos_mut() {
-        issue.offset = None;
+        issue.span = None;
     }
 
     let rendered = report.render_deterministic();

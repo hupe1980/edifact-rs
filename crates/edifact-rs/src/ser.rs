@@ -221,6 +221,105 @@ impl<T: std::fmt::Display> EdifactSerialize for DecimalFloatDisplay<T> {
     }
 }
 
+/// Emit one segment from `(element_index, component_index, value)` triples.
+///
+/// Values may arrive in any order and need not cover every slot: the triples
+/// are sorted, gaps are filled with empty elements and components, and the
+/// result is a single well-formed segment.
+///
+/// This exists because a derive that addresses fields by UN/EDIFACT data element
+/// identifier (`#[edifact(element = "3055")]`) only learns the numeric slots
+/// during *const evaluation*, after the macro has already expanded — so it
+/// cannot lay out the emit order at expansion time the way a positional derive
+/// can.  Handing the resolved slots to this function moves the ordering to
+/// runtime, where they are known.
+///
+/// `parts` is taken by mutable reference because it is sorted in place; the
+/// caller keeps the allocation.
+///
+/// If two triples claim the same slot the **first** one wins and the rest are
+/// dropped — emitting both would shift every following component by one and
+/// silently corrupt the segment's positions. (The derive cannot produce a
+/// duplicate: it rejects colliding slots at compile time.)
+///
+/// # Example
+///
+/// ```rust
+/// use edifact_rs::{VecEmitter, emit_sparse_segment};
+/// use std::borrow::Cow;
+///
+/// let mut parts = vec![
+///     (1, 2, Cow::Borrowed("293")),
+///     (0, 0, Cow::Borrowed("MS")),
+///     (1, 0, Cow::Borrowed("9900112233445")),
+/// ];
+/// let mut emitter = VecEmitter::default();
+/// emit_sparse_segment(&mut emitter, "NAD", &mut parts)?;
+/// // Slot (1, 1) was never supplied, so it is emitted as an empty component:
+/// // NAD+MS+9900112233445::293'
+/// assert_eq!(emitter.events.len(), 6);
+/// # Ok::<(), edifact_rs::EdifactError>(())
+/// ```
+///
+/// # Errors
+///
+/// Propagates any error returned by the emitter.
+pub fn emit_sparse_segment<E: EventEmitter>(
+    emitter: &mut E,
+    tag: &str,
+    parts: &mut [(usize, usize, std::borrow::Cow<'_, str>)],
+) -> Result<(), EdifactError> {
+    parts.sort_by_key(|(element, component, _)| (*element, *component));
+
+    emitter.emit(EdifactEvent::StartSegment { tag })?;
+
+    // `parts` is sorted, so the last entry carries the highest element index and
+    // one linear walk covers every slot.
+    let mut cursor = 0usize;
+    let element_count = parts.last().map_or(0, |(element, _, _)| *element + 1);
+    for element in 0..element_count {
+        // Component 0 opens the element; every later component extends it.
+        let mut next_component = 0usize;
+        let mut opened = false;
+        while cursor < parts.len() && parts[cursor].0 == element {
+            let (_, component, value) = &parts[cursor];
+            if *component < next_component {
+                // A slot already emitted: first value wins.  Emitting this one
+                // too would push every later component one position right.
+                cursor += 1;
+                continue;
+            }
+            // Fill any skipped component slots so positions stay meaningful.
+            while next_component < *component {
+                let event = if opened {
+                    EdifactEvent::ComponentElement { value: "" }
+                } else {
+                    EdifactEvent::Element { value: "" }
+                };
+                emitter.emit(event)?;
+                opened = true;
+                next_component += 1;
+            }
+            let event = if opened {
+                EdifactEvent::ComponentElement { value }
+            } else {
+                EdifactEvent::Element { value }
+            };
+            emitter.emit(event)?;
+            opened = true;
+            next_component += 1;
+            cursor += 1;
+        }
+        if !opened {
+            // No value for this element at all — emit an empty placeholder so
+            // the following elements keep their positions.
+            emitter.emit(EdifactEvent::Element { value: "" })?;
+        }
+    }
+
+    emitter.emit(EdifactEvent::EndSegment)
+}
+
 /// Serialize `value` to the given [`Write`] implementation.
 pub fn to_writer<T, W>(inner: W, value: &T) -> Result<(), EdifactError>
 where
@@ -256,6 +355,49 @@ pub fn to_edifact_string<T: EdifactSerialize>(value: &T) -> Result<String, Edifa
 mod tests {
     use super::*;
     use crate::event::{OwnedEdifactEvent, VecEmitter};
+    use std::borrow::Cow;
+
+    /// Render a sparse-emit result to wire bytes, which is what the shape of
+    /// the event stream actually has to produce.
+    fn sparse_to_wire(parts: &mut [(usize, usize, Cow<'_, str>)], tag: &str) -> String {
+        let mut buf = Vec::new();
+        {
+            let mut emitter = crate::WriterEmitter::new(&mut buf);
+            emit_sparse_segment(&mut emitter, tag, parts).expect("emit");
+            emitter.finish().expect("finish");
+        }
+        String::from_utf8(buf).expect("utf-8")
+    }
+
+    #[test]
+    fn emit_sparse_segment_fills_gaps_in_elements_and_components() {
+        let mut parts = vec![
+            (1, 2, Cow::Borrowed("293")),
+            (0, 0, Cow::Borrowed("MS")),
+            (3, 1, Cow::Borrowed("late")),
+        ];
+        // Element 2 is absent entirely, element 3 skips component 0, and
+        // element 1 skips component 1 — every gap holds its position.
+        assert_eq!(sparse_to_wire(&mut parts, "NAD"), "NAD+MS+::293++:late'");
+    }
+
+    #[test]
+    fn emit_sparse_segment_first_value_wins_on_a_duplicate_slot() {
+        // Emitting both would push `293` from component 2 to component 3 and
+        // silently corrupt every later position.
+        let mut parts = vec![
+            (0, 0, Cow::Borrowed("MS")),
+            (1, 0, Cow::Borrowed("first")),
+            (1, 0, Cow::Borrowed("second")),
+            (1, 2, Cow::Borrowed("293")),
+        ];
+        assert_eq!(sparse_to_wire(&mut parts, "NAD"), "NAD+MS+first::293'");
+    }
+
+    #[test]
+    fn emit_sparse_segment_with_no_parts_writes_a_bare_tag() {
+        assert_eq!(sparse_to_wire(&mut [], "UNS"), "UNS'");
+    }
 
     struct BgmSegment {
         doc_name_code: String,

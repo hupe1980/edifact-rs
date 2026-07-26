@@ -2,6 +2,7 @@
 //!
 //! These types are also re-exported from the crate root.
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::model::Span;
@@ -108,29 +109,31 @@ impl std::fmt::Display for ValidationSeverity {
 pub struct ValidationIssue {
     /// Stable error code, if known.
     ///
-    /// Not preserved across serialization round-trips: deserialized issues
-    /// always have `error_code = None` because error codes are compile-time
-    /// library constants, not external data.
-    #[cfg_attr(feature = "serde", serde(skip_deserializing, default))]
-    pub error_code: Option<&'static str>,
+    /// Library-produced codes are `&'static str` constants (`"E014"`, …), so the
+    /// [`Cow`] borrows and costs nothing to construct.  Callers may also supply
+    /// an owned code from an external rule catalogue.  Either way the field
+    /// **round-trips through serialization**: a report persisted to an audit
+    /// store and read back can still be filtered and routed on `error_code`.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub error_code: Option<Cow<'static, str>>,
     /// The severity of this issue.
     pub severity: ValidationSeverity,
     /// The error or warning message.
     pub message: String,
-    /// Byte offset in the source (if available).
+    /// Half-open byte range of the relevant segment, element, or component.
     ///
-    /// For precise source-range highlighting (e.g. in `miette` diagnostics or
-    /// Language Server Protocol `Range` values), prefer [`span`](Self::span)
-    /// which carries both start and end.  `offset` is kept for backwards
-    /// compatibility and is always equal to `span.start` when both are set.
-    pub offset: Option<usize>,
-    /// Half-open byte range of the relevant segment or element in the source.
+    /// The single source of byte position for an issue — read `span.start` when
+    /// only the start offset is needed.  Set it with [`with_span`](Self::with_span)
+    /// from a [`Span`] carried by a parsed [`crate::Segment`], `Element`, or
+    /// component, which is what gives `miette` diagnostics and Language Server
+    /// Protocol `Range` values their precision.
     ///
-    /// Provides precise source-range information for diagnostics and editor
-    /// tooling.  Use [`with_span`](Self::with_span) to set this from a
-    /// [`Span`] obtained from a parsed [`crate::Segment`].  Setting `span`
-    /// automatically populates `offset` with `span.start` for backwards
-    /// compatibility.
+    /// Issues derived from a purely lexical fault (a dangling release character,
+    /// unexpected end of input) carry a zero-width span at the offending byte:
+    /// there is no meaningful end position for a point diagnostic.
     pub span: Option<Span>,
     /// Segment tag involved (if known).
     pub segment_tag: Option<String>,
@@ -208,7 +211,6 @@ impl ValidationIssue {
             error_code: None,
             severity,
             message: message.into(),
-            offset: None,
             span: None,
             segment_tag: None,
             rule_id: None,
@@ -223,26 +225,33 @@ impl ValidationIssue {
     }
 
     /// Set stable error code metadata.
-    pub fn with_error_code(mut self, code: &'static str) -> Self {
-        self.error_code = Some(code);
+    ///
+    /// Accepts both a `&'static str` library constant (no allocation) and an
+    /// owned `String` from an external rule catalogue.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use edifact_rs::{ValidationIssue, ValidationSeverity};
+    /// let from_const = ValidationIssue::new(ValidationSeverity::Error, "bad code")
+    ///     .with_error_code("E014");
+    /// let from_owned = ValidationIssue::new(ValidationSeverity::Error, "bad code")
+    ///     .with_error_code(format!("AHB-{}", 13001));
+    /// assert_eq!(from_const.error_code(), Some("E014"));
+    /// assert_eq!(from_owned.error_code(), Some("AHB-13001"));
+    /// ```
+    pub fn with_error_code(mut self, code: impl Into<Cow<'static, str>>) -> Self {
+        self.error_code = Some(code.into());
         self
     }
 
-    /// Set the byte offset for this issue.
-    pub fn with_offset(mut self, offset: usize) -> Self {
-        self.offset = Some(offset);
-        self
-    }
-
-    /// Set the full byte-range span for this issue.
+    /// Set the byte-range span for this issue.
     ///
-    /// Also populates [`offset`](Self::offset) with `span.start` so that
-    /// existing code that only reads `offset` continues to work.
-    ///
-    /// Use this in preference to `with_offset` when you have access to the
-    /// source [`Span`] from a parsed [`crate::Segment`] — the full range
-    /// enables precise source-range highlighting in `miette` diagnostics and
-    /// Language Server Protocol tooling.
+    /// [`span`](Self::span) is the only positional field on a
+    /// `ValidationIssue`; read `issue.span.map(|s| s.start)` when you need the
+    /// start offset alone.  Prefer the narrowest span you have — a component
+    /// span over an element span over a segment span — since that is what
+    /// diagnostics underline.
     ///
     /// # Example
     ///
@@ -251,11 +260,10 @@ impl ValidationIssue {
     /// let span = Span::new(42, 57);
     /// let issue = ValidationIssue::new(ValidationSeverity::Error, "BGM code missing")
     ///     .with_span(span);
-    /// assert_eq!(issue.offset, Some(42));
     /// assert_eq!(issue.span, Some(span));
+    /// assert_eq!(issue.span.map(|s| s.start), Some(42));
     /// ```
     pub fn with_span(mut self, span: Span) -> Self {
-        self.offset = Some(span.start);
         self.span = Some(span);
         self
     }
@@ -405,15 +413,8 @@ impl ValidationIssue {
     /// Stable error code, if available.
     #[must_use]
     #[inline]
-    pub fn error_code(&self) -> Option<&'static str> {
-        self.error_code
-    }
-
-    /// Byte offset in the source, if available.
-    #[must_use]
-    #[inline]
-    pub fn offset(&self) -> Option<usize> {
-        self.offset
+    pub fn error_code(&self) -> Option<&str> {
+        self.error_code.as_deref()
     }
 
     /// Half-open byte range of the relevant source region, if available.
@@ -421,6 +422,15 @@ impl ValidationIssue {
     #[inline]
     pub fn span(&self) -> Option<Span> {
         self.span
+    }
+
+    /// Start byte offset of [`span`](Self::span), if available.
+    ///
+    /// Convenience for consumers that only need a position, not a range.
+    #[must_use]
+    #[inline]
+    pub fn start_offset(&self) -> Option<usize> {
+        self.span.map(|s| s.start)
     }
 
     /// Segment tag involved in this issue, if known.
@@ -771,9 +781,9 @@ impl ValidationReport {
         fn sorted_refs(issues: &[ValidationIssue]) -> Vec<&ValidationIssue> {
             let mut refs: Vec<&ValidationIssue> = issues.iter().collect();
             refs.sort_by(|left, right| {
-                left.offset
+                left.start_offset()
                     .unwrap_or(usize::MAX)
-                    .cmp(&right.offset.unwrap_or(usize::MAX))
+                    .cmp(&right.start_offset().unwrap_or(usize::MAX))
                     .then_with(|| {
                         left.segment_tag
                             .as_deref()
@@ -797,9 +807,9 @@ impl ValidationReport {
                             .cmp(&right.component_index.unwrap_or(u8::MAX))
                     })
                     .then_with(|| {
-                        left.error_code
+                        left.error_code()
                             .unwrap_or("")
-                            .cmp(right.error_code.unwrap_or(""))
+                            .cmp(right.error_code().unwrap_or(""))
                     })
                     .then_with(|| left.message.cmp(&right.message))
             });
@@ -810,7 +820,7 @@ impl ValidationReport {
             use std::fmt::Write as _;
             out.push_str("    - ");
             out.push_str(&issue.message);
-            if let Some(code) = issue.error_code {
+            if let Some(code) = issue.error_code() {
                 out.push_str(" [");
                 out.push_str(code);
                 out.push(']');
@@ -831,8 +841,8 @@ impl ValidationReport {
             if let Some(component_index) = issue.component_index {
                 write!(out, " [component={component_index}]").ok();
             }
-            if let Some(offset) = issue.offset {
-                write!(out, " [offset={offset}]").ok();
+            if let Some(span) = issue.span {
+                write!(out, " [span={span}]").ok();
             }
             if let Some(suggestion) = &issue.suggestion {
                 out.push_str(" [hint=");
@@ -964,7 +974,7 @@ mod tests {
         report.add_error(
             ValidationIssue::new(ValidationSeverity::Error, "Test error")
                 .with_segment("BGM")
-                .with_offset(42),
+                .with_span(Span::new(42, 57)),
         );
         report.add_warning(ValidationIssue::new(
             ValidationSeverity::Warning,
@@ -1002,16 +1012,17 @@ mod tests {
     fn issue_builder_chain() {
         let issue = ValidationIssue::new(ValidationSeverity::Warning, "test message")
             .with_error_code("E013")
-            .with_offset(100)
+            .with_span(Span::new(100, 118))
             .with_segment("NAD")
             .with_rule_id("DEMO-P001")
             .with_element_index(1)
             .with_component_index(2)
             .with_suggestion("Check element count");
 
-        assert_eq!(issue.error_code, Some("E013"));
+        assert_eq!(issue.error_code(), Some("E013"));
         assert_eq!(issue.message, "test message");
-        assert_eq!(issue.offset, Some(100));
+        assert_eq!(issue.span, Some(Span::new(100, 118)));
+        assert_eq!(issue.start_offset(), Some(100));
         assert_eq!(issue.segment_tag, Some("NAD".to_owned()));
         assert_eq!(issue.rule_id, Some("DEMO-P001".to_owned()));
         assert_eq!(issue.element_index, Some(1));
@@ -1025,7 +1036,7 @@ mod tests {
         report.add_error(
             ValidationIssue::new(ValidationSeverity::Error, "Error 1")
                 .with_error_code("E011")
-                .with_offset(8),
+                .with_span(Span::new(8, 20)),
         );
         report.add_warning(ValidationIssue::new(
             ValidationSeverity::Warning,
@@ -1041,23 +1052,40 @@ mod tests {
     }
 
     #[test]
-    fn render_deterministic_sorts_by_offset() {
+    fn render_deterministic_sorts_by_span_start() {
         let mut report = ValidationReport::default();
         report.add_error(
             ValidationIssue::new(ValidationSeverity::Error, "later")
                 .with_segment("BGM")
-                .with_offset(20),
+                .with_span(Span::new(20, 30)),
         );
         report.add_error(
             ValidationIssue::new(ValidationSeverity::Error, "earlier")
                 .with_segment("UNH")
-                .with_offset(1),
+                .with_span(Span::new(1, 19)),
         );
 
         let rendered = report.render_deterministic();
         let first = rendered.find("earlier").expect("missing first issue");
         let second = rendered.find("later").expect("missing second issue");
-        assert!(first < second, "expected deterministic sort by offset");
+        assert!(first < second, "expected deterministic sort by span start");
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn error_code_survives_a_serde_round_trip() {
+        // A persisted report that loses its codes cannot be filtered or routed
+        // on them after reload — the reason the field is owned on the wire.
+        let issue = ValidationIssue::new(ValidationSeverity::Error, "BGM code invalid")
+            .with_error_code("E014")
+            .with_span(Span::new(9, 22))
+            .with_rule_id("AHB-13001-BGM-M");
+        let json = serde_json::to_string(&issue).expect("serialize");
+        let back: ValidationIssue = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(back.error_code(), Some("E014"));
+        assert_eq!(back.span, Some(Span::new(9, 22)));
+        assert_eq!(back, issue);
     }
 
     #[test]

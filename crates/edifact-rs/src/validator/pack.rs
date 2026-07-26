@@ -335,7 +335,7 @@ impl ProfileRulePack {
                         ValidationSeverity::Error,
                         format!("segment {tag} must not appear"),
                     )
-                    .with_offset(s.span.start)
+                    .with_span(s.span)
                     .with_segment(tag)
                     .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
                     .with_rule_id(id.as_ref()),
@@ -535,7 +535,7 @@ impl ProfileRulePack {
                         ValidationSeverity::Error,
                         format!("segment {tag} must not appear in group {scope_msg}"),
                     )
-                    .with_offset(s.span.start)
+                    .with_span(s.span)
                     .with_segment(tag)
                     .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
                     .with_rule_id(id.as_ref()),

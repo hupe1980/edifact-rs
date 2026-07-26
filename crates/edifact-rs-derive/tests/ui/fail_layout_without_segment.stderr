@@ -1,0 +1,5 @@
+error: #[edifact(layout = ...)] requires #[edifact(segment = ...)]: a layout describes one segment
+  --> tests/ui/fail_layout_without_segment.rs:15:11
+   |
+15 | #[edifact(layout = SOME_LAYOUT)]
+   |           ^^^^^^

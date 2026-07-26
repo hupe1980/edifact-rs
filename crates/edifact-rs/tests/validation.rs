@@ -27,7 +27,7 @@ impl Validator for SimpleStructureValidator {
                 return Err(EdifactError::InvalidSegmentForMessage {
                     tag: segment.tag.to_owned(),
                     message_type: "GENERIC".to_owned(),
-                    offset: segment.span.start,
+                    span: segment.span,
                 });
             }
             Ok(())
@@ -105,7 +105,7 @@ fn context_can_disable_code_list_layer() {
                         element_index: 0,
                         value: "E3".to_owned(),
                         code_list: "1001".to_owned(),
-                        offset: segment.span.start,
+                        span: segment.span,
                         suggestion: None,
                     });
                 }
@@ -147,7 +147,7 @@ fn validation_context_supports_multiple_validators() {
                     return Err(EdifactError::InvalidSegmentForMessage {
                         tag: segment.tag.to_owned(),
                         message_type: "GENERIC".to_owned(),
-                        offset: segment.span.start,
+                        span: segment.span,
                     });
                 }
                 Ok(())

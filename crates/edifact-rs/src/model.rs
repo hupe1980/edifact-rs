@@ -1,5 +1,26 @@
+use crate::directory_validator::{ElementPath, SegmentLayout};
+use crate::error::EdifactError;
 use smallvec::SmallVec;
 use std::borrow::Cow;
+
+/// Reject a layout whose tag does not describe `segment_tag`.
+///
+/// Resolving `"3055"` against the wrong definition would silently address a
+/// different element — the exact failure mode code-addressed access exists to
+/// eliminate — so the mismatch is an error rather than a lookup miss.
+#[inline]
+fn check_layout_tag<L: SegmentLayout + ?Sized>(
+    layout: &L,
+    segment_tag: &str,
+) -> Result<(), EdifactError> {
+    if layout.layout_tag() != segment_tag {
+        return Err(EdifactError::SegmentLayoutMismatch {
+            expected: layout.layout_tag().to_owned(),
+            actual: segment_tag.to_owned(),
+        });
+    }
+    Ok(())
+}
 
 /// A half-open byte span within an EDIFACT payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -108,6 +129,124 @@ impl<'a> Segment<'a> {
     #[inline]
     pub fn element_span(&self, n: usize) -> Option<Span> {
         Some(self.elements.get(n)?.span)
+    }
+
+    // ── code-addressed access ─────────────────────────────────────────────────
+
+    /// Read the value at an already-resolved [`ElementPath`].
+    ///
+    /// Use this when the same path is reused across many segments — resolve once
+    /// with [`SegmentLayout::resolve_code`], then read without repeating the
+    /// lookup.
+    #[inline]
+    pub fn value_at(&self, path: ElementPath) -> Option<&str> {
+        self.elements
+            .get(path.element)?
+            .get_component(path.component_index())
+    }
+
+    /// Byte span of the value at an already-resolved [`ElementPath`].
+    #[inline]
+    pub fn span_at(&self, path: ElementPath) -> Option<Span> {
+        let element = self.elements.get(path.element)?;
+        match path.component {
+            Some(c) => element.component_span(c),
+            None => Some(element.span),
+        }
+    }
+
+    /// Read a value by its UN/EDIFACT data element identifier.
+    ///
+    /// Positional access (`seg.element_str(4)`) fails silently when the index is
+    /// wrong: it reads a different, usually still-plausible value.  Code-addressed
+    /// access cannot — a stale or mistyped identifier is a
+    /// [`EdifactError::UnknownDataElement`], checked against the directory.
+    ///
+    /// `Ok(None)` means the identifier is valid for this segment but the value is
+    /// absent from *this* instance, which is the normal state for a conditional
+    /// element.
+    ///
+    /// # Performance
+    ///
+    /// Each call scans the layout for the identifier. That is a handful of short
+    /// string comparisons and fine for one-off reads, but when pulling the same
+    /// identifier out of many segments, resolve once with
+    /// [`SegmentLayout::resolve_code`] and read with [`value_at`](Self::value_at).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use edifact_rs::{ComponentRef, ElementRef, SegmentDefinition, Status};
+    ///
+    /// static C507: &[ComponentRef] = &[
+    ///     ComponentRef::new(1, "2005", Status::Mandatory),
+    ///     ComponentRef::new(2, "2380", Status::Conditional),
+    ///     ComponentRef::new(3, "2379", Status::Conditional),
+    /// ];
+    /// static DTM_ELEMENTS: &[ElementRef] =
+    ///     &[ElementRef::composite(1, "C507", Status::Mandatory, 1, C507)];
+    /// static DTM: SegmentDefinition =
+    ///     SegmentDefinition::new("DTM", "Date/time/period", DTM_ELEMENTS);
+    ///
+    /// let segments: Vec<_> = edifact_rs::from_bytes(b"DTM+137:20260101:102'")
+    ///     .collect::<Result<Vec<_>, _>>()?;
+    /// let dtm = &segments[0];
+    ///
+    /// assert_eq!(dtm.value_by_code(&DTM, "2380")?, Some("20260101"));
+    /// // A data element that this segment does not define is a hard error,
+    /// // not a wrong-but-quiet read.
+    /// assert!(dtm.value_by_code(&DTM, "3055").is_err());
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError::SegmentLayoutMismatch`] when `layout` describes a
+    /// different segment tag, [`EdifactError::UnknownDataElement`] when the
+    /// identifier is not in the definition, and
+    /// [`EdifactError::AmbiguousDataElement`] when it appears more than once.
+    pub fn value_by_code<L: SegmentLayout + ?Sized>(
+        &self,
+        layout: &L,
+        data_element: &str,
+    ) -> Result<Option<&str>, EdifactError> {
+        check_layout_tag(layout, self.tag)?;
+        Ok(self.value_at(layout.resolve_code(data_element)?))
+    }
+
+    /// Byte span of a value addressed by its UN/EDIFACT data element identifier.
+    ///
+    /// Use this to attach a precise [`Span`] to a
+    /// [`ValidationIssue`][crate::ValidationIssue] without hand-counting indices.
+    ///
+    /// # Errors
+    ///
+    /// As [`value_by_code`][Self::value_by_code].
+    pub fn span_by_code<L: SegmentLayout + ?Sized>(
+        &self,
+        layout: &L,
+        data_element: &str,
+    ) -> Result<Option<Span>, EdifactError> {
+        check_layout_tag(layout, self.tag)?;
+        Ok(self.span_at(layout.resolve_code(data_element)?))
+    }
+
+    /// Return the whole [`Element`] addressed by a data element identifier.
+    ///
+    /// When the identifier names a component inside a composite, the enclosing
+    /// composite element is returned.
+    ///
+    /// # Errors
+    ///
+    /// As [`value_by_code`][Self::value_by_code].
+    pub fn element_by_code<L: SegmentLayout + ?Sized>(
+        &self,
+        layout: &L,
+        data_element: &str,
+    ) -> Result<Option<&Element<'a>>, EdifactError> {
+        check_layout_tag(layout, self.tag)?;
+        let path = layout.resolve_code(data_element)?;
+        Ok(self.elements.get(path.element))
     }
 }
 
@@ -380,6 +519,77 @@ impl<'a> BorrowedSegment<'a> {
     pub fn elements(&self) -> impl Iterator<Item = BorrowedElement<'a>> {
         self.0.elements.iter().map(BorrowedElement)
     }
+
+    // ── code-addressed access ─────────────────────────────────────────────────
+
+    /// Read the value at an already-resolved [`ElementPath`].
+    #[inline]
+    pub fn value_at(&self, path: ElementPath) -> Option<&'a str> {
+        self.0
+            .elements
+            .get(path.element)?
+            .components
+            .get(path.component_index())
+            .map(|(c, _)| c.as_str())
+    }
+
+    /// Byte span of the value at an already-resolved [`ElementPath`].
+    #[inline]
+    pub fn span_at(&self, path: ElementPath) -> Option<Span> {
+        let element = self.0.elements.get(path.element)?;
+        match path.component {
+            Some(c) => element.components.get(c).map(|(_, s)| *s),
+            None => Some(element.span),
+        }
+    }
+
+    /// Read a value by its UN/EDIFACT data element identifier.
+    ///
+    /// Zero-allocation counterpart of [`Segment::value_by_code`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Segment::value_by_code`].
+    pub fn value_by_code<L: SegmentLayout + ?Sized>(
+        &self,
+        layout: &L,
+        data_element: &str,
+    ) -> Result<Option<&'a str>, EdifactError> {
+        check_layout_tag(layout, &self.0.tag)?;
+        Ok(self.value_at(layout.resolve_code(data_element)?))
+    }
+
+    /// Byte span of a value addressed by its UN/EDIFACT data element identifier.
+    ///
+    /// # Errors
+    ///
+    /// As [`Segment::value_by_code`].
+    pub fn span_by_code<L: SegmentLayout + ?Sized>(
+        &self,
+        layout: &L,
+        data_element: &str,
+    ) -> Result<Option<Span>, EdifactError> {
+        check_layout_tag(layout, &self.0.tag)?;
+        Ok(self.span_at(layout.resolve_code(data_element)?))
+    }
+
+    /// Return the whole element addressed by a data element identifier.
+    ///
+    /// When the identifier names a component inside a composite, the enclosing
+    /// composite element is returned.
+    ///
+    /// # Errors
+    ///
+    /// As [`Segment::value_by_code`].
+    pub fn element_by_code<L: SegmentLayout + ?Sized>(
+        &self,
+        layout: &L,
+        data_element: &str,
+    ) -> Result<Option<BorrowedElement<'a>>, EdifactError> {
+        check_layout_tag(layout, &self.0.tag)?;
+        let path = layout.resolve_code(data_element)?;
+        Ok(self.0.elements.get(path.element).map(BorrowedElement))
+    }
 }
 
 impl OwnedSegment {
@@ -459,6 +669,76 @@ impl OwnedSegment {
     #[inline]
     pub fn borrow(&self) -> BorrowedSegment<'_> {
         BorrowedSegment(self)
+    }
+
+    // ── code-addressed access ─────────────────────────────────────────────────
+
+    /// Read the value at an already-resolved [`ElementPath`].
+    #[inline]
+    pub fn value_at(&self, path: ElementPath) -> Option<&str> {
+        self.elements
+            .get(path.element)?
+            .components
+            .get(path.component_index())
+            .map(|(s, _)| s.as_str())
+    }
+
+    /// Byte span of the value at an already-resolved [`ElementPath`].
+    #[inline]
+    pub fn span_at(&self, path: ElementPath) -> Option<Span> {
+        let element = self.elements.get(path.element)?;
+        match path.component {
+            Some(c) => element.components.get(c).map(|(_, s)| *s),
+            None => Some(element.span),
+        }
+    }
+
+    /// Read a value by its UN/EDIFACT data element identifier.
+    ///
+    /// Owned-storage counterpart of [`Segment::value_by_code`]; allocates nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Segment::value_by_code`].
+    pub fn value_by_code<L: SegmentLayout + ?Sized>(
+        &self,
+        layout: &L,
+        data_element: &str,
+    ) -> Result<Option<&str>, EdifactError> {
+        check_layout_tag(layout, &self.tag)?;
+        Ok(self.value_at(layout.resolve_code(data_element)?))
+    }
+
+    /// Byte span of a value addressed by its UN/EDIFACT data element identifier.
+    ///
+    /// # Errors
+    ///
+    /// As [`Segment::value_by_code`].
+    pub fn span_by_code<L: SegmentLayout + ?Sized>(
+        &self,
+        layout: &L,
+        data_element: &str,
+    ) -> Result<Option<Span>, EdifactError> {
+        check_layout_tag(layout, &self.tag)?;
+        Ok(self.span_at(layout.resolve_code(data_element)?))
+    }
+
+    /// Return the whole [`OwnedElement`] addressed by a data element identifier.
+    ///
+    /// When the identifier names a component inside a composite, the enclosing
+    /// composite element is returned.
+    ///
+    /// # Errors
+    ///
+    /// As [`Segment::value_by_code`].
+    pub fn element_by_code<L: SegmentLayout + ?Sized>(
+        &self,
+        layout: &L,
+        data_element: &str,
+    ) -> Result<Option<&OwnedElement>, EdifactError> {
+        check_layout_tag(layout, &self.tag)?;
+        let path = layout.resolve_code(data_element)?;
+        Ok(self.elements.get(path.element))
     }
 }
 

@@ -42,7 +42,7 @@ fn run_validation() -> Result<(), edifact_rs::EdifactError> {
                                     element_index: 0,
                                     value: "999".to_owned(),
                                     code_list: "1001".to_owned(),
-                                    offset: segment.span.start,
+                                    span: segment.span,
                                     suggestion: None,
                                 });
                             }
@@ -74,12 +74,12 @@ fn run_validation() -> Result<(), edifact_rs::EdifactError> {
     println!("report:\n{}", report.render_deterministic());
     for warning in report.warnings() {
         println!(
-            "warning: code={} rule={:?} segment={:?} element={:?} offset={:?} message={}",
-            warning.error_code.unwrap_or("UNKNOWN"),
+            "warning: code={} rule={:?} segment={:?} element={:?} span={:?} message={}",
+            warning.error_code().unwrap_or("UNKNOWN"),
             warning.rule_id,
             warning.segment_tag,
             warning.element_index,
-            warning.offset,
+            warning.span,
             warning.message
         );
         if let Some(suggestion) = &warning.suggestion {

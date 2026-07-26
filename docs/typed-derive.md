@@ -107,6 +107,42 @@ struct OrderMessage {
 }
 ```
 
+### `layout = PATH` — resolve fields by UN/EDIFACT data element identifier
+
+Points the struct at a `SegmentDefinition`, which unlocks the code-addressed
+form of `element` described [below](#element--3055--data-element-identifier).
+The path must name a **`const`** item (a `const` initialiser cannot read a
+`static`), because identifiers are resolved during const evaluation:
+
+```rust
+use edifact_rs::{
+    ComponentRef, EdifactDeserialize, EdifactSerialize, ElementRef, SegmentDefinition, Status,
+};
+
+const C082: &[ComponentRef] = &[
+    ComponentRef::new(1, "3039", Status::Mandatory),
+    ComponentRef::new(2, "1131", Status::Conditional),
+    ComponentRef::new(3, "3055", Status::Conditional),
+];
+const NAD_ELEMENTS: &[ElementRef] = &[
+    ElementRef::new(1, "3035", Status::Mandatory, 1),
+    ElementRef::composite(2, "C082", Status::Conditional, 1, C082),
+];
+pub const NAD: SegmentDefinition =
+    SegmentDefinition::new("NAD", "Name and address", NAD_ELEMENTS);
+
+#[derive(EdifactDeserialize, EdifactSerialize)]
+#[edifact(segment = "NAD", qualifier = "MS", layout = NAD)]
+struct SenderParty {
+    #[edifact(element = "3039")]
+    party_id: String,
+    #[edifact(element = "3055")]
+    agency: Option<String>,
+}
+```
+
+`layout` requires `segment`, since a layout describes exactly one segment.
+
 ---
 
 ## Field-level attributes (`#[edifact(...)]` on a field)
@@ -131,6 +167,45 @@ date_value: String,
 Maps the field to a specific component within an element.  Use this when an element
 carries multiple values (e.g. `DTM` element 0 has qualifier/value/format at
 components 0/1/2).
+
+### `element = "3055"` — data element identifier
+
+Under a struct-level `layout`, `element` also accepts a UN/EDIFACT data element
+identifier instead of an index:
+
+```rust,ignore
+#[edifact(element = "3055")]
+agency: Option<String>,
+```
+
+The identifier is resolved against the layout **at compile time**, and it
+resolves *both* coordinates: a code naming a component inside a composite (like
+`3055` in `C082`) yields that element *and* component position, so no index is
+written by hand anywhere.
+
+This is the point of the attribute. A transposed positional index reads the
+wrong data element and still validates clean — the most dangerous failure mode
+in this domain. An identifier cannot fail that way:
+
+| Mistake | Positional form | Code form |
+|---|---|---|
+| Identifier not in this segment | reads a neighbouring element | **compile error** |
+| Identifier defined at two positions | — | **compile error** |
+| Two fields claiming one slot | compile error | **compile error** |
+| Wrong segment's definition | — | compile error (or `E035` at runtime) |
+
+Identifier resolution also picks the right diagnostic for `#[edifact(required)]`:
+an identifier naming a whole data element reports `MissingRequiredElement`
+(`E008`), one naming a component inside a composite reports
+`MissingRequiredComponent` (`E021`) — a distinction a bare component index
+cannot make, because the first component of a composite also sits at index 0.
+
+`component = N` may still accompany a code, but only one that names a whole data
+element — combining it with a code that already names a component is a compile
+error.
+
+For runtime lookups against the same metadata, see
+[`Segment::value_by_code`](validation.md#code-addressed-element-access).
 
 ### `composite` — full composite element
 
@@ -226,7 +301,9 @@ Field rules:
 | `segment = "TAG"` | struct | Declares a segment struct with the given 3-letter tag |
 | `qualifier = "Q"` | struct | Filter — segment must have element 0 == `"Q"` (supports `*` suffix wildcard) |
 | `qualifier_from = N` | struct | Element N holds the runtime qualifier value |
+| `layout = PATH` | struct | `const SegmentDefinition` that code-addressed `element` attributes resolve against |
 | `element = N` | field | Positional element index (0-based) |
+| `element = "DE"` | field | UN/EDIFACT data element identifier, resolved against `layout` at compile time |
 | `component = C` | field | Component index within the element (use with `element`) |
 | `composite` | field | Map the whole element to `EdifactCompositeDeserialize` |
 | `group` | field | Collect all matching segments into a `Vec<T>` |
@@ -259,6 +336,9 @@ For a **segment struct** `#[edifact(segment = "TAG")]` the macro generates:
 - **Named fields only**: tuple structs and unit structs are not supported.
 - **Single segment per struct**: one derive struct maps to one EDIFACT segment type.
   Nested message structs handle multi-segment composition.
+- **`layout` must be a `const`**: a `const` initialiser cannot read a `static`, and
+  identifier resolution happens in const evaluation. Declare directory tables as
+  `const SegmentDefinition` / `const &[ElementRef]`.
 
 These limitations are documented on the derive macro items and surfaced as
 compile-time errors with span-accurate messages.
@@ -272,6 +352,13 @@ compile-time errors with span-accurate messages.
 You applied the derive to a struct without the `segment` attribute and without any
 named fields, or to a tuple/unit struct. Add `#[edifact(segment = "TAG")]` or switch
 to a named-field struct.
+
+### "data element {code} is not defined exactly once in the segment layout"
+
+The identifier in `#[edifact(element = "…")]` either does not appear in the
+`layout`, or appears at more than one position. Check it against the directory
+definition for that segment; this is the compile-time counterpart of the
+runtime `E033` / `E034` errors.
 
 ### "qualifier conflicts with qualifier_from"
 

@@ -208,7 +208,7 @@ pub use validator::{
     EnvelopeValidator, ProfileRule, ProfileRulePack, ValidationContext, ValidationContextBuilder,
     ValidationLayer, ValidationRuleContext, Validator, validate_each,
 };
-pub use writer::{MessageWriter, Writer};
+pub use writer::{AsDataElement, DataElement, MessageWriter, Writer};
 
 // ── flat re-exports: serde ────────────────────────────────────────────────────
 
@@ -239,16 +239,16 @@ pub use de::message_windows_bytes as from_bytes_windows;
 // ── Proc-macro support ─────────────────────────────────────────────────────────
 
 pub use directory_validator::{
-    DirectoryValidator, DirectoryValidatorBuilder, ElementRef, OwnedElementRef, OwnedSegmentDef,
-    SegmentDefinition, Status,
+    ComponentRef, DirectoryValidator, DirectoryValidatorBuilder, ElementPath, ElementRef,
+    OwnedComponentRef, OwnedElementRef, OwnedSegmentDef, SegmentDefinition, SegmentLayout, Status,
 };
 #[cfg(feature = "derive")]
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
 pub use edifact_rs_derive::{EdifactDeserialize, EdifactSerialize};
 pub use event::{EdifactEvent, EventEmitter, OwnedEdifactEvent, VecEmitter, WriterEmitter};
 pub use ser::{
-    DecimalFloat, DecimalFloatDisplay, EdifactCompositeSerialize, EdifactSerialize, to_bytes,
-    to_edifact_string,
+    DecimalFloat, DecimalFloatDisplay, EdifactCompositeSerialize, EdifactSerialize,
+    emit_sparse_segment, to_bytes, to_edifact_string,
 };
 
 // ── core free functions ───────────────────────────────────────────────────────
@@ -603,4 +603,9 @@ mod doc_guides {
     // The diagnostics guide's examples use `miette` types.
     #[cfg(feature = "diagnostics")]
     guide!(Diagnostics, "../../../docs/diagnostics.md");
+
+    // The README is the crate's front page on docs.rs and crates.io, and drifts
+    // for exactly the same reason the guides did.
+    #[cfg(feature = "derive")]
+    guide!(Readme, "../../../README.md");
 }

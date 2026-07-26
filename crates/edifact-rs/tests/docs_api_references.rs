@@ -88,6 +88,8 @@ const PUBLIC_API: &[&str] = &[
     "from_reader_collect",
     "from_reader_with_config",
     // writer / events
+    "AsDataElement",
+    "DataElement",
     "EdifactEvent",
     "EventEmitter",
     "MessageWriter",
@@ -95,6 +97,8 @@ const PUBLIC_API: &[&str] = &[
     "VecEmitter",
     "Writer",
     "WriterEmitter",
+    "elements",
+    "emit_sparse_segment",
     "segments_to_bytes",
     "segments_to_bytes_owned",
     "to_writer",
@@ -112,12 +116,16 @@ const PUBLIC_API: &[&str] = &[
     "Validator",
     "validate_each",
     // directory validation
+    "ComponentRef",
     "DirectoryValidator",
     "DirectoryValidatorBuilder",
+    "ElementPath",
     "ElementRef",
+    "OwnedComponentRef",
     "OwnedElementRef",
     "OwnedSegmentDef",
     "SegmentDefinition",
+    "SegmentLayout",
     "Status",
     // serde layer
     "CompositeElement",
@@ -255,10 +263,12 @@ fn public_api_list_is_accurate() {
     // representative sample really is importable at the crate root.
     #[allow(unused_imports)]
     use edifact_rs::{
-        DirectoryValidator, EdifactError, Element, EventEmitter, LenientResult, OwnedSegment,
-        OwnedSegmentStream, ProfileRulePack, ReaderConfig, Segment, ServiceStringAdvice, Span,
-        Token, Tokenizer, ValidationContext, ValidationIssue, ValidationReport, Writer,
-        WriterEmitter, from_bytes, to_edifact_string, validate_envelope, validate_envelope_lenient,
+        AsDataElement, ComponentRef, DataElement, DirectoryValidator, EdifactError, Element,
+        ElementPath, EventEmitter, LenientResult, OwnedComponentRef, OwnedSegment,
+        OwnedSegmentStream, ProfileRulePack, ReaderConfig, Segment, SegmentLayout,
+        ServiceStringAdvice, Span, Token, Tokenizer, ValidationContext, ValidationIssue,
+        ValidationReport, Writer, WriterEmitter, emit_sparse_segment, from_bytes,
+        to_edifact_string, validate_envelope, validate_envelope_lenient,
     };
 }
 
@@ -304,21 +314,21 @@ fn error_reference_documents_every_stable_code() {
         EdifactError::InvalidSegmentForMessage {
             tag: String::new(),
             message_type: String::new(),
-            offset: 0,
+            span: edifact_rs::Span::new(0, 0),
         },
         EdifactError::InvalidElementCount {
             tag: String::new(),
             actual: 0,
             min: 0,
             max: 0,
-            offset: 0,
+            span: edifact_rs::Span::new(0, 0),
         },
         EdifactError::InvalidComponentCount {
             tag: String::new(),
             element_index: 0,
             actual: 0,
             expected: 0,
-            offset: 0,
+            span: edifact_rs::Span::new(0, 0),
         },
         EdifactError::MissingSegment {
             tag: String::new(),
@@ -328,13 +338,13 @@ fn error_reference_documents_every_stable_code() {
             tag: String::new(),
             actual: String::new(),
             expected: String::new(),
-            offset: 0,
+            span: edifact_rs::Span::new(0, 0),
         },
         EdifactError::ConditionalRequirementNotMet {
             tag: String::new(),
             element_index: 0,
             condition: String::new(),
-            offset: 0,
+            span: edifact_rs::Span::new(0, 0),
         },
         EdifactError::SegmentTooLong {
             offset: 0,
@@ -356,7 +366,19 @@ fn error_reference_documents_every_stable_code() {
         EdifactError::DuplicateReference {
             tag: String::new(),
             reference: String::new(),
-            offset: 0,
+            span: edifact_rs::Span::new(0, 0),
+        },
+        EdifactError::UnknownDataElement {
+            tag: String::new(),
+            data_element: String::new(),
+        },
+        EdifactError::AmbiguousDataElement {
+            tag: String::new(),
+            data_element: String::new(),
+        },
+        EdifactError::SegmentLayoutMismatch {
+            expected: String::new(),
+            actual: String::new(),
         },
     ];
 

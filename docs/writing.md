@@ -13,7 +13,10 @@ raw segment construction and custom delimiter configuration.
 | `ser::to_bytes(segments)` | Round-trip a parsed `Vec<Segment<'_>>` |
 | `to_bytes(segments)` | Free function alias for `ser::to_bytes` |
 | `Writer::write_segment(seg)` | Streaming segment-by-segment output |
-| `Writer::write_raw(tag, elements)` | Build segments from runtime string data |
+| `Writer::write_elements(tag, elements)` | **The general form** — segments mixing simple and composite data elements |
+| `Writer::write_composites(tag, elements)` | Segments whose every element is a composite |
+| `Writer::write_raw(tag, elements)` | All-simple segments, component boundaries inferred by splitting |
+| `Writer::write_segment_parts(tag, elements)` | Same as `write_elements`, for owned `String` data |
 | `Writer::with_una(w, ssa)` | Output with custom UNA service string |
 
 ---
@@ -147,6 +150,85 @@ writer.write_raw("UNT", &[&count.to_string(), "1"])?;
 
 ---
 
+## `write_elements` — mixed simple and composite elements
+
+Most real EDIFACT segments mix the two shapes: `NAD` takes a simple qualifier
+followed by a composite party identification, `DTM` takes a single composite.
+`write_elements` expresses that directly, with component boundaries given
+explicitly rather than inferred:
+
+```rust
+use edifact_rs::{DataElement, Writer};
+
+let mut buf: Vec<u8> = Vec::new();
+let mut writer = Writer::new(&mut buf);
+
+writer.write_elements("NAD", &[
+    DataElement::Simple("MS"),
+    DataElement::Composite(&["9900112233445", "", "293"]),
+])?;
+writer.write_elements("DTM", &[
+    DataElement::Composite(&["137", "20260101", "102"]),
+])?;
+
+writer.finish()?;
+assert_eq!(
+    String::from_utf8(buf).unwrap(),
+    "NAD+MS+9900112233445::293'DTM+137:20260101:102'",
+);
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+The `elements!` macro is shorthand for the same thing. Each entry is an ordinary
+expression borrowed through the `AsDataElement` trait: a string becomes a simple
+data element, an array/slice/`Vec` of strings becomes a composite. Runtime values
+work exactly like literals, which is the point — builders rarely have literals:
+
+```rust
+use edifact_rs::{Writer, elements};
+
+let qualifier = String::from("MS");
+let gln = "9900112233445";
+
+let mut buf: Vec<u8> = Vec::new();
+let mut writer = Writer::new(&mut buf);
+
+writer.write_elements("NAD", elements![qualifier.as_str(), [gln, "", "293"]])?;
+writer.write_elements("DTM", elements![["137", "20260101", "102"]])?;
+
+writer.finish()?;
+assert_eq!(
+    String::from_utf8(buf).unwrap(),
+    "NAD+MS+9900112233445::293'DTM+137:20260101:102'",
+);
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+> Composite components must be string *slices*: a `[String; N]` cannot borrow as
+> `&[&str]` without allocating, so write `[id.as_str(), "", agency]`.
+
+Because boundaries are explicit, a value containing a literal component
+separator is **escaped** rather than silently promoted to a boundary — which is
+the failure mode of pre-joining components into one string:
+
+```rust
+# use edifact_rs::{Writer, elements};
+# let mut buf: Vec<u8> = Vec::new();
+# let mut writer = Writer::new(&mut buf);
+writer.write_elements("NAD", elements!["MS", "ACME:INC"])?;
+writer.finish()?;
+// The `:` stays inside the value:
+assert_eq!(String::from_utf8(buf).unwrap(), "NAD+MS+ACME?:INC'");
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+`MessageWriter` — the `UNH`/`UNT` guard from `Writer::begin_message` — carries
+the same methods (`write_elements`, `write_composites`, `write_segment_parts`,
+`write_raw`, `write_segment`), so every segment you write inside a message is
+counted into the `UNT` DE 0074 total.
+
+---
+
 ## `write_raw` — runtime string data
 
 When building segments from runtime data (e.g., database values), use `write_raw`
@@ -161,6 +243,9 @@ let mut writer = Writer::new(&mut buf);
 // write_raw(tag, &[elements]) — components inside an element separated by ':'
 writer.write_raw("DTM", &["137:20240101:102"])?;
 writer.write_raw("RFF", &["ON:PO-4711"])?;
+// Caveat: the split is on the *active* component separator, and a literal `:`
+// inside a value becomes a boundary. Prefer `write_elements` when either
+// matters.
 
 writer.finish()?;
 # Ok::<(), edifact_rs::EdifactError>(())

@@ -3,13 +3,3 @@ error: field `doc_name_code`: #[edifact(required)] only applies to Option<T> fie
    |
 16 |     #[edifact(element = 0, required)]
    |                            ^^^^^^^^
-
-warning: unused imports: `composite_element`, `find_qualified_segment_owned`, `find_qualified_segment`, `find_segment_owned`, `find_segment`, and `find_segments_typed`
- --> tests/ui/support.rs
-  |
-  |             composite_element, find_qualified_segment, find_qualified_segment_owned,
-  |             ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |             find_segment, find_segment_owned, find_segments_typed,
-  |             ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` on by default

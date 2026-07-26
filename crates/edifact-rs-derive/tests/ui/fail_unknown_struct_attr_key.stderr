@@ -1,15 +1,5 @@
-error: unknown struct-level `edifact` key; expected `segment`, `qualifier`, or `qualifier_from`
+error: unknown struct-level `edifact` key; expected `segment`, `qualifier`, `qualifier_from`, or `layout`
   --> tests/ui/fail_unknown_struct_attr_key.rs:15:28
    |
 15 | #[edifact(segment = "BGM", unknown = "X")]
    |                            ^^^^^^^
-
-warning: unused imports: `composite_element`, `find_qualified_segment_owned`, `find_qualified_segment`, `find_segment_owned`, `find_segment`, and `find_segments_typed`
- --> tests/ui/support.rs
-  |
-  |             composite_element, find_qualified_segment, find_qualified_segment_owned,
-  |             ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |             find_segment, find_segment_owned, find_segments_typed,
-  |             ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` on by default

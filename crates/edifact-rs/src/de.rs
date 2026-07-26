@@ -956,11 +956,10 @@ impl<'a> Iterator for MessageWindowsSliceIter<'a> {
                         self.buf.clear();
                         self.in_message = false;
                         self.done = true;
-                        let offset = segment.span.start;
                         return Some(Err(EdifactError::InvalidSegmentForMessage {
                             tag: "UNH".to_owned(),
                             message_type: "ENVELOPE".to_owned(),
-                            offset,
+                            span: segment.span,
                         }));
                     }
                     self.buf.clear();
@@ -1061,11 +1060,10 @@ impl<I: Iterator<Item = Result<crate::OwnedSegment, EdifactError>>> Iterator
                         self.buf.clear();
                         self.in_message = false;
                         self.done = true;
-                        let offset = segment.span.start;
                         return Some(Err(EdifactError::InvalidSegmentForMessage {
                             tag: "UNH".to_owned(),
                             message_type: "ENVELOPE".to_owned(),
-                            offset,
+                            span: segment.span,
                         }));
                     }
                     self.buf.clear();

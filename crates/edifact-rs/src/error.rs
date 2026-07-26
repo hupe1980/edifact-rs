@@ -1,3 +1,4 @@
+use crate::model::Span;
 use thiserror::Error;
 
 /// Wrapper around [`std::io::Error`] that implements [`PartialEq`] by comparing [`std::io::ErrorKind`].
@@ -45,10 +46,24 @@ impl From<std::io::Error> for IoError {
 
 /// All errors produced by `edifact-rs`.
 ///
-/// # Error Variants
+/// # Positional data
 ///
-/// All variants that include an offset carry byte position information from the input stream.
-/// This data enables precise error location reporting in diagnostics.
+/// Two kinds of position information appear in this enum, and the distinction is
+/// deliberate:
+///
+/// * **`offset: usize`** — a single byte position in the input stream.  Used by
+///   the lexical variants (`UnexpectedEof`, `InvalidDelimiter`, `InvalidText`,
+///   `InvalidReleaseSequence`, `SegmentTooLong`, `UnexpectedDataToken`), where
+///   the fault is a *point* in the byte stream and no meaningful end position
+///   exists.
+/// * **`span: Span`** — a half-open byte range.  Used by every variant produced
+///   while validating an already-parsed [`Segment`][crate::Segment], where the
+///   exact source range is known.  A [`ValidationIssue`][crate::ValidationIssue]
+///   built from such an error carries the full range, so `miette` and LSP
+///   tooling can underline the offending segment rather than place a
+///   zero-width caret.
+///
+/// Use `span.start` when only the start position is needed.
 #[derive(Debug, Error, PartialEq)]
 #[non_exhaustive]
 pub enum EdifactError {
@@ -187,8 +202,8 @@ pub enum EdifactError {
         tag: String,
         /// Message type used for structural validation.
         message_type: String,
-        /// Segment tag byte offset.
-        offset: usize,
+        /// Byte range of the offending segment tag.
+        span: Span,
     },
 
     /// Element count in segment exceeds or falls short of directory definition.
@@ -204,8 +219,8 @@ pub enum EdifactError {
         max: usize,
         /// Actual element count found.
         actual: usize,
-        /// Segment start byte offset.
-        offset: usize,
+        /// Byte range of the offending segment.
+        span: Span,
     },
 
     /// Component count in a composite element is invalid.
@@ -221,8 +236,8 @@ pub enum EdifactError {
         expected: u8,
         /// Actual component count found.
         actual: u8,
-        /// Segment start byte offset.
-        offset: usize,
+        /// Byte range of the offending composite element.
+        span: Span,
     },
 
     /// Code-list value is not valid.
@@ -241,8 +256,8 @@ pub enum EdifactError {
         value: String,
         /// Data element code list identifier.
         code_list: String,
-        /// Segment start byte offset.
-        offset: usize,
+        /// Byte range of the offending value.
+        span: Span,
         /// Optional remediation suggestion from the code-list lookup function.
         suggestion: Option<&'static str>,
     },
@@ -269,8 +284,8 @@ pub enum EdifactError {
         actual: String,
         /// Expected qualifier value.
         expected: String,
-        /// Segment start byte offset.
-        offset: usize,
+        /// Byte range of the offending segment.
+        span: Span,
     },
 
     /// Conditional requirement not met.
@@ -285,8 +300,8 @@ pub enum EdifactError {
         element_index: usize,
         /// Condition text describing the rule.
         condition: String,
-        /// Segment start byte offset.
-        offset: usize,
+        /// Byte range of the offending segment.
+        span: Span,
     },
 
     /// Validation failed and the full [`ValidationReport`] is preserved.
@@ -433,14 +448,57 @@ pub enum EdifactError {
     /// DE 0048) to be unique within an interchange.  Duplicates make a message
     /// unaddressable: a receiver keying on the reference silently processes one
     /// occurrence and drops the rest.
-    #[error("duplicate {tag} reference '{reference}' at byte offset {offset}")]
+    #[error("duplicate {tag} reference '{reference}' at bytes {span}")]
     DuplicateReference {
         /// Segment tag that carries the duplicated reference (`UNH` or `UNG`).
         tag: String,
         /// The reference value that appeared more than once.
         reference: String,
-        /// Byte offset of the duplicate occurrence.
-        offset: usize,
+        /// Byte range of the duplicate occurrence.
+        span: Span,
+    },
+
+    /// A UN/EDIFACT data element code was not found in the segment definition.
+    ///
+    /// Produced by the code-addressed accessors
+    /// ([`Segment::value_by_code`][crate::Segment::value_by_code] and friends)
+    /// when the requested data element identifier does not appear anywhere in
+    /// the supplied [`SegmentLayout`][crate::SegmentLayout].  This is the error
+    /// that turns a mistyped or stale DE reference into a loud failure instead
+    /// of a silent off-by-one read of the wrong element.
+    #[error("segment {tag} has no data element {data_element} in its definition")]
+    UnknownDataElement {
+        /// Segment tag whose definition was searched.
+        tag: String,
+        /// The data element identifier that was not found.
+        data_element: String,
+    },
+
+    /// A UN/EDIFACT data element code appears more than once in a segment definition.
+    ///
+    /// Code-addressed access requires an unambiguous target.  When a directory
+    /// genuinely repeats a code (e.g. the same DE used at two positions), address
+    /// it positionally with [`Segment::element_str`][crate::Segment::element_str]
+    /// or split the definition.
+    #[error("segment {tag} defines data element {data_element} at more than one position")]
+    AmbiguousDataElement {
+        /// Segment tag whose definition was searched.
+        tag: String,
+        /// The data element identifier that resolved to multiple positions.
+        data_element: String,
+    },
+
+    /// A [`SegmentLayout`][crate::SegmentLayout] was applied to a segment with a different tag.
+    ///
+    /// Passing the `NAD` definition to a `DTM` segment would resolve codes
+    /// against the wrong table, which is exactly the class of mistake that
+    /// code-addressed access exists to prevent — so it is rejected up front.
+    #[error("segment layout is for {expected}, but the segment is {actual}")]
+    SegmentLayoutMismatch {
+        /// Tag the layout describes.
+        expected: String,
+        /// Tag of the segment the layout was applied to.
+        actual: String,
     },
 }
 
@@ -488,6 +546,9 @@ impl EdifactError {
             Self::ValidationErrors { .. } => "E030",
             Self::UnrecognisedSyntaxIdentifier(_) => "E031",
             Self::DuplicateReference { .. } => "E032",
+            Self::UnknownDataElement { .. } => "E033",
+            Self::AmbiguousDataElement { .. } => "E034",
+            Self::SegmentLayoutMismatch { .. } => "E035",
         }
     }
 
@@ -560,6 +621,15 @@ impl EdifactError {
             Self::DuplicateReference { .. } => Some(
                 "Assign a unique control reference to every UNH (DE 0062) and UNG (DE 0048) within an interchange",
             ),
+            Self::UnknownDataElement { .. } => Some(
+                "Check the data element identifier against the segment definition; the directory is the source of truth",
+            ),
+            Self::AmbiguousDataElement { .. } => Some(
+                "The code appears at more than one position; address the element positionally instead",
+            ),
+            Self::SegmentLayoutMismatch { .. } => {
+                Some("Resolve codes against the segment definition whose tag matches the segment")
+            }
             Self::ValidationErrors { .. }
             | Self::MessageCountMismatch { .. }
             | Self::SegmentCountMismatch { .. }
@@ -750,6 +820,18 @@ impl miette::Diagnostic for EdifactError {
                 "Reference '{reference}' is used by more than one {tag} in this interchange; \
                  each must be unique so receivers can address messages unambiguously",
             ))),
+            Self::UnknownDataElement { tag, data_element } => Some(Box::new(format!(
+                "Segment {tag} does not define data element {data_element}. \
+                 Check the identifier against the directory definition for {tag}",
+            ))),
+            Self::AmbiguousDataElement { tag, data_element } => Some(Box::new(format!(
+                "Segment {tag} defines data element {data_element} at more than one position, \
+                 so code-addressed access cannot pick one; use a positional accessor",
+            ))),
+            Self::SegmentLayoutMismatch { expected, actual } => Some(Box::new(format!(
+                "The supplied layout describes segment {expected} but was applied to {actual}. \
+                 Look up the definition by the segment's own tag",
+            ))),
         }
     }
 }
@@ -772,7 +854,7 @@ mod tests {
             element_index: 0,
             value: "X".to_owned(),
             code_list: "1001".to_owned(),
-            offset: 0,
+            span: Span::new(0, 9),
             suggestion: None,
         };
         assert!(err.recovery_hint().is_some());

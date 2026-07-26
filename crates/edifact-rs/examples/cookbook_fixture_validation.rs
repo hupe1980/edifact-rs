@@ -67,12 +67,12 @@ fn run_case(
 
     for warning in report.warnings() {
         println!(
-            "warning: code={} rule={:?} segment={:?} element={:?} offset={:?} message={}",
-            warning.error_code.unwrap_or("UNKNOWN"),
+            "warning: code={} rule={:?} segment={:?} element={:?} span={:?} message={}",
+            warning.error_code().unwrap_or("UNKNOWN"),
             warning.rule_id,
             warning.segment_tag,
             warning.element_index,
-            warning.offset,
+            warning.span,
             warning.message
         );
         if let Some(suggestion) = &warning.suggestion {
@@ -81,12 +81,12 @@ fn run_case(
     }
     for error in report.errors() {
         println!(
-            "error: code={} rule={:?} segment={:?} element={:?} offset={:?} message={}",
-            error.error_code.unwrap_or("UNKNOWN"),
+            "error: code={} rule={:?} segment={:?} element={:?} span={:?} message={}",
+            error.error_code().unwrap_or("UNKNOWN"),
             error.rule_id,
             error.segment_tag,
             error.element_index,
-            error.offset,
+            error.span,
             error.message
         );
     }

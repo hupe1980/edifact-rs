@@ -6,7 +6,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["hupe1980"]
@@ -25,6 +25,8 @@ quote = "1"
 # smallvec's own safety guarantees and provides a measurable reduction in
 # struct size on hot paths (e.g., Element.components).
 serde = { version = "1", features = ["derive", "rc"] }
+# dev-only. Backs the serde round-trip tests for the validation report types.
+serde_json = "1"
 smallvec = { version = "1", features = ["union"] }
 syn = { version = "2", features = ["full"] }
 thiserror = "2"

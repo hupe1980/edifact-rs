@@ -17,13 +17,17 @@
 //! (groups when groups are present, messages otherwise) and reports
 //! [`EdifactError::MessageCountMismatch`] on any discrepancy.
 
-use crate::{OwnedSegment, error::EdifactError, model::Segment};
+use crate::{
+    OwnedSegment,
+    error::EdifactError,
+    model::{Segment, Span},
+};
 
 // ── Sealed segment-access trait ──────────────────────────────────────────────
 
 pub(crate) trait SegmentReader: sealed::Sealed {
     fn tag(&self) -> &str;
-    fn span_start(&self) -> usize;
+    fn span(&self) -> Span;
     fn component(&self, elem_idx: usize, comp_idx: usize) -> Option<&str>;
 
     fn required_component_field(
@@ -53,8 +57,8 @@ impl SegmentReader for Segment<'_> {
         self.tag
     }
     #[inline]
-    fn span_start(&self) -> usize {
-        self.span.start
+    fn span(&self) -> Span {
+        self.span
     }
     #[inline]
     fn component(&self, elem_idx: usize, comp_idx: usize) -> Option<&str> {
@@ -68,8 +72,8 @@ impl SegmentReader for OwnedSegment {
         &self.tag
     }
     #[inline]
-    fn span_start(&self) -> usize {
-        self.span.start
+    fn span(&self) -> Span {
+        self.span
     }
     #[inline]
     fn component(&self, elem_idx: usize, comp_idx: usize) -> Option<&str> {
@@ -946,7 +950,7 @@ fn extract_interchange<S: SegmentReader>(
             tag: "UNZ".to_owned(),
             actual: unz_control_ref,
             expected: control_ref.clone(),
-            offset: unz.span_start(),
+            span: unz.span(),
         });
     }
 
@@ -955,7 +959,7 @@ fn extract_interchange<S: SegmentReader>(
         declared_unit_count_raw
             .parse()
             .map_err(|_| EdifactError::InvalidText {
-                offset: unz.span_start(),
+                offset: unz.span().start,
             }),
         0,
     );
@@ -1019,7 +1023,7 @@ fn find_matching_une<S: SegmentReader>(
                 return Err(EdifactError::InvalidSegmentForMessage {
                     tag: "UNG".to_owned(),
                     message_type: "ENVELOPE".to_owned(),
-                    offset: seg.span_start(),
+                    span: seg.span(),
                 });
             }
             _ => {}
@@ -1068,7 +1072,7 @@ fn extract_with_groups<S: SegmentReader>(
                     sink.push(EdifactError::DuplicateReference {
                         tag: "UNG".to_owned(),
                         reference: group_ref.clone(),
-                        offset: ung.span_start(),
+                        span: ung.span(),
                     });
                 } else {
                     seen_group_refs.push(group_ref.clone());
@@ -1083,7 +1087,7 @@ fn extract_with_groups<S: SegmentReader>(
                 let declared_str = sink.required(une, 0, 0);
                 let declared_message_count: u32 = sink.recover(
                     declared_str.parse().map_err(|_| EdifactError::InvalidText {
-                        offset: une.span_start(),
+                        offset: une.span().start,
                     }),
                     0,
                 );
@@ -1093,7 +1097,7 @@ fn extract_with_groups<S: SegmentReader>(
                         tag: "UNE".to_owned(),
                         actual: une_ref,
                         expected: group_ref.clone(),
-                        offset: une.span_start(),
+                        span: une.span(),
                     });
                 }
 
@@ -1135,7 +1139,7 @@ fn extract_with_groups<S: SegmentReader>(
                 return Err(EdifactError::InvalidSegmentForMessage {
                     tag: "UNE".to_owned(),
                     message_type: "ENVELOPE".to_owned(),
-                    offset: seg.span_start(),
+                    span: seg.span(),
                 });
             }
             "UNH" => {
@@ -1143,14 +1147,14 @@ fn extract_with_groups<S: SegmentReader>(
                 return Err(EdifactError::InvalidSegmentForMessage {
                     tag: "UNH".to_owned(),
                     message_type: "ENVELOPE".to_owned(),
-                    offset: seg.span_start(),
+                    span: seg.span(),
                 });
             }
             _ => {
                 return Err(EdifactError::InvalidSegmentForMessage {
                     tag: seg.tag().to_owned(),
                     message_type: "ENVELOPE".to_owned(),
-                    offset: seg.span_start(),
+                    span: seg.span(),
                 });
             }
         }
@@ -1177,7 +1181,7 @@ fn extract_messages_flat<S: SegmentReader>(
                     return Err(EdifactError::InvalidSegmentForMessage {
                         tag: "UNH".to_owned(),
                         message_type: "ENVELOPE".to_owned(),
-                        offset: seg.span_start(),
+                        span: seg.span(),
                     });
                 }
                 in_message = true;
@@ -1193,7 +1197,7 @@ fn extract_messages_flat<S: SegmentReader>(
                     sink.push(EdifactError::DuplicateReference {
                         tag: "UNH".to_owned(),
                         reference: message_ref.clone(),
-                        offset: unh.span_start(),
+                        span: unh.span(),
                     });
                 } else {
                     seen_refs.push(message_ref.clone());
@@ -1222,7 +1226,7 @@ fn extract_messages_flat<S: SegmentReader>(
                 let declared_raw = sink.required(seg, 0, 0);
                 let declared_segment_count: u32 = sink.recover(
                     declared_raw.parse().map_err(|_| EdifactError::InvalidText {
-                        offset: seg.span_start(),
+                        offset: seg.span().start,
                     }),
                     0,
                 );
@@ -1232,7 +1236,7 @@ fn extract_messages_flat<S: SegmentReader>(
                         tag: "UNT".to_owned(),
                         actual: unt_ref,
                         expected: message_ref.clone(),
-                        offset: seg.span_start(),
+                        span: seg.span(),
                     });
                 }
 
@@ -1263,21 +1267,21 @@ fn extract_messages_flat<S: SegmentReader>(
                 return Err(EdifactError::InvalidSegmentForMessage {
                     tag: "UNT".to_owned(),
                     message_type: "ENVELOPE".to_owned(),
-                    offset: seg.span_start(),
+                    span: seg.span(),
                 });
             }
             "UNB" | "UNZ" | "UNG" | "UNE" if in_message => {
                 return Err(EdifactError::InvalidSegmentForMessage {
                     tag: seg.tag().to_owned(),
                     message_type: "ENVELOPE".to_owned(),
-                    offset: seg.span_start(),
+                    span: seg.span(),
                 });
             }
             _ if !in_message => {
                 return Err(EdifactError::InvalidSegmentForMessage {
                     tag: seg.tag().to_owned(),
                     message_type: "ENVELOPE".to_owned(),
-                    offset: seg.span_start(),
+                    span: seg.span(),
                 });
             }
             _ => {}

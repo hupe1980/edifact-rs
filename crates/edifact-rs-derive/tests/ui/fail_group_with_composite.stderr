@@ -3,13 +3,3 @@ error: field `lines`: #[edifact(composite)] cannot be combined with #[edifact(gr
    |
 15 |     #[edifact(composite, group)]
    |               ^^^^^^^^^
-
-warning: unused imports: `composite_element`, `find_qualified_segment_owned`, `find_qualified_segment`, `find_segment_owned`, `find_segment`, and `find_segments_typed`
- --> tests/ui/support.rs
-  |
-  |             composite_element, find_qualified_segment, find_qualified_segment_owned,
-  |             ^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  |             find_segment, find_segment_owned, find_segments_typed,
-  |             ^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` on by default
