@@ -51,7 +51,8 @@ pub(super) struct LayeredValidator {
 ///
 /// ## Profile layer
 ///
-/// Applies downstream business rules (BDEW AHB / MIG rules, custom constraints)
+/// Applies downstream business rules (partner or industry profile rules,
+/// custom constraints)
 /// via [`ProfileRulePack`].  A pack can be scoped to specific EDIFACT message
 /// types (`for_message_type`) and association-assigned codes (`for_release`).
 ///
@@ -277,7 +278,7 @@ impl ValidationContextBuilder {
     ///
     /// Static issues are emitted on every `validate_*` call — they are not
     /// evaluated against segments.  This is useful for advisory notices that
-    /// should always be present regardless of message content (e.g. "AHB layer
+    /// should always be present regardless of message content (e.g. "the profile layer
     /// is inactive for this message type").
     pub fn with_static_issue(mut self, issue: crate::ValidationIssue) -> Self {
         self.inner.static_issues.push(issue);
@@ -330,7 +331,7 @@ impl ValidationContext {
     /// ];
     ///
     /// let tree = group_segments_indexed(&segments, SCHEMA, "ROOT");
-    /// let pack = ProfileRulePack::new("AHB")
+    /// let pack = ProfileRulePack::new("PROFILE")
     ///     .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
     /// let ctx = ValidationContext::builder().with_profile_pack(pack).build();
     ///

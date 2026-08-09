@@ -136,6 +136,46 @@ pub fn derive_edifact_deserialize(input: TokenStream) -> TokenStream {
         .into()
 }
 
+#[proc_macro_derive(EdifactCompositeDeserialize, attributes(edifact))]
+/// Derive `edifact_rs::EdifactCompositeDeserialize` for a composite-element struct.
+///
+/// Each named field maps to one component of the composite, in declaration
+/// order, unless `#[edifact(component = N)]` overrides the index. `Option<T>`
+/// fields are optional; a bare field is required and an absent or empty
+/// component is an `EdifactError::MissingRequiredComponent`.
+///
+/// Pair the resulting type with `#[edifact(element = N, composite)]` on a
+/// segment struct's field.
+///
+/// # Limitations
+///
+/// Same as [`macro@EdifactDeserialize`]: named-field structs only, no generics,
+/// no lifetime parameters. Field types must be `String` or `Option<String>`.
+pub fn derive_edifact_composite_deserialize(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    impl_composite_deserialize(&input)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
+#[proc_macro_derive(EdifactCompositeSerialize, attributes(edifact))]
+/// Derive `edifact_rs::EdifactCompositeSerialize` for a composite-element struct.
+///
+/// The mirror of [`macro@EdifactCompositeDeserialize`]: field `n` is emitted as
+/// component `n`, `None` becomes an empty component, and any gap left by a
+/// `component = N` override is filled so later components keep their positions.
+///
+/// # Limitations
+///
+/// Same as [`macro@EdifactSerialize`]: named-field structs only, no generics,
+/// no lifetime parameters. Field types must be `String` or `Option<String>`.
+pub fn derive_edifact_composite_serialize(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    impl_composite_serialize(&input)
+        .unwrap_or_else(|e| e.to_compile_error())
+        .into()
+}
+
 // ── attribute containers ───────────────────────────────────────────────────────
 
 /// How a field's element slot was written in the attribute.
@@ -684,6 +724,192 @@ fn check_duplicate_slots(
         seen.push((slot, ident));
     }
     Ok(())
+}
+
+// ── composite derives ─────────────────────────────────────────────────────────
+
+/// One resolved component slot of a composite struct.
+struct CompositeSlot<'a> {
+    ident: &'a syn::Ident,
+    ty: &'a Type,
+    index: u32,
+    optional: bool,
+}
+
+/// Resolve each field of a composite struct to a component index.
+///
+/// Declaration order is the default; `#[edifact(component = N)]` overrides it.
+/// Only the attributes that mean something for a composite are accepted — the
+/// segment-level ones (`element`, `group`, `qualifier`, `composite`) have no
+/// meaning inside one and are rejected rather than silently ignored.
+fn composite_slots(input: &DeriveInput) -> syn::Result<Vec<CompositeSlot<'_>>> {
+    let fields = get_named_fields(input)?;
+    let mut slots: Vec<CompositeSlot<'_>> = Vec::with_capacity(fields.named.len());
+
+    for (decl_index, field) in fields.named.iter().enumerate() {
+        let ident = field.ident.as_ref().expect("named fields checked above");
+        let attrs = parse_field_attrs(field)?;
+
+        for (present, span, key) in [
+            (attrs.element.is_some(), attrs.element_span, "element"),
+            (attrs.composite, attrs.composite_span, "composite"),
+            (attrs.group, attrs.group_span, "group"),
+            (attrs.qualifier.is_some(), attrs.qualifier_span, "qualifier"),
+        ] {
+            if present {
+                return Err(syn::Error::new(
+                    span.unwrap_or_else(|| field.span()),
+                    format!(
+                        "`{key}` has no meaning on a composite struct field; \
+                         a composite maps its fields to components, so only \
+                         `component` and `required` apply"
+                    ),
+                ));
+            }
+        }
+
+        let ty = &field.ty;
+        let inner = option_inner_type(ty).unwrap_or(ty);
+        if !is_string_type(inner) {
+            return Err(syn::Error::new(
+                ty.span(),
+                "composite struct fields must be `String` or `Option<String>`; \
+                 a component is a single text value",
+            ));
+        }
+
+        slots.push(CompositeSlot {
+            ident,
+            ty,
+            index: attrs.component.unwrap_or(decl_index as u32),
+            optional: is_option_type(ty) && !attrs.required,
+        });
+    }
+
+    // Two fields on one component would make the mapping ambiguous in one
+    // direction and lossy in the other.
+    let mut seen: Vec<(u32, &syn::Ident)> = Vec::with_capacity(slots.len());
+    for slot in &slots {
+        if let Some((_, first)) = seen.iter().find(|(i, _)| *i == slot.index) {
+            return Err(syn::Error::new(
+                slot.ident.span(),
+                format!(
+                    "component {} is already mapped by field `{first}`",
+                    slot.index
+                ),
+            ));
+        }
+        seen.push((slot.index, slot.ident));
+    }
+    Ok(slots)
+}
+
+fn impl_composite_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    let name = &input.ident;
+    let slots = composite_slots(input)?;
+
+    let assignments = slots.iter().map(|slot| {
+        let CompositeSlot {
+            ident,
+            ty,
+            index,
+            optional,
+        } = slot;
+        let idx = *index as usize;
+        if *optional {
+            quote! {
+                #ident: match __composite.get(#idx) {
+                    Some(v) if !v.is_empty() => Some(::std::string::String::from(v)),
+                    _ => None,
+                },
+            }
+        } else {
+            // An absent or empty component in a required slot is the exact
+            // condition `MissingRequiredComponent` exists to name.
+            let build = if is_option_type(ty) {
+                quote! { Some(::std::string::String::from(__value)) }
+            } else {
+                quote! { ::std::string::String::from(__value) }
+            };
+            quote! {
+                #ident: {
+                    let __value = __composite
+                        .get(#idx)
+                        .filter(|v| !v.is_empty())
+                        .ok_or_else(|| ::edifact_rs::EdifactError::MissingRequiredComponent {
+                            tag: ::std::string::String::from(stringify!(#name)),
+                            element_index: 0,
+                            component_index: #idx,
+                        })?;
+                    #build
+                },
+            }
+        }
+    });
+
+    Ok(quote! {
+        impl ::edifact_rs::EdifactCompositeDeserialize for #name {
+            fn edifact_deserialize_composite(
+                __composite: ::edifact_rs::CompositeElement<'_>,
+            ) -> ::core::result::Result<Self, ::edifact_rs::EdifactError> {
+                ::core::result::Result::Ok(Self {
+                    #(#assignments)*
+                })
+            }
+        }
+    })
+}
+
+fn impl_composite_serialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    let name = &input.ident;
+    let slots = composite_slots(input)?;
+
+    // Emit in component order, filling any slot a `component = N` override
+    // skipped so the components that follow keep their positions.
+    let mut ordered: Vec<&CompositeSlot<'_>> = slots.iter().collect();
+    ordered.sort_by_key(|slot| slot.index);
+    let highest = ordered.last().map_or(0, |slot| slot.index);
+
+    let emits = (0..=highest).map(|index| {
+        let value = match ordered.iter().find(|slot| slot.index == index) {
+            Some(slot) => {
+                let ident = slot.ident;
+                if is_option_type(slot.ty) {
+                    quote! { self.#ident.as_deref().unwrap_or("") }
+                } else {
+                    quote! { self.#ident.as_str() }
+                }
+            }
+            None => quote! { "" },
+        };
+        // Component 0 opens the element; the rest extend it.
+        if index == 0 {
+            quote! { __emitter.emit(::edifact_rs::EdifactEvent::Element { value: #value })?; }
+        } else {
+            quote! {
+                __emitter.emit(::edifact_rs::EdifactEvent::ComponentElement { value: #value })?;
+            }
+        }
+    });
+
+    // A field-less composite still occupies its element slot.
+    let body = if slots.is_empty() {
+        quote! { __emitter.emit(::edifact_rs::EdifactEvent::Element { value: "" })?; }
+    } else {
+        quote! { #(#emits)* }
+    };
+
+    Ok(quote! {
+        impl ::edifact_rs::EdifactCompositeSerialize for #name {
+            fn edifact_serialize_composite<__E: ::edifact_rs::EventEmitter>(
+                &self,
+                __emitter: &mut __E,
+            ) -> ::core::result::Result<(), ::edifact_rs::EdifactError> {
+                #body
+                ::core::result::Result::Ok(())
+            }
+        }
+    })
 }
 
 fn get_named_fields(input: &DeriveInput) -> syn::Result<&syn::FieldsNamed> {

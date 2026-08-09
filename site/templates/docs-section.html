@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="wrap docs-layout">
+  <aside class="docs-sidebar">
+    <nav aria-label="Documentation">
+      <p class="sidebar-title">Documentation</p>
+      <ol>
+        {% for p in section.pages %}
+        <li><a href="{{ p.permalink }}">{{ p.title }}</a></li>
+        {% endfor %}
+      </ol>
+    </nav>
+  </aside>
+
+  <article class="docs-body">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="{{ get_url(path='@/_index.md') }}">Home</a> ›
+    </nav>
+    <h1>{{ section.title }}</h1>
+    <p class="lede">{{ section.description }}</p>
+    {{ section.content | safe }}
+
+    <ul class="guide-grid">
+      {% for p in section.pages %}
+      <li>
+        <a href="{{ p.permalink }}">
+          <strong>{{ p.title }}</strong>
+          <span>{{ p.description }}</span>
+        </a>
+      </li>
+      {% endfor %}
+    </ul>
+  </article>
+</div>
+{% endblock %}

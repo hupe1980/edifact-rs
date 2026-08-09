@@ -1,4 +1,8 @@
-# Writing ✍️
++++
+title = "Writing"
+description = "Serialize segments back to the EDIFACT wire format with Writer, automatic delimiter escaping, custom UNA service strings, and repeating data elements."
+weight = 40
++++
 
 This guide covers every way to produce EDIFACT output — from typed structs to
 raw segment construction and custom delimiter configuration.
@@ -23,8 +27,8 @@ raw segment construction and custom delimiter configuration.
 
 ## Serialize a typed struct
 
-```rust,ignore
-use edifact_rs::{EdifactSerialize, ser};
+```rust
+use edifact_rs::{EdifactSerialize, ser, to_edifact_string};
 
 #[derive(edifact_rs::EdifactSerialize)]
 #[edifact(segment = "BGM")]
@@ -53,7 +57,8 @@ let bytes = ser::to_bytes(&bgm)?;
 
 `None` fields produce empty elements in their positional slot:
 
-```rust,ignore
+```rust
+# use edifact_rs::to_edifact_string;
 # #[derive(edifact_rs::EdifactSerialize)]
 # #[edifact(segment = "BGM")]
 # struct Bgm {
@@ -84,20 +89,23 @@ assert_eq!(out, "BGM+220+PO-4711+'");
 
 ## Round-trip: parse then write
 
-```rust,ignore
-use edifact_rs::{from_bytes, to_bytes};
+```rust
+use edifact_rs::{from_bytes, segments_to_bytes};
 
 let input = b"UNA:+.? 'BGM+220+PO-4711+9'NAD+BY+4000001::9'";
 let segs: Vec<_> = from_bytes(input).collect::<Result<_, _>>()?;
 
-let output = to_bytes(&segs)?;
-// output matches input byte-for-byte (UNA is preserved if present)
+let output = segments_to_bytes(&segs)?;
+assert_eq!(output, b"BGM+220+PO-4711+9'NAD+BY+4000001::9'");
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-> **Note**: `to_bytes` uses the **default** EDIFACT delimiters when serializing
-> `Segment<'_>` slices. If the original had a custom UNA you should use `Writer`
-> directly to preserve the custom service string.
+`segments_to_bytes` is the entry point for a slice of parsed `Segment`s;
+`ser::to_bytes` is for a value that implements `EdifactSerialize`.
+
+> **Note**: `segments_to_bytes` writes with the **default** EDIFACT delimiters and
+> emits no `UNA` header, so the round-trip above is not byte-for-byte when the
+> input carried one. Use `Writer::with_una` to preserve a custom service string.
 
 ---
 
@@ -257,7 +265,7 @@ writer.finish()?;
 
 To write with non-default delimiters, create the writer with `Writer::with_una`:
 
-```rust,ignore
+```rust
 use edifact_rs::{Writer, ServiceStringAdvice};
 
 let ssa = ServiceStringAdvice {
@@ -272,14 +280,46 @@ let ssa = ServiceStringAdvice {
 let mut buf: Vec<u8> = Vec::new();
 let mut writer = Writer::with_una(&mut buf, ssa)?;
 
-writer.write_raw("BGM", &["220|PO-4711|9"])?;
+// One `&str` per data element; `write_raw` splits each on the *component*
+// separator, which this UNA sets to `;`.
+writer.write_raw("BGM", &["220", "PO-4711", "9"])?;
 writer.finish()?;
 
 let text = String::from_utf8(buf).unwrap();
-// UNA written first, then segments with custom delimiters:
-assert!(text.starts_with("UNA;|.?!"));
+// UNA header first (9 bytes, including the space "not used" repetition slot),
+// then the segment with the custom delimiters.
+assert_eq!(text, "UNA;|.? !BGM|220|PO-4711|9!");
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
+
+---
+
+## Repeating data elements
+
+ISO 9735-4 §3.1 repetitions are written with the repetition separator from UNA
+position 7, so the writer needs a `ServiceStringAdvice` that declares one:
+
+```rust
+use edifact_rs::{Element, Segment, ServiceStringAdvice, Writer};
+
+let ssa = ServiceStringAdvice { repetition_sep: b'*', ..Default::default() };
+let mut buf: Vec<u8> = Vec::new();
+{
+    let mut writer = Writer::with_una(&mut buf, ssa)?;
+    let rff = Segment::new(
+        "RFF",
+        vec![Element::of(&["ON", "1"]).and_repeat(&["ON", "2"])],
+    );
+    writer.write_segment(&rff)?;
+}
+assert!(String::from_utf8(buf).unwrap().ends_with("RFF+ON:1*ON:2'"));
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+Writing a repeating element through a writer that has **no** declared separator
+is refused with `EdifactError::RepetitionSeparatorNotDeclared` (`E037`) rather
+than silently joined with the space sentinel — which would read back as a single
+occurrence.
 
 ---
 
@@ -288,21 +328,21 @@ assert!(text.starts_with("UNA;|.?!"));
 `Writer` **automatically escapes** any character in a component value that collides
 with the current delimiter set. You never need to pre-escape data:
 
-```rust,ignore
+```rust
 use edifact_rs::{Writer, Segment, Element};
 
 let mut buf: Vec<u8> = Vec::new();
 let mut writer = Writer::new(&mut buf);
 
-// "+" is the element separator — the writer escapes it automatically
+// Both `:` and `+` are delimiters — the writer escapes each of them.
 writer.write_segment(&Segment::new("FTX", vec![
     Element::of(&["AAI"]),
-    Element::of(&["Price: 100+VAT"]),  // '+' will be escaped as '?+'
+    Element::of(&["Price: 100+VAT"]),  // ':' → '?:'  and  '+' → '?+'
 ]))?;
 writer.finish()?;
 
 let text = String::from_utf8(buf).unwrap();
-assert_eq!(text, "FTX+AAI+Price: 100?+VAT'");
+assert_eq!(text, "FTX+AAI+Price?: 100?+VAT'");
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
@@ -312,6 +352,9 @@ Characters escaped by default:
 - `:` (component separator)
 - `?` (the release character itself)
 
+Plus the repetition separator, when the active `UNA` declares one. The space
+"not used" sentinel at UNA position 7 is never escaped.
+
 ---
 
 ## Event-based writing (`WriterEmitter`)
@@ -319,7 +362,7 @@ Characters escaped by default:
 For advanced use cases — such as writing segments produced by `EdifactSerialize`
 derived types to a `Write` sink without buffering — use `WriterEmitter`:
 
-```rust,ignore
+```rust
 use edifact_rs::{ser, WriterEmitter, EdifactSerialize, Writer};
 
 # #[derive(EdifactSerialize)]
@@ -334,8 +377,8 @@ let mut emitter = WriterEmitter::new(&mut buf);
 
 bgm.edifact_serialize(&mut emitter)?;
 
-let (writer, _) = emitter.into_inner();
-writer.finish()?;
+// `finish` flushes and hands back the sink that was passed in.
+let _sink = emitter.finish()?;
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
@@ -375,6 +418,6 @@ w.finish()?;
 
 ## Next steps
 
-- [Typed Derive](typed-derive.md) — derive `EdifactSerialize` for your structs
-- [Parsing](parsing.md) — parse EDIFACT input to `Segment` slices
-- [Performance](performance.md) — allocation budgets and benchmarking tips
+- [Typed Derive](@/docs/typed-derive.md) — derive `EdifactSerialize` for your structs
+- [Parsing](@/docs/parsing.md) — parse EDIFACT input to `Segment` slices
+- [Performance](@/docs/performance.md) — allocation budgets and benchmarking tips

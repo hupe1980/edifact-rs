@@ -140,7 +140,7 @@ impl SegmentGroupIndexed {
 ///
 /// # Worked Example
 ///
-/// Consider a simplified 3-level MSCONS-like schema:
+/// Consider a simplified 3-level multi-level schema:
 ///
 /// ```rust
 /// use edifact_rs::group::{GroupDef, group_segments_indexed};
@@ -158,7 +158,7 @@ impl SegmentGroupIndexed {
 ///     },
 /// ];
 ///
-/// // A small MSCONS-like message fragment (no envelope for clarity).
+/// // A small multi-level message fragment (no envelope for clarity).
 /// let input = b"RFF+Z13:REF1'LOC+172+DE123'DTM+163:20230101:102'QTY+220:100:KWH'";
 /// let segments: Vec<_> = from_bytes(input)
 ///     .collect::<Result<_, _>>()
@@ -201,12 +201,12 @@ impl SegmentGroupIndexed {
 /// ```rust,ignore
 /// use edifact_rs::{ProfileRulePack, ValidationContext};
 ///
-/// let pack = ProfileRulePack::new("MY-AHB")
+/// let pack = ProfileRulePack::new("MY-PROFILE")
 ///     .require_segment_in_group("SG5", "DTM", "SG5-DTM-M")
 ///     .forbid_segment_in_group("SG1", "LOC", "SG1-LOC-F");
 /// let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 ///
-/// let tree = group_segments_indexed(&segments, SCHEMA, "MSCONS");
+/// let tree = group_segments_indexed(&segments, SCHEMA, "ORDERS");
 /// let report = ctx.validate_lenient_grouped(&tree, &segments);
 /// ```
 ///

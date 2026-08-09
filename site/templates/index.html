@@ -1,0 +1,205 @@
+{% extends "base.html" %}
+
+{% block structured_data %}
+{{ super() }}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebSite",
+  "name": {{ config.title | json_encode | safe }},
+  "url": {{ config.base_url | json_encode | safe }},
+  "description": {{ config.description | json_encode | safe }},
+  "inLanguage": "en"
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "What is EDIFACT?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "EDIFACT (Electronic Data Interchange For Administration, Commerce and Transport) is the UN standard for structured business messages, defined in ISO 9735. An interchange is flat text: segments separated by a terminator, each carrying data elements and components. It is used across supply chain, logistics, energy, healthcare, and banking."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does edifact-rs parse without allocating?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Segment tags and component values borrow directly from the input byte slice. Only the per-segment element vector is allocated, and an owned string is created solely for values that contained a release-character escape."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can edifact-rs stream files larger than memory?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. The reader-based APIs yield one owned segment at a time, and message windows group them into UNH..UNT units, so peak memory stays proportional to a single message rather than the whole interchange."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does edifact-rs support EDIFACT syntax version 4 repeating data elements?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. When a UNA service string advice declares a repetition separator at position 7, repeating data elements are split into separate occurrences rather than left glued into the value, per ISO 9735-4 section 3.1."
+      }
+    }
+  ]
+}
+</script>
+{% endblock %}
+
+{% block content %}
+<section class="hero">
+  <div class="wrap">
+    <p class="eyebrow">ISO 9735 · Rust</p>
+    <h1>EDIFACT for Rust that refuses to guess.</h1>
+    <p class="hero-lede">
+      Zero-copy parsing, streaming deserialization, typed derive macros, and
+      composable validation — built so that malformed input produces an
+      <em>error</em>, never a plausible-looking wrong value.
+    </p>
+
+    <div class="hero-actions">
+      <a class="btn btn-primary" href="{{ get_url(path='@/docs/getting-started.md') }}">Get started</a>
+      <a class="btn" href="{{ get_url(path='@/docs/_index.md') }}">Read the guides</a>
+      <a class="btn btn-ghost" href="{{ config.extra.docs_rs }}" rel="noopener">API reference</a>
+    </div>
+
+    <p class="install"><code>cargo add edifact-rs</code></p>
+
+    <p class="badges">
+      <a href="{{ config.extra.crates_io }}" rel="noopener"><img src="https://img.shields.io/crates/v/edifact-rs.svg" alt="edifact-rs on crates.io" loading="lazy" width="96" height="20"></a>
+      <a href="{{ config.extra.docs_rs }}" rel="noopener"><img src="https://docs.rs/edifact-rs/badge.svg" alt="API documentation on docs.rs" loading="lazy" width="96" height="20"></a>
+      <a href="{{ config.extra.repository }}/actions" rel="noopener"><img src="{{ config.extra.repository }}/actions/workflows/ci.yml/badge.svg" alt="CI status" loading="lazy" width="120" height="20"></a>
+    </p>
+  </div>
+</section>
+
+<section class="wrap sample" aria-labelledby="sample-heading">
+  <h2 id="sample-heading">Parse, address, validate</h2>
+  <div class="sample-grid">
+    <div>
+      <h3>Borrow straight from the bytes</h3>
+      <pre><code class="language-rust">use edifact_rs::from_bytes;
+
+let input = b"UNA:+.? 'BGM+220+PO-4711+9'";
+let segments: Vec&lt;_&gt; = from_bytes(input).collect::&lt;Result&lt;_, _&gt;&gt;()?;
+
+assert_eq!(segments[0].tag, "BGM");
+assert_eq!(segments[0].element_str(1), Some("PO-4711"));</code></pre>
+    </div>
+    <div>
+      <h3>Address fields by identifier, not index</h3>
+      <pre><code class="language-rust">// A stale or mistyped identifier is a compile error,
+// not a quiet read of the neighbouring element.
+#[derive(EdifactDeserialize)]
+#[edifact(segment = "NAD", layout = NAD_DEF)]
+struct Nad {
+    #[edifact(element = "3035")] qualifier: String,
+    #[edifact(element = "3039")] party_id: String,
+}</code></pre>
+    </div>
+  </div>
+</section>
+
+<section class="wrap features" aria-labelledby="features-heading">
+  <h2 id="features-heading">Why edifact-rs</h2>
+  <ul class="feature-grid">
+    <li>
+      <h3>Zero-copy by default</h3>
+      <p>Tags and component values borrow from the input slice. The only per-segment
+      allocation is the element vector; owned strings appear solely where a release
+      escape had to be resolved.</p>
+    </li>
+    <li>
+      <h3>Constant-memory streaming</h3>
+      <p>Reader iterators yield one segment at a time and message windows group them
+      into <code>UNH</code>…<code>UNT</code> units, so a multi-gigabyte interchange
+      costs one message of peak memory.</p>
+    </li>
+    <li>
+      <h3>Identifiers over indices</h3>
+      <p>Address data elements by their UN/EDIFACT identifier. Resolution happens during
+      const evaluation, so a wrong identifier fails the build instead of silently
+      reading the element next door.</p>
+    </li>
+    <li>
+      <h3>Syntax v4 repetitions</h3>
+      <p>When a <code>UNA</code> declares a repetition separator, repeating data elements
+      are split into real occurrences — not left glued into the value as literal text.</p>
+    </li>
+    <li>
+      <h3>Limits that speak up</h3>
+      <p>Segment, message, and byte budgets report a violation. A budget that quietly
+      ended iteration would be indistinguishable from clean end-of-input, and a caller
+      would accept a truncated interchange as a whole one.</p>
+    </li>
+    <li>
+      <h3>Layered, composable validation</h3>
+      <p>Envelope, structure, code-list, and profile layers write into one report with
+      stable error codes, byte spans, and rule identifiers you can filter on.</p>
+    </li>
+  </ul>
+</section>
+
+<section class="wrap faq" aria-labelledby="faq-heading">
+  <h2 id="faq-heading">Frequently asked</h2>
+
+  <details>
+    <summary>What is EDIFACT?</summary>
+    <p>EDIFACT — Electronic Data Interchange For Administration, Commerce and
+    Transport — is the UN standard for structured business messages, defined in
+    ISO 9735. An interchange is flat text: segments separated by a terminator, each
+    carrying data elements, each of those optionally split into components. It is
+    used across supply chain, logistics, energy, healthcare, and banking.
+    <a href="{{ get_url(path='@/docs/core-concepts.md') }}">See Core Concepts</a>.</p>
+  </details>
+
+  <details>
+    <summary>How is this different from writing a split-on-delimiters parser?</summary>
+    <p>Delimiters can be redefined per interchange by the <code>UNA</code> service
+    string advice, any delimiter can appear inside a value when release-escaped, and
+    syntax version 4 adds a repetition separator that changes an element's shape
+    rather than its text. A naive split silently merges or truncates values in all
+    three cases.</p>
+  </details>
+
+  <details>
+    <summary>Is it safe against hostile input?</summary>
+    <p>The crate forbids <code>unsafe</code>. Parsing is guarded by a per-segment size
+    limit plus optional segment-count, message-count, and byte budgets, and the
+    parser, writer, and validators are exercised by property and fuzz tests on every
+    commit. <a href="{{ get_url(path='@/docs/parsing.md') }}">See Parsing</a>.</p>
+  </details>
+
+  <details>
+    <summary>Does it ship UN/EDIFACT directories?</summary>
+    <p>No — directory data is versioned, large, and licensed separately. The crate
+    provides the validation engine and the table types; supply your own definitions
+    at compile time or load them at startup.
+    <a href="{{ get_url(path='@/docs/validation.md') }}">See Validation</a>.</p>
+  </details>
+</section>
+
+<section class="wrap cta" aria-labelledby="cta-heading">
+  <h2 id="cta-heading">Start reading</h2>
+  <ul class="guide-grid">
+    {% set docs = get_section(path="docs/_index.md") %}
+    {% for p in docs.pages | slice(end=6) %}
+    <li>
+      <a href="{{ p.permalink }}">
+        <strong>{{ p.title }}</strong>
+        <span>{{ p.description }}</span>
+      </a>
+    </li>
+    {% endfor %}
+  </ul>
+  <p><a class="btn btn-primary" href="{{ get_url(path='@/docs/_index.md') }}">All guides</a></p>
+</section>
+{% endblock %}

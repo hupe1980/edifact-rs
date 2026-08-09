@@ -30,14 +30,14 @@ pub struct ServiceStringAdvice {
     /// Repetition separator (UNA byte 7, ISO 9735-4 §3.1).
     ///
     /// Defaults to space (`0x20`), the conventional "not used" sentinel, when no
-    /// UNA is present.  Some DVGW gas-market profiles and other non-default
-    /// EDIFACT implementations declare a real repetition separator here; this
-    /// field is always populated from the UNA so that downstream code can access
-    /// it without re-parsing the raw UNA bytes.
+    /// UNA is present.  Syntax version 4 interchanges — and some industry profiles —
+    /// declare a real repetition separator here.
     ///
-    /// The tokenizer does not currently split on the repetition separator — that
-    /// responsibility belongs to downstream consumers — but `is_valid()` includes
-    /// it in the six-way uniqueness check to catch delimiter collisions early.
+    /// When the separator is **active** (any value other than space) the
+    /// tokenizer splits on it: a data element carrying `ON:1*ON:2` becomes one
+    /// element with two repetitions rather than one repetition whose second
+    /// component is the literal text `1*ON`.  Use
+    /// [`is_repetition_active`][Self::is_repetition_active] to test for this.
     pub repetition_sep: u8,
     /// Segment terminator (default `'`)
     pub segment_term: u8,
@@ -179,6 +179,27 @@ impl ServiceStringAdvice {
             printable_ascii(rep) && rep != e && rep != c && rep != d && rep != r && rep != t
         }
     }
+
+    /// Returns `true` when this interchange declares a usable repetition
+    /// separator (ISO 9735-4 §3.1).
+    ///
+    /// A space at UNA position 7 is the conventional "not used" sentinel, so it
+    /// reports `false` and the tokenizer never splits on it.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::ServiceStringAdvice;
+    ///
+    /// assert!(!ServiceStringAdvice::default().is_repetition_active());
+    /// assert!(ServiceStringAdvice::from_bytes(b"UNA:+.?*'")?.is_repetition_active());
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    #[inline]
+    #[must_use]
+    pub const fn is_repetition_active(&self) -> bool {
+        self.repetition_sep != b' '
+    }
 }
 
 /// Token produced by [`Tokenizer`].
@@ -203,6 +224,18 @@ pub enum Token<'a> {
         /// Raw component value.
         value: &'a str,
         /// Source span of the component value.
+        span: Span,
+    },
+    /// First component of a further repetition of the current data element
+    /// (ISO 9735-4 §3.1).
+    ///
+    /// Only produced when the active [`ServiceStringAdvice`] declares a
+    /// repetition separator — see
+    /// [`is_repetition_active`][ServiceStringAdvice::is_repetition_active].
+    RepeatElement {
+        /// Raw value of the repetition's first component.
+        value: &'a str,
+        /// Source span of the value.
         span: Span,
     },
     /// Segment terminator — signals the end of a segment
@@ -358,13 +391,27 @@ impl<'a> Tokenizer<'a> {
     ///
     /// Uses `memchr3` to bulk-scan over non-special bytes between hits, only
     /// falling back to a per-byte step when a release character is encountered.
+    /// Offset of the next segment terminator — or repetition separator, when the
+    /// interchange declares one — at or after `from`, searching within `window`.
+    ///
+    /// `memchr` tops out at three needles and `read_value` already spends those
+    /// on the element separator, component separator, and release character, so
+    /// the remaining one or two needles are searched separately and cached.
+    #[inline]
+    fn find_stop(&self, window: &[u8]) -> Option<usize> {
+        if self.ssa.is_repetition_active() {
+            memchr2(self.ssa.segment_term, self.ssa.repetition_sep, window)
+        } else {
+            memchr(self.ssa.segment_term, window)
+        }
+    }
+
     fn read_value(&mut self) -> Result<(&'a str, Span), EdifactError> {
         let start = self.pos;
-        let (elem, comp, release, term) = (
+        let (elem, comp, release) = (
             self.ssa.element_sep,
             self.ssa.component_sep,
             self.ssa.release_char,
-            self.ssa.segment_term,
         );
         // Absolute cap on how far this value may extend before the per-segment
         // byte guard trips.  Bounding the scan window here (rather than only
@@ -376,28 +423,30 @@ impl<'a> Tokenizer<'a> {
             .saturating_add(1)
             .min(self.input.len());
 
-        // Absolute offset of the next segment terminator at or after the current
-        // search origin.  `memchr3` below rescans only the bytes it actually
-        // consumes, but a naive `memchr(term, remaining)` per iteration would
-        // rescan the whole tail on every release sequence, making a value such as
-        // `?a?a?a…` quadratic.  Caching the hit keeps the terminator search
-        // amortised linear: each rescan starts past the previous hit, so the
-        // scanned regions are disjoint.
-        let mut term_hit = memchr(term, &self.input[self.pos..scan_end]).map(|i| self.pos + i);
+        // Absolute offset of the next stop byte (segment terminator, plus the
+        // repetition separator when active) at or after the current search
+        // origin.  `memchr3` below rescans only the bytes it actually consumes,
+        // but a naive re-search per iteration would rescan the whole tail on
+        // every release sequence, making a value such as `?a?a?a…` quadratic.
+        // Caching the hit keeps this search amortised linear: each rescan starts
+        // past the previous hit, so the scanned regions are disjoint.
+        let mut stop_hit = self
+            .find_stop(&self.input[self.pos..scan_end])
+            .map(|i| self.pos + i);
 
         loop {
             if self.pos >= scan_end {
                 break;
             }
             let remaining = &self.input[self.pos..scan_end];
-            // Refresh the cached terminator position once the cursor has moved
-            // past it (only happens when a release sequence escaped a terminator).
-            if term_hit.is_some_and(|t| t < self.pos) {
-                term_hit = memchr(term, remaining).map(|i| self.pos + i);
+            // Refresh the cached stop position once the cursor has moved past it
+            // (only happens when a release sequence escaped a stop byte).
+            if stop_hit.is_some_and(|t| t < self.pos) {
+                stop_hit = self.find_stop(remaining).map(|i| self.pos + i);
             }
             let hit_ect = memchr3(elem, comp, release, remaining);
-            let hit_term = term_hit.map(|t| t - self.pos);
-            let hit = match (hit_ect, hit_term) {
+            let hit_stop = stop_hit.map(|t| t - self.pos);
+            let hit = match (hit_ect, hit_stop) {
                 (None, None) => {
                     self.pos = scan_end;
                     break;
@@ -419,20 +468,22 @@ impl<'a> Tokenizer<'a> {
                 self.pos += hit + 2;
                 continue;
             }
-            // b is elem, comp, or term — end of value.
+            // b is elem, comp, rep, or term — end of value.
             self.pos += hit;
             break;
         }
-        let span = Span::new(start, self.pos);
-        let value = std::str::from_utf8(&self.input[start..self.pos])
-            .map_err(|_| EdifactError::InvalidText { offset: start })?;
-        // Enforce the per-segment byte-length guard.
+        // The size guard is checked *before* UTF-8 validation.  `scan_end` can
+        // cut a multi-byte sequence in half, and reporting that as `InvalidText`
+        // blamed the payload for what is really an oversized segment.
         if self.pos - self.segment_start > self.max_segment_bytes {
             return Err(EdifactError::SegmentTooLong {
                 offset: self.segment_start,
                 limit: self.max_segment_bytes,
             });
         }
+        let span = Span::new(start, self.pos);
+        let value = std::str::from_utf8(&self.input[start..self.pos])
+            .map_err(|_| EdifactError::InvalidText { offset: start })?;
         Ok((value, span))
     }
 
@@ -547,6 +598,13 @@ impl<'a> Iterator for Tokenizer<'a> {
                             Err(error) => return Some(Err(error)),
                         };
                         return Some(Ok(Token::ComponentElement { value, span }));
+                    } else if self.ssa.is_repetition_active() && b == self.ssa.repetition_sep {
+                        self.pos += 1;
+                        let (value, span) = match self.read_value() {
+                            Ok(value) => value,
+                            Err(error) => return Some(Err(error)),
+                        };
+                        return Some(Ok(Token::RepeatElement { value, span }));
                     } else if b == b'\r' || b == b'\n' {
                         self.pos += 1;
                         // inter-element whitespace inside a segment — skip
@@ -693,6 +751,31 @@ mod tests {
             matches!(err, EdifactError::SegmentTooLong { .. }),
             "expected SegmentTooLong, got {err:?}"
         );
+    }
+
+    #[test]
+    fn an_oversized_segment_is_reported_as_such_even_with_multi_byte_text() {
+        // The scan window can cut a multi-byte sequence in half.  Validating
+        // UTF-8 before the size guard blamed the payload (`InvalidText`) for
+        // what is really an oversized segment, sending the reader hunting for an
+        // encoding problem that does not exist.
+        let mut input = b"BGM+".to_vec();
+        input.extend(std::iter::repeat_n("ä".as_bytes(), 200_000).flatten());
+        let err = crate::from_bytes(&input)
+            .collect::<Result<Vec<_>, _>>()
+            .expect_err("oversized segment must be rejected");
+        assert!(
+            matches!(err, EdifactError::SegmentTooLong { .. }),
+            "expected SegmentTooLong, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn multi_byte_text_within_the_limit_still_parses() {
+        let segs: Vec<_> = crate::from_bytes("FTX+Grüße aus Köln'".as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .expect("valid UTF-8 must parse");
+        assert_eq!(segs[0].element_str(0), Some("Grüße aus Köln"));
     }
 
     #[test]

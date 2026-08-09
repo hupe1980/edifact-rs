@@ -79,7 +79,7 @@ where
 /// when two packs contain a rule with the same id, the rule from the *other* (override)
 /// pack replaces the one in `self`.
 pub(super) struct NamedRule {
-    /// Stable identifier for this rule, e.g. `"AHB-11001-BGM-M"`.
+    /// Stable identifier for this rule, e.g. `"PROFILE-4711-BGM-M"`.
     ///
     /// `None` for anonymous rules that can never be overridden by id.
     pub(super) id: Option<Arc<str>>,
@@ -303,7 +303,7 @@ impl ProfileRulePack {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let pack = ProfileRulePack::new("MY-AHB")
+    /// let pack = ProfileRulePack::new("MY-PROFILE")
     ///     .require_segment("BGM", "MY-BGM-M")
     ///     .require_segment("DTM", "MY-DTM-M");
     /// ```
@@ -448,7 +448,7 @@ impl ProfileRulePack {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let pack = ProfileRulePack::new("AHB-MSCONS")
+    /// let pack = ProfileRulePack::new("PROFILE-ORDERS")
     ///     .with_scoped_group_rule_fn("SG5", "SG5-CAV-M", |_group, segs, _ctx, issues| {
     ///         if !segs.iter().any(|s| s.tag == "CAV") {
     ///             issues.push(
@@ -688,12 +688,12 @@ impl ProfileRulePack {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let base = ProfileRulePack::new("MIG-UTILMD-BASE")
+    /// let base = ProfileRulePack::new("MIG-BASE")
     ///     .with_stateless_rule_fn(/* mandatory segment rules */);
     ///
-    /// let ahb_11001 = ProfileRulePack::new("AHB-11001")
+    /// let profile_4711 = ProfileRulePack::new("PROFILE-4711")
     ///     .extend_from(&base)?
-    ///     .with_stateless_rule_fn(/* 11001-specific rules */);
+    ///     .with_stateless_rule_fn(/* 4711-specific rules */);
     /// ```
     ///
     /// When your base pack is wrapped in an [`Arc`] you can dereference it:
@@ -744,11 +744,11 @@ impl ProfileRulePack {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let base = ProfileRulePack::new("UTILMD-5.4")
-    ///     .with_named_stateless_rule_fn("AHB-11001-BGM-M", |segs, _issues| { /* old */ });
+    /// let base = ProfileRulePack::new("MIG-5.4")
+    ///     .with_named_stateless_rule_fn("PROFILE-4711-BGM-M", |segs, _issues| { /* old */ });
     ///
-    /// let delta = ProfileRulePack::new("UTILMD-5.5-delta")
-    ///     .with_named_stateless_rule_fn("AHB-11001-BGM-M", |segs, _issues| { /* updated */ });
+    /// let delta = ProfileRulePack::new("MIG-5.5-delta")
+    ///     .with_named_stateless_rule_fn("PROFILE-4711-BGM-M", |segs, _issues| { /* updated */ });
     ///
     /// // `result` runs the updated BGM-M rule only once:
     /// let result = base.merge_with_override(delta)?;

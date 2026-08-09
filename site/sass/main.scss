@@ -1,0 +1,332 @@
+// edifact-rs site styles.
+//
+// No JavaScript and no web fonts: the whole page is one stylesheet over the
+// system font stack, which keeps first paint fast and the Core Web Vitals
+// green without a build step beyond Zola's Sass compiler.
+
+// Light palette on :root so a browser with no preference gets a complete theme;
+// only the tokens that change are redefined for dark.
+:root {
+  --bg: #ffffff;
+  --bg-soft: #f6f8fa;
+  --bg-code: #f6f8fa;
+  --fg: #1c2024;
+  --fg-muted: #5b6472;
+  --border: #d8dee4;
+  --accent: #b3521a;
+  --accent-fg: #ffffff;
+  --accent-soft: #fdf3ec;
+
+  --radius: 10px;
+  --wrap: 68rem;
+  --measure: 44rem;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1216;
+    --bg-soft: #161b22;
+    --bg-code: #161b22;
+    --fg: #e4e7eb;
+    --fg-muted: #9aa4b2;
+    --border: #2b323b;
+    --accent: #ff9d5c;
+    --accent-fg: #1a1005;
+    --accent-soft: #22190f;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--sans);
+  font-size: 1rem;
+  line-height: 1.65;
+  -webkit-text-size-adjust: 100%;
+}
+
+.wrap {
+  width: 100%;
+  max-width: var(--wrap);
+  margin-inline: auto;
+  padding-inline: 1.25rem;
+}
+
+// ── links, headings, type ────────────────────────────────────────────────────
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+h1, h2, h3, h4 { line-height: 1.25; font-weight: 650; margin: 2.25rem 0 .75rem; text-wrap: balance; }
+h1 { font-size: clamp(1.9rem, 1.3rem + 2.4vw, 2.7rem); margin-top: 0; letter-spacing: -.02em; }
+h2 { font-size: clamp(1.4rem, 1.15rem + 1vw, 1.8rem); letter-spacing: -.01em; }
+h3 { font-size: 1.15rem; }
+
+p, ul, ol, table, pre, details, blockquote { margin: 0 0 1.1rem; }
+
+.lede { font-size: 1.12rem; color: var(--fg-muted); max-width: var(--measure); }
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  &:focus {
+    left: 1rem; top: 1rem; z-index: 100;
+    background: var(--accent); color: var(--accent-fg);
+    padding: .6rem 1rem; border-radius: var(--radius);
+  }
+}
+
+// ── header / footer ──────────────────────────────────────────────────────────
+
+.site-header {
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--bg) 88%, transparent);
+  backdrop-filter: blur(8px);
+  position: sticky; top: 0; z-index: 20;
+}
+
+.header-inner {
+  display: flex; flex-wrap: wrap; gap: 1rem;
+  align-items: center; justify-content: space-between;
+  min-height: 3.5rem;
+}
+
+.brand {
+  display: inline-flex; align-items: center; gap: .5rem;
+  font-weight: 700; color: var(--fg); text-decoration: none; font-size: 1.05rem;
+}
+.brand-mark { font-size: 1.1rem; }
+
+.site-nav {
+  display: flex; flex-wrap: wrap; gap: 1.1rem;
+  a { color: var(--fg-muted); text-decoration: none; font-size: .95rem; }
+  a:hover { color: var(--accent); text-decoration: underline; }
+}
+
+.site-footer {
+  border-top: 1px solid var(--border);
+  margin-top: 4rem; padding-block: 2rem;
+  color: var(--fg-muted); font-size: .9rem;
+}
+.footer-inner p { margin: 0 0 .5rem; }
+.footer-links a { margin-right: 1rem; }
+
+// ── landing page ─────────────────────────────────────────────────────────────
+
+.hero {
+  padding-block: clamp(3rem, 8vw, 5.5rem) 2.5rem;
+  background:
+    radial-gradient(60rem 24rem at 50% -8rem, var(--accent-soft), transparent 70%);
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+}
+
+.eyebrow {
+  text-transform: uppercase; letter-spacing: .12em;
+  font-size: .75rem; font-weight: 700; color: var(--accent); margin: 0 0 .75rem;
+}
+
+.hero-lede {
+  font-size: clamp(1.05rem, 1rem + .4vw, 1.25rem);
+  color: var(--fg-muted);
+  max-width: 42rem; margin-inline: auto;
+}
+
+.hero-actions {
+  display: flex; flex-wrap: wrap; gap: .75rem;
+  justify-content: center; margin: 1.75rem 0 1.25rem;
+}
+
+.btn {
+  display: inline-block; padding: .6rem 1.15rem;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--fg); text-decoration: none; font-weight: 550; font-size: .95rem;
+  background: var(--bg);
+  &:hover { border-color: var(--accent); color: var(--accent); }
+}
+.btn-primary {
+  background: var(--accent); border-color: var(--accent); color: var(--accent-fg);
+  &:hover { filter: brightness(1.08); color: var(--accent-fg); }
+}
+.btn-ghost { background: transparent; }
+
+.install code {
+  display: inline-block;
+  background: var(--bg-soft); border: 1px solid var(--border);
+  padding: .5rem 1rem; border-radius: var(--radius);
+  font-family: var(--mono); font-size: .95rem;
+}
+
+.badges {
+  margin-top: 1.25rem;
+  img { height: 20px; width: auto; vertical-align: middle; margin: 0 .2rem; }
+}
+
+.sample, .features, .faq, .cta { padding-block: 2.5rem; }
+
+.sample-grid {
+  display: grid; gap: 1.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  h3 { margin-top: 0; font-size: 1rem; color: var(--fg-muted); font-weight: 600; }
+}
+
+.feature-grid, .guide-grid {
+  list-style: none; padding: 0; margin: 0;
+  display: grid; gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+}
+
+.feature-grid li {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 1.15rem 1.25rem; background: var(--bg-soft);
+  h3 { margin: 0 0 .4rem; font-size: 1.02rem; }
+  p { margin: 0; color: var(--fg-muted); font-size: .95rem; }
+}
+
+.guide-grid a {
+  display: block; height: 100%;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 1rem 1.15rem; text-decoration: none; color: var(--fg);
+  background: var(--bg-soft);
+  strong { display: block; color: var(--accent); margin-bottom: .25rem; }
+  span { color: var(--fg-muted); font-size: .92rem; }
+  &:hover { border-color: var(--accent); }
+}
+
+.faq details {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: .85rem 1.15rem; background: var(--bg-soft);
+  summary { cursor: pointer; font-weight: 600; }
+  p { margin: .75rem 0 0; color: var(--fg-muted); }
+}
+
+// ── docs layout ──────────────────────────────────────────────────────────────
+
+.docs-layout {
+  display: grid;
+  grid-template-columns: 15rem minmax(0, 1fr);
+  gap: 2.5rem;
+  padding-block: 2.5rem;
+  align-items: start;
+}
+
+@media (max-width: 60rem) {
+  .docs-layout { grid-template-columns: minmax(0, 1fr); gap: 1.5rem; }
+  .docs-sidebar { position: static; border-right: 0; border-bottom: 1px solid var(--border); padding-bottom: 1rem; }
+}
+
+.docs-sidebar {
+  position: sticky; top: 4.5rem;
+  max-height: calc(100vh - 6rem); overflow-y: auto;
+  font-size: .93rem;
+  .sidebar-title {
+    text-transform: uppercase; letter-spacing: .1em;
+    font-size: .7rem; font-weight: 700; color: var(--fg-muted); margin: 0 0 .6rem;
+  }
+  ol { list-style: none; margin: 0; padding: 0; counter-reset: nav; }
+  li { margin-bottom: .15rem; }
+  a {
+    display: block; padding: .3rem .6rem; border-radius: 6px;
+    color: var(--fg-muted); text-decoration: none;
+    &:hover { background: var(--bg-soft); color: var(--accent); }
+    &[aria-current="page"] { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  }
+}
+
+.docs-body {
+  min-width: 0;
+  > p, > ul, > ol, > blockquote { max-width: var(--measure); }
+}
+
+.breadcrumb { font-size: .85rem; color: var(--fg-muted); margin-bottom: 1rem; }
+
+.toc {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-soft); padding: .85rem 1.15rem; font-size: .93rem;
+  summary { cursor: pointer; font-weight: 600; }
+  ol { margin: .6rem 0 0; padding-left: 1.2rem; }
+  ol ol { padding-left: 1rem; }
+  a { color: var(--fg-muted); text-decoration: none; }
+  a:hover { color: var(--accent); text-decoration: underline; }
+}
+
+.pager {
+  display: flex; gap: 1rem; flex-wrap: wrap;
+  justify-content: space-between; margin-top: 3rem;
+  padding-top: 1.5rem; border-top: 1px solid var(--border);
+  a {
+    flex: 1 1 12rem;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: .75rem 1rem; text-decoration: none; color: var(--fg); font-weight: 600;
+    &:hover { border-color: var(--accent); }
+    span { display: block; font-size: .75rem; font-weight: 500; color: var(--fg-muted); text-transform: uppercase; letter-spacing: .08em; }
+  }
+  .next { text-align: right; }
+}
+
+.edit-link { margin-top: 1.5rem; font-size: .88rem; color: var(--fg-muted); }
+
+// ── code, tables, misc ───────────────────────────────────────────────────────
+
+code {
+  font-family: var(--mono);
+  font-size: .9em;
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: .1em .35em;
+}
+
+pre {
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.1rem;
+  overflow-x: auto;
+  font-size: .88rem;
+  line-height: 1.55;
+  code { background: none; border: 0; padding: 0; font-size: inherit; }
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .93rem;
+  display: block;
+  overflow-x: auto;
+}
+th, td { border: 1px solid var(--border); padding: .5rem .7rem; text-align: left; vertical-align: top; }
+th { background: var(--bg-soft); font-weight: 650; }
+
+blockquote {
+  border-left: 3px solid var(--accent);
+  margin-inline: 0; padding: .1rem 0 .1rem 1rem;
+  color: var(--fg-muted);
+}
+
+hr { border: 0; border-top: 1px solid var(--border); margin: 2.5rem 0; }
+
+img { max-width: 100%; height: auto; }
+
+// Heading anchors emitted by Zola's `insert_anchor_links`.
+.zola-anchor {
+  text-decoration: none; color: var(--fg-muted);
+  padding-left: .4rem; opacity: 0;
+}
+h2:hover .zola-anchor, h3:hover .zola-anchor, .zola-anchor:focus { opacity: 1; }

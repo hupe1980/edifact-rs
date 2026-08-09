@@ -1,4 +1,8 @@
-# Typed Derive 🎯
++++
+title = "Typed Derive"
+description = "Map EDIFACT segments and messages onto Rust structs with #[derive(EdifactDeserialize, EdifactSerialize)] and address fields by UN/EDIFACT data element identifier."
+weight = 50
++++
 
 `edifact-rs` ships first-class derive macros that map EDIFACT segments and messages
 to plain Rust structs. Add `#[derive(EdifactDeserialize, EdifactSerialize)]` and the
@@ -73,7 +77,7 @@ struct NadMs {
 The generated `matches_segment` impl checks that element 0 equals `"MS"`.
 Use wildcard suffix with `*` for prefix matching:
 
-```rust,ignore
+```rust
 #[edifact(segment = "NAD", qualifier = "M*")] // matches "MS", "MR", "MT", …
 ```
 
@@ -95,8 +99,14 @@ struct Nad {
 struct can represent any `NAD` qualifier. This is the pattern for message-level
 structs that hold multiple qualifier variants in separate fields:
 
-```rust,ignore
+```rust
 # use edifact_rs::{EdifactDeserialize, EdifactSerialize};
+# #[derive(Debug, EdifactDeserialize, EdifactSerialize)]
+# #[edifact(segment = "BGM")]
+# struct Bgm { #[edifact(element = 0)] code: String }
+# #[derive(Debug, EdifactDeserialize, EdifactSerialize)]
+# #[edifact(segment = "NAD")]
+# struct Nad { #[edifact(element = 0)] qualifier: String }
 #[derive(EdifactDeserialize)]
 struct OrderMessage {
     bgm: Option<Bgm>,
@@ -110,7 +120,7 @@ struct OrderMessage {
 ### `layout = PATH` — resolve fields by UN/EDIFACT data element identifier
 
 Points the struct at a `SegmentDefinition`, which unlocks the code-addressed
-form of `element` described [below](#element--3055--data-element-identifier).
+form of `element` described [below](#element-by-identifier).
 The path must name a **`const`** item (a `const` initialiser cannot read a
 `static`), because identifiers are resolved during const evaluation:
 
@@ -149,7 +159,7 @@ struct SenderParty {
 
 ### `element = N` — positional element index (0-based)
 
-```rust,ignore
+```text
 #[edifact(element = 2)]
 function_code: Option<String>,
 ```
@@ -159,7 +169,7 @@ use it for every simple (non-composite) field.
 
 ### `element = N, component = C` — composite component
 
-```rust,ignore
+```text
 #[edifact(element = 0, component = 1)]
 date_value: String,
 ```
@@ -168,12 +178,12 @@ Maps the field to a specific component within an element.  Use this when an elem
 carries multiple values (e.g. `DTM` element 0 has qualifier/value/format at
 components 0/1/2).
 
-### `element = "3055"` — data element identifier
+### `element = "3055"` — data element identifier {#element-by-identifier}
 
 Under a struct-level `layout`, `element` also accepts a UN/EDIFACT data element
 identifier instead of an index:
 
-```rust,ignore
+```text
 #[edifact(element = "3055")]
 agency: Option<String>,
 ```
@@ -205,17 +215,19 @@ element — combining it with a code that already names a component is a compile
 error.
 
 For runtime lookups against the same metadata, see
-[`Segment::value_by_code`](validation.md#code-addressed-element-access).
+[`Segment::value_by_code`](@/docs/validation.md#code-addressed-element-access).
 
 ### `composite` — full composite element
 
-```rust,ignore
-# use edifact_rs::{EdifactDeserialize, EdifactSerialize};
+```rust
+# use edifact_rs::{
+#     EdifactCompositeDeserialize, EdifactCompositeSerialize, EdifactDeserialize, EdifactSerialize,
+# };
 #[derive(EdifactCompositeDeserialize, EdifactCompositeSerialize)]
 struct PartyId {
     id: String,
-    qualifier: Option<String>,
     code_list: Option<String>,
+    agency: Option<String>,
 }
 
 #[derive(EdifactDeserialize, EdifactSerialize)]
@@ -231,10 +243,29 @@ struct Nad {
 `composite` hands the entire `CompositeElement` to the field's
 `EdifactCompositeDeserialize` impl instead of extracting a single string.
 
+Field *n* of the composite struct maps to component *n*, so `NAD+BY+4711::9`
+fills `id = "4711"`, `code_list = None`, `agency = Some("9")`. Add
+`#[edifact(component = N)]` to a field to pin it to a specific component
+regardless of declaration order. A bare `String` component is mandatory —
+an absent or empty value raises `MissingRequiredComponent` (`E021`) — while
+`Option<String>` is not.
+
 ### `group` — repeated segment group
 
-```rust,ignore
+```rust
 # use edifact_rs::{EdifactDeserialize, EdifactSerialize};
+# #[derive(EdifactDeserialize, EdifactSerialize)]
+# #[edifact(segment = "BGM")]
+# #[derive(Debug)] struct Bgm { #[edifact(element = 0)] code: String }
+# #[derive(EdifactDeserialize, EdifactSerialize)]
+# #[edifact(segment = "DTM")]
+# #[derive(Debug)] struct Dtm { #[edifact(element = 0)] value: String }
+# #[derive(EdifactDeserialize, EdifactSerialize)]
+# #[edifact(segment = "NAD")]
+# #[derive(Debug)] struct Nad { #[edifact(element = 0)] qualifier: String }
+# #[derive(EdifactDeserialize, EdifactSerialize)]
+# #[edifact(segment = "LIN")]
+# #[derive(Debug)] struct Lin { #[edifact(element = 0)] line_no: String }
 #[derive(EdifactDeserialize)]
 struct OrderMessage {
     bgm: Option<Bgm>,
@@ -248,8 +279,20 @@ struct OrderMessage {
 
 ### `qualifier = "VALUE"` — message-field qualifier filter
 
-```rust,ignore
+```rust
 # use edifact_rs::{EdifactDeserialize, EdifactSerialize};
+# #[derive(EdifactDeserialize, EdifactSerialize)]
+# #[edifact(segment = "BGM")]
+# #[derive(Debug)] struct Bgm { #[edifact(element = 0)] code: String }
+# #[derive(EdifactDeserialize, EdifactSerialize)]
+# #[edifact(segment = "DTM")]
+# #[derive(Debug)] struct Dtm { #[edifact(element = 0)] value: String }
+# #[derive(EdifactDeserialize, EdifactSerialize)]
+# #[edifact(segment = "NAD")]
+# #[derive(Debug)] struct Nad { #[edifact(element = 0)] qualifier: String }
+# #[derive(EdifactDeserialize, EdifactSerialize)]
+# #[edifact(segment = "LIN")]
+# #[derive(Debug)] struct Lin { #[edifact(element = 0)] line_no: String }
 #[derive(EdifactDeserialize)]
 struct OrderMessage {
     #[edifact(qualifier = "BY")]
@@ -269,8 +312,22 @@ Within a message struct, `qualifier` on a field restricts which `Nad` segment
 A struct **without** `#[edifact(segment = "TAG")]` is a **message struct**.
 Each field maps to a segment type:
 
-```rust,ignore
+```rust
 # use edifact_rs::{EdifactDeserialize, EdifactSerialize};
+# #[derive(EdifactDeserialize, EdifactSerialize)]
+# #[edifact(segment = "BGM")]
+# #[derive(Debug)] struct Bgm { #[edifact(element = 0)] code: String }
+# #[derive(EdifactDeserialize, EdifactSerialize)]
+# #[edifact(segment = "DTM")]
+# #[derive(Debug)] struct Dtm { #[edifact(element = 0)] value: String }
+# #[derive(EdifactDeserialize, EdifactSerialize)]
+# #[edifact(segment = "NAD")]
+# #[derive(Debug)] struct Nad { #[edifact(element = 0)] qualifier: String }
+# #[derive(EdifactDeserialize, EdifactSerialize)]
+# #[edifact(segment = "LIN")]
+# #[derive(Debug)] struct Lin { #[edifact(element = 0)] line_no: String }
+# use edifact_rs::from_bytes;
+# let input = b"BGM+220'DTM+137'NAD+BY'NAD+SU'LIN+1'";
 #[derive(Debug, EdifactDeserialize)]
 struct OrderMessage {
     bgm: Option<Bgm>,                // finds first BGM segment
@@ -285,6 +342,7 @@ struct OrderMessage {
 
 let segs: Vec<_> = from_bytes(input).collect::<Result<_, _>>()?;
 let msg = OrderMessage::edifact_deserialize(&segs)?;
+# Ok::<(), edifact_rs::EdifactError>(())
 ```
 
 Field rules:
@@ -382,6 +440,6 @@ type implements `std::str::FromStr` and that its error type implements
 
 ## Next steps
 
-- [Streaming](streaming.md) — use `deserialize_messages_from_reader` for reader-based typed extraction
-- [Writing](writing.md) — `EdifactSerialize` and the event model
-- [Validation](validation.md) — validate typed messages against business rules
+- [Streaming](@/docs/streaming.md) — use `deserialize_messages_from_reader` for reader-based typed extraction
+- [Writing](@/docs/writing.md) — `EdifactSerialize` and the event model
+- [Validation](@/docs/validation.md) — validate typed messages against business rules

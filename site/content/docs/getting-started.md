@@ -1,4 +1,8 @@
-# Getting Started 🚀
++++
+title = "Getting Started"
+description = "Install edifact-rs, parse your first EDIFACT interchange, and choose the feature flags you need."
+weight = 10
++++
 
 This guide walks you from zero to a working `edifact-rs` integration in under five minutes.
 
@@ -20,13 +24,14 @@ rustup update      # upgrade to latest stable
 
 ## 1. Add the dependency
 
-```toml
-[dependencies]
-edifact-rs = "0.12"
+```bash
+cargo add edifact-rs
 ```
 
-The `derive` feature is enabled by default, which re-exports
-`EdifactDeserialize` and `EdifactSerialize` derive macros from `edifact-rs-derive`.
+The `derive` feature is enabled by default, which re-exports the
+`EdifactDeserialize` / `EdifactSerialize` derive macros — and their
+`EdifactCompositeDeserialize` / `EdifactCompositeSerialize` counterparts — from
+`edifact-rs-derive`.
 
 ### Optional features
 
@@ -37,16 +42,14 @@ The `derive` feature is enabled by default, which re-exports
 
 Enable diagnostics:
 
-```toml
-[dependencies]
-edifact-rs = { version = "0.12", features = ["diagnostics"] }
+```bash
+cargo add edifact-rs --features diagnostics
 ```
 
 Disable derive macros (core parsing only):
 
-```toml
-[dependencies]
-edifact-rs = { version = "0.12", default-features = false }
+```bash
+cargo add edifact-rs --no-default-features
 ```
 
 ---
@@ -139,7 +142,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 }
 ```
 
-→ Full derive reference: [Typed Derive](typed-derive.md)
+→ Full derive reference: [Typed Derive](@/docs/typed-derive.md)
 
 ---
 
@@ -185,13 +188,13 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 }
 ```
 
-→ Full validation guide: [Validation](validation.md)
+→ Full validation guide: [Validation](@/docs/validation.md)
 
 ---
 
 ## 6. Process a reader (large files)
 
-```rust,ignore
+```rust,no_run
 use edifact_rs::from_reader;
 use std::fs::File;
 
@@ -207,7 +210,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 
 `from_reader` parses one `OwnedSegment` at a time without buffering the whole file.
 
-→ Full streaming guide: [Streaming](streaming.md)
+→ Full streaming guide: [Streaming](@/docs/streaming.md)
 
 ---
 
@@ -215,11 +218,11 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 
 | Goal | Guide |
 |---|---|
-| Understand UNA, delimiters, release chars | [Core Concepts](core-concepts.md) |
-| Parse byte slices efficiently | [Parsing](parsing.md) |
-| Write EDIFACT output | [Writing](writing.md) |
-| Derive typed structs for segments and messages | [Typed Derive](typed-derive.md) |
-| Stream multi-message interchanges | [Streaming](streaming.md) |
-| Add business-rule validation | [Profile Packs](profile-packs.md) |
-| Pretty-print errors in a CLI | [Diagnostics](diagnostics.md) |
-| Integrate with async / tokio | [Async Integration](async-integration.md) |
+| Understand UNA, delimiters, release chars | [Core Concepts](@/docs/core-concepts.md) |
+| Parse byte slices efficiently | [Parsing](@/docs/parsing.md) |
+| Write EDIFACT output | [Writing](@/docs/writing.md) |
+| Derive typed structs for segments and messages | [Typed Derive](@/docs/typed-derive.md) |
+| Stream multi-message interchanges | [Streaming](@/docs/streaming.md) |
+| Add business-rule validation | [Profile Packs](@/docs/profile-packs.md) |
+| Pretty-print errors in a CLI | [Diagnostics](@/docs/diagnostics.md) |
+| Integrate with async / tokio | [Async Integration](@/docs/async-integration.md) |

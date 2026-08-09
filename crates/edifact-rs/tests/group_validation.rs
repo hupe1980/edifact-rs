@@ -14,7 +14,7 @@ use edifact_rs::{
 
 // ── Schema shared across tests ────────────────────────────────────────────────
 
-/// Minimal MSCONS-like schema:
+/// Minimal multi-level schema:
 ///
 /// ```text
 /// ROOT
@@ -66,7 +66,7 @@ fn parse_segs(input: &str) -> Vec<edifact_rs::Segment<'static>> {
 #[test]
 fn group_rule_fires_when_required_segment_absent_from_scoped_group() {
     // DTM is in SG1 (after RFF), not in SG5 (LOC).  Rule: DTM must be in SG5.
-    let input = "UNH+1+MSCONS:D:04B:UN'RFF+Z13:REF1'DTM+137:20230101:102'LOC+172+LOC1'UNT+5+1'";
+    let input = "UNH+1+ORDERS:D:04B:UN'RFF+Z13:REF1'DTM+137:20230101:102'LOC+172+LOC1'UNT+5+1'";
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
@@ -88,7 +88,7 @@ fn group_rule_fires_when_required_segment_absent_from_scoped_group() {
 #[test]
 fn group_rule_does_not_fire_when_segment_present_in_scoped_group() {
     // DTM inside SG5 (after LOC).
-    let input = "UNH+1+MSCONS:D:04B:UN'LOC+172+LOC1'DTM+137:20230101:102'UNT+3+1'";
+    let input = "UNH+1+ORDERS:D:04B:UN'LOC+172+LOC1'DTM+137:20230101:102'UNT+3+1'";
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
@@ -107,7 +107,7 @@ fn group_rule_does_not_fire_when_segment_present_in_scoped_group() {
 #[test]
 fn forbid_segment_in_group_fires_when_segment_present() {
     // UNS must not appear in SG5.
-    let input = "UNH+1+MSCONS:D:04B:UN'LOC+172+LOC1'UNS+D'UNT+3+1'";
+    let input = "UNH+1+ORDERS:D:04B:UN'LOC+172+LOC1'UNS+D'UNT+3+1'";
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
@@ -122,7 +122,7 @@ fn forbid_segment_in_group_fires_when_segment_present() {
 
 #[test]
 fn forbid_segment_in_group_does_not_fire_when_segment_absent() {
-    let input = "UNH+1+MSCONS:D:04B:UN'LOC+172+LOC1'DTM+137:20230101:102'UNT+3+1'";
+    let input = "UNH+1+ORDERS:D:04B:UN'LOC+172+LOC1'DTM+137:20230101:102'UNT+3+1'";
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
@@ -140,7 +140,7 @@ fn forbid_segment_in_group_does_not_fire_when_segment_absent() {
 fn group_rules_for_different_groups_do_not_cross_contaminate() {
     // DTM in SG1 (after RFF) but not in SG5 (after LOC), and QTY in SG6 (after QTY trigger).
     let input =
-        "UNH+1+MSCONS:D:04B:UN'RFF+Z13:R1'DTM+137:20230101:102'LOC+172+L1'QTY+220:100'UNT+5+1'";
+        "UNH+1+ORDERS:D:04B:UN'RFF+Z13:R1'DTM+137:20230101:102'LOC+172+L1'QTY+220:100'UNT+5+1'";
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
@@ -165,7 +165,7 @@ fn group_rules_for_different_groups_do_not_cross_contaminate() {
 
 #[test]
 fn group_rule_issues_are_auto_stamped_with_group_name() {
-    let input = "UNH+1+MSCONS:D:04B:UN'LOC+172+L1'UNT+2+1'";
+    let input = "UNH+1+ORDERS:D:04B:UN'LOC+172+L1'UNT+2+1'";
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
@@ -188,7 +188,7 @@ fn group_rule_issues_are_auto_stamped_with_group_name() {
 
 #[test]
 fn validate_lenient_grouped_owned_works_with_owned_segments() {
-    let input = b"UNH+1+MSCONS:D:04B:UN'LOC+172+L1'DTM+137:20230101:102'UNT+3+1'";
+    let input = b"UNH+1+ORDERS:D:04B:UN'LOC+172+L1'DTM+137:20230101:102'UNT+3+1'";
     let owned = owned_segs(input);
     let tree = group_owned_segments_indexed(&owned, SCHEMA, "ROOT");
 
@@ -208,7 +208,7 @@ fn validate_lenient_grouped_owned_works_with_owned_segments() {
 #[test]
 fn group_rule_fires_per_occurrence_when_group_repeats() {
     // Two SG5 groups: first has DTM, second does not.
-    let input = "UNH+1+MSCONS:D:04B:UN'LOC+172+L1'DTM+137:20230101:102'LOC+172+L2'UNT+4+1'";
+    let input = "UNH+1+ORDERS:D:04B:UN'LOC+172+L1'DTM+137:20230101:102'LOC+172+L2'UNT+4+1'";
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
@@ -228,7 +228,7 @@ fn group_rule_fires_per_occurrence_when_group_repeats() {
 
 #[test]
 fn custom_scoped_group_rule_fn_fires_and_sets_segment_group() {
-    let input = "UNH+1+MSCONS:D:04B:UN'LOC+172+L1'QTY+220:0'UNT+3+1'";
+    let input = "UNH+1+ORDERS:D:04B:UN'LOC+172+L1'QTY+220:0'UNT+3+1'";
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
@@ -292,7 +292,7 @@ fn group_rules_respect_message_type_scoping() {
 fn flat_and_group_validation_both_run_in_grouped_mode() {
     // Flat rule: BGM must be present (it's absent).
     // Group rule: DTM must be in SG5 (also absent).
-    let input = "UNH+1+MSCONS:D:04B:UN'LOC+172+L1'UNT+2+1'";
+    let input = "UNH+1+ORDERS:D:04B:UN'LOC+172+L1'UNT+2+1'";
     let segs = parse_segs(input);
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
@@ -345,7 +345,7 @@ fn forbid_segment_segment_occurrence_is_relative_not_absolute() {
 fn forbid_segment_in_group_occurrence_is_relative_not_absolute() {
     // SG5 group (trigger: LOC) with two QTY segments at positions 1 and 2 within the group.
     // LOC is at absolute 0 within the group slice; occurrences for QTY must be 0 and 1.
-    let segs = parse_segs("UNH+1+MSCONS:D:04B:UN'LOC+172+L1'QTY+21:10'QTY+21:20'UNT+4+1'");
+    let segs = parse_segs("UNH+1+ORDERS:D:04B:UN'LOC+172+L1'QTY+21:10'QTY+21:20'UNT+4+1'");
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
     let pack = ProfileRulePack::new("TEST").forbid_segment_in_group("SG5", "QTY", "TEST-SG5-QTY");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
@@ -373,7 +373,7 @@ fn bail_on_first_error_does_not_skip_sibling_groups_due_to_earlier_flat_errors()
     // error it introduces — not skip all group rules because the flat pass
     // already put errors in the report before the group pass started.
     let segs = parse_segs(
-        "UNH+1+MSCONS:D:04B:UN'\
+        "UNH+1+ORDERS:D:04B:UN'\
          LOC+172+L1'LOC+172+L2'UNT+3+1'",
     );
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");

@@ -1,4 +1,8 @@
-# Async Integration 🌐
++++
+title = "Async Integration"
+description = "Three patterns for using the synchronous edifact-rs parser from tokio without blocking the runtime."
+weight = 100
++++
 
 `edifact-rs` is intentionally **synchronous** — it exposes `std::io::Read`-based
 APIs. This is the right design for EDIFACT:
@@ -15,10 +19,9 @@ other runtimes (`async-std`, `smol`) with minor API substitutions.
 
 ## Dependencies
 
-```toml
-[dependencies]
-edifact-rs = "0.12"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "sync"] }
+```bash
+cargo add edifact-rs
+cargo add tokio --features rt-multi-thread,macros,fs,sync
 ```
 
 ---
@@ -217,12 +220,12 @@ async fn safe_parse(bytes: Vec<u8>) -> Result<usize, Box<dyn std::error::Error +
 cargo run -p edifact-rs --example cookbook_async_tokio_integration
 ```
 
-See [`cookbook_async_tokio_integration.rs`](../crates/edifact-rs/examples/cookbook_async_tokio_integration.rs)
+See [`cookbook_async_tokio_integration.rs`](https://github.com/hupe1980/edifact-rs/tree/main/crates/edifact-rs/examples/cookbook_async_tokio_integration.rs)
 for a runnable example demonstrating Patterns A, B, and C.
 
 ---
 
 ## Next steps
 
-- [Streaming](streaming.md) — synchronous streaming APIs
-- [Performance](performance.md) — memory budgets and benchmarking
+- [Streaming](@/docs/streaming.md) — synchronous streaming APIs
+- [Performance](@/docs/performance.md) — memory budgets and benchmarking

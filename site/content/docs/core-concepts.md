@@ -1,4 +1,8 @@
-# Core Concepts 🧩
++++
+title = "Core Concepts"
+description = "The EDIFACT wire format — segments, data elements, components, the UNA service string advice, release characters, and repetition — mapped onto the Rust types."
+weight = 20
++++
 
 This guide explains the EDIFACT wire format and maps it to the Rust types exposed
 by `edifact-rs`. Understanding this makes every other guide easier to follow.
@@ -52,21 +56,35 @@ service characters in fixed positions:
 
 ```text
 U N A : + . ?   '
-        │ │ │ │ │ └── Segment terminator (default: ' )
-        │ │ │ │ └──── Release character   (default: ? )
-        │ │ │ └────── Decimal mark        (default: . )
-        │ │ └──────── Repetition sep.     (default:   )
-        │ └────────── Element separator   (default: + )
-        └──────────── Component separator (default: : )
+      │ │ │ │ │ └── Segment terminator   (default: ' )
+      │ │ │ │ └──── Repetition separator (default: space = "not used")
+      │ │ │ └────── Release character    (default: ? )
+      │ │ └──────── Decimal mark         (default: . )
+      │ └────────── Element separator    (default: + )
+      └──────────── Component separator  (default: : )
 ```
+
+| UNA byte | Purpose | Default | Splits input? |
+|---|---|---|---|
+| 3 | Component data element separator | `:` | yes |
+| 4 | Data element separator | `+` | yes |
+| 5 | Decimal mark | `.` | no — read by `DecimalFloat` when writing |
+| 6 | Release (escape) character | `?` | escapes the next byte |
+| 7 | Repetition separator (ISO 9735-4 §3.1) | space | yes, **when not a space** |
+| 8 | Segment terminator | `'` | yes |
 
 `edifact-rs` reads the UNA on the first call to `from_bytes` / `from_reader` and
 applies the custom delimiters for all subsequent parsing. If UNA is absent, the six
 EDIFACT defaults shown above are used.
 
+A space at position 7 is the conventional "not used" sentinel, and virtually every
+real-world interchange carries it. When a UNA declares a real separator there —
+syntax version 4 does — the tokenizer splits on it; see
+[Repeating data elements](#repeating-data-elements) below.
+
 > **Security note**: `edifact-rs` fails hard on a malformed UNA (wrong byte count,
-> duplicate delimiter bytes) and never silently falls back to defaults. This prevents
-> delimiter injection attacks.
+> duplicate delimiter bytes, alphanumeric delimiters) and never silently falls back
+> to defaults. This prevents delimiter injection attacks.
 
 ---
 
@@ -122,7 +140,7 @@ A trailing `?` at end-of-input (with no following byte) is **malformed** and cau
 
 ### `Segment<'a>` — zero-copy view
 
-```rust,ignore
+```text
 pub struct Segment<'a> {
     pub tag: &'a str,       // borrows from input
     pub span: Span,         // byte range of the whole segment
@@ -137,10 +155,11 @@ the `SmallVec<[(Cow<'a, str>, Span); 4]>` per element are allocated.
 
 ### `Element<'a>` — component holder
 
-```rust,ignore
+```text
 pub struct Element<'a> {
     pub span: Span,
-    pub components: SmallVec<[(Cow<'a, str>, Span); 4]>,  // (value, span) — inline for ≤4 components
+    pub components: Components<'a>,       // (value, span) — inline for ≤4 components
+    pub repeats: Vec<Components<'a>>,     // ISO 9735-4 repetitions; usually empty
 }
 ```
 
@@ -148,12 +167,48 @@ pub struct Element<'a> {
 `Cow::Owned` is used only when an escape was resolved (the decoded string differs
 from the raw bytes).
 
+### Repeating data elements
+
+ISO 9735-4 §3.1 lets one data element occur several times in a single slot,
+separated by the repetition separator from UNA position 7:
+
+```text
+RFF+ON:1*ON:2*ON:3'
+    └──┬─┘ └──┬─┘ └──┬─┘
+       0      1      2     ← three repetitions of element 0
+```
+
+`components` always holds repetition 0, so every positional accessor —
+`element_str`, `component_str`, `value_by_code`, and the derive macros — keeps
+reading the first occurrence and behaves identically on the interchanges that do
+not use the feature. The remaining occurrences live in `repeats`:
+
+```rust
+// `UNA` byte 7 declares `*` as the repetition separator.
+let segments: Vec<_> = edifact_rs::from_bytes(b"UNA:+.?*'RFF+ON:1*ON:2'")
+    .collect::<Result<Vec<_>, _>>()?;
+let rff = segments[0].get_element(0).unwrap();
+
+assert_eq!(rff.repeat_count(), 2);
+assert_eq!(rff.get_component(1), Some("1"));                  // repetition 0
+assert_eq!(rff.repetition(1).unwrap()[1].0.as_ref(), "2");    // repetition 1
+
+let all: Vec<&str> = rff.repetitions().map(|r| r[1].0.as_ref()).collect();
+assert_eq!(all, ["1", "2"]);
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+Without a declared separator the byte is ordinary data: `RFF+ON:1*ON:2'` parsed
+with default delimiters yields the single component `1*ON`. A value that legitimately
+contains the separator is release-escaped by the writer and unescaped on the way
+back in, so `a?*b` round-trips as `a*b`.
+
 ### `OwnedSegment` — heap-owned copy
 
 When parsing from a `Read` source (`from_reader`, `message_windows_from_reader`),
 the library can't borrow from the input buffer. It produces `OwnedSegment` instead:
 
-```rust,ignore
+```text
 pub struct OwnedSegment {
     pub tag: String,
     pub elements: Vec<OwnedElement>,
@@ -162,14 +217,14 @@ pub struct OwnedSegment {
 
 `OwnedSegment` provides two accessors that avoid extra allocation:
 
-```rust,ignore
+```text
 seg.element_str(n)           // component 0 of element n → Option<&str>
 seg.component_str(elem, comp) // specific component → Option<&str>
 ```
 
 To get a zero-allocation `Segment<'_>` view of an `OwnedSegment`, call:
 
-```rust,ignore
+```text
 let borrowed: BorrowedSegment<'_> = seg.borrow();
 ```
 
@@ -207,7 +262,7 @@ rejects envelope control tags that appear in message body positions.
 ## Message types
 
 The `UNH` segment element 1, component 0 carries the **message type** (e.g.
-`ORDERS`, `INVOIC`, `UTILMD`). `ValidationContext` and `ProfileRulePack` scope their
+`ORDERS`, `INVOIC`, `ORDERS`). `ValidationContext` and `ProfileRulePack` scope their
 rules to a specific message type:
 
 ```text
@@ -236,6 +291,6 @@ decoded text and rejects invalid byte sequences with `EdifactError::InvalidText`
 
 ## Further reading
 
-- [Parsing guide](parsing.md) — `from_bytes`, `from_reader`, reader config
-- [Typed Derive guide](typed-derive.md) — mapping segments to Rust structs
-- [Error Reference](error-reference.md) — all error codes and their meanings
+- [Parsing guide](@/docs/parsing.md) — `from_bytes`, `from_reader`, reader config
+- [Typed Derive guide](@/docs/typed-derive.md) — mapping segments to Rust structs
+- [Error Reference](@/docs/error-reference.md) — all error codes and their meanings

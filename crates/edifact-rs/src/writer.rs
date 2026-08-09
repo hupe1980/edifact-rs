@@ -199,6 +199,31 @@ macro_rules! elements {
 ///
 /// Wraps any [`Write`] implementation and serializes segments one at a time.
 /// Call [`Writer::finish`] to flush and get the underlying writer back.
+///
+/// # Wrap unbuffered sinks
+///
+/// `Writer` issues a separate write for each tag, delimiter, and value chunk, so
+/// a segment costs roughly one write per component. Against an in-memory
+/// `Vec<u8>` that is free, but against a [`File`][std::fs::File] or a socket each
+/// one is a syscall.
+///
+/// The writer deliberately does **not** buffer internally: an internal buffer
+/// would silently discard everything not yet flushed if the writer were dropped
+/// without [`finish`][Self::finish]. Wrap the sink instead, which makes the
+/// buffering visible and keeps the flush contract in one place:
+///
+/// ```rust
+/// use std::io::BufWriter;
+/// use edifact_rs::Writer;
+///
+/// let sink = Vec::new(); // stands in for a File or TcpStream
+/// let mut writer = Writer::new(BufWriter::new(sink));
+/// writer.write_raw("BGM", &["220"])?;
+/// // `finish` flushes the `Writer` and hands the `BufWriter` back.
+/// let buffered = writer.finish()?;
+/// assert_eq!(buffered.into_inner().unwrap(), b"BGM+220'".to_vec());
+/// # Ok::<(), edifact_rs::EdifactError>(())
+/// ```
 pub struct Writer<W: Write> {
     inner: W,
     ssa: ServiceStringAdvice,
@@ -208,6 +233,10 @@ pub struct Writer<W: Write> {
     /// `segment_count` as of the most recent `UNH`, used by [`Writer::finish_unt`]
     /// to derive a per-message DE 0074 rather than a writer-lifetime total.
     message_start_count: u64,
+    /// Whether the segment currently being written incrementally (via the
+    /// event-emitter path) is a `UNH`.  The whole-segment methods pass the tag
+    /// to `end_segment` directly; the emitter only sees it at `StartSegment`.
+    open_segment_is_unh: bool,
 }
 
 /// Return the offset of the first byte in `hay` that must be release-escaped.
@@ -239,6 +268,7 @@ impl<W: Write> Writer<W> {
             ssa: ServiceStringAdvice::default(),
             segment_count: 0,
             message_start_count: 0,
+            open_segment_is_unh: false,
         }
     }
 
@@ -267,31 +297,53 @@ impl<W: Write> Writer<W> {
             ssa,
             segment_count: 0,
             message_start_count: 0,
+            open_segment_is_unh: false,
         })
     }
 
-    /// Write a single segment.
+    /// Record the end of a segment: terminator, count, and `UNH` bookkeeping.
+    ///
+    /// Every emit path funnels through here.  Two of them used to forget the
+    /// `UNH` marker, so [`finish_unt`][Self::finish_unt] derived DE 0074 from
+    /// the writer-lifetime total whenever a message header happened to be
+    /// written with [`write_segment`][Self::write_segment].
+    #[inline]
+    fn end_segment(&mut self, tag: &str) -> Result<(), EdifactError> {
+        self.inner.write_all(&[self.ssa.segment_term])?;
+        if tag == "UNH" {
+            self.message_start_count = self.segment_count;
+        }
+        self.segment_count += 1;
+        Ok(())
+    }
+
+    /// Write a single segment, including any ISO 9735-4 repetitions.
     pub fn write_segment(&mut self, seg: &Segment<'_>) -> Result<(), EdifactError> {
-        // Tag
         self.inner.write_all(seg.tag.as_bytes())?;
 
         for element in &seg.elements {
-            // Element separator
             self.inner.write_all(&[self.ssa.element_sep])?;
-            let mut first_component = true;
-            for (component, _) in &element.components {
-                if !first_component {
-                    self.inner.write_all(&[self.ssa.component_sep])?;
+            if !element.repeats.is_empty() && !self.ssa.is_repetition_active() {
+                // The sentinel at UNA position 7 is a space.  Emitting it as a
+                // separator would produce output that reads back as a single
+                // occurrence whose value contains a space — corrupt, and quietly
+                // so.  Refusing is the only honest option.
+                return Err(EdifactError::RepetitionSeparatorNotDeclared);
+            }
+            for (repetition, components) in element.repetitions().enumerate() {
+                if repetition > 0 {
+                    self.inner.write_all(&[self.ssa.repetition_sep])?;
                 }
-                first_component = false;
-                self.write_escaped(component)?;
+                for (i, (component, _)) in components.iter().enumerate() {
+                    if i > 0 {
+                        self.inner.write_all(&[self.ssa.component_sep])?;
+                    }
+                    self.write_escaped(component)?;
+                }
             }
         }
 
-        // Segment terminator
-        self.inner.write_all(&[self.ssa.segment_term])?;
-        self.segment_count += 1;
-        Ok(())
+        self.end_segment(seg.tag)
     }
 
     /// Write a raw segment from tag + element string slices.
@@ -337,12 +389,7 @@ impl<W: Write> Writer<W> {
                 )?;
             }
         }
-        self.inner.write_all(&[self.ssa.segment_term])?;
-        if tag == "UNH" {
-            self.message_start_count = self.segment_count;
-        }
-        self.segment_count += 1;
-        Ok(())
+        self.end_segment(tag)
     }
 
     /// Write a segment from a tag and pre-split element/component data.
@@ -366,9 +413,7 @@ impl<W: Write> Writer<W> {
                 self.write_escaped(comp.as_str())?;
             }
         }
-        self.inner.write_all(&[self.ssa.segment_term])?;
-        self.segment_count += 1;
-        Ok(())
+        self.end_segment(tag)
     }
 
     /// Write a segment from a tag and borrowed element/component slices.
@@ -408,12 +453,7 @@ impl<W: Write> Writer<W> {
                 self.write_escaped(comp)?;
             }
         }
-        self.inner.write_all(&[self.ssa.segment_term])?;
-        if tag == "UNH" {
-            self.message_start_count = self.segment_count;
-        }
-        self.segment_count += 1;
-        Ok(())
+        self.end_segment(tag)
     }
 
     /// Write a segment whose data elements mix simple and composite shapes.
@@ -468,12 +508,7 @@ impl<W: Write> Writer<W> {
                 self.write_escaped(comp)?;
             }
         }
-        self.inner.write_all(&[self.ssa.segment_term])?;
-        if tag == "UNH" {
-            self.message_start_count = self.segment_count;
-        }
-        self.segment_count += 1;
-        Ok(())
+        self.end_segment(tag)
     }
 
     /// Flush and return the underlying writer.
@@ -533,41 +568,28 @@ impl<W: Write> Writer<W> {
     /// assert_eq!(writer.escape_value("price+tax"), "price?+tax");
     /// ```
     pub fn escape_value<'v>(&self, value: &'v str) -> Cow<'v, str> {
-        let release = self.ssa.release_char;
         let bytes = value.as_bytes();
         if find_escape(&self.ssa, bytes).is_none() {
             return Cow::Borrowed(value);
         }
-        let mut out = Vec::with_capacity(value.len() + 4);
+        // Built as a `String` from the start.  Assembling a `Vec<u8>` and then
+        // re-validating it needed a fallible conversion whose failure branch was
+        // unreachable, which is exactly the kind of `expect` that has no business
+        // in a library.  Every delimiter is single-byte ASCII (enforced by
+        // `ServiceStringAdvice::is_valid`), so each hit lands on a character
+        // boundary and both halves of the split are valid `&str`.
+        let release = self.ssa.release_char as char;
+        let mut out = String::with_capacity(value.len() + 4);
         let mut last = 0;
-        let mut pos = 0;
-        while pos < bytes.len() {
-            let Some(hit) = find_escape(&self.ssa, &bytes[pos..]) else {
-                break;
-            };
-            let abs = pos + hit;
-            out.extend_from_slice(&bytes[last..abs]);
+        while let Some(hit) = find_escape(&self.ssa, &bytes[last..]) {
+            let abs = last + hit;
+            out.push_str(&value[last..abs]);
             out.push(release);
-            out.push(bytes[abs]);
+            out.push(bytes[abs] as char);
             last = abs + 1;
-            pos = abs + 1;
         }
-        out.extend_from_slice(&bytes[last..]);
-        // SAFETY:
-        //   1. `value` is a valid `&str`, so `bytes` is valid UTF-8 to start.
-        //   2. `self.ssa.release_char` is a single-byte ASCII value (0x21–0x7E),
-        //      enforced at construction time by `ServiceStringAdvice::is_valid()`
-        //      (called in `Writer::with_una`; the default SSA hardcodes `?` = 0x3F).
-        //      Inserting a single ASCII byte cannot split or corrupt a multi-byte
-        //      UTF-8 sequence, because ASCII bytes always have the high bit clear
-        //      while continuation bytes of multi-byte sequences always have the high
-        //      bit set (0x80–0xBF).
-        //   3. All other bytes are copied verbatim from the valid UTF-8 source.
-        Cow::Owned(
-            String::from_utf8(out).expect(
-                "escape_value: output is not valid UTF-8; this is a bug in the escape logic",
-            ),
-        )
+        out.push_str(&value[last..]);
+        Cow::Owned(out)
     }
     /// Write only the segment tag bytes — no element separator or terminator.
     ///
@@ -575,6 +597,7 @@ impl<W: Write> Writer<W> {
     #[inline]
     pub(crate) fn write_tag_only(&mut self, tag: &str) -> Result<(), EdifactError> {
         self.inner.write_all(tag.as_bytes())?;
+        self.open_segment_is_unh = tag == "UNH";
         Ok(())
     }
 
@@ -595,9 +618,9 @@ impl<W: Write> Writer<W> {
     /// Write the segment terminator and increment the internal segment counter.
     #[inline]
     pub(crate) fn write_segment_term_and_count(&mut self) -> Result<(), EdifactError> {
-        self.inner.write_all(&[self.ssa.segment_term])?;
-        self.segment_count += 1;
-        Ok(())
+        let tag = if self.open_segment_is_unh { "UNH" } else { "" };
+        self.open_segment_is_unh = false;
+        self.end_segment(tag)
     }
 
     /// Write a value, escaping any delimiter characters.
@@ -1125,6 +1148,71 @@ mod tests {
         let out = String::from_utf8(buf).unwrap();
         // UNH + NAD + DTM + UNT == 4
         assert!(out.contains("UNT+4+1'"), "expected UNT+4, got {out}");
+    }
+
+    #[test]
+    fn write_segment_records_unh_for_the_unt_count() {
+        // `write_segment` and `write_segment_parts` did not record the UNH
+        // marker, so `finish_unt` fell back to the writer-lifetime total and
+        // DE 0074 came out inflated by every preceding interchange segment.
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer::new(&mut buf);
+            w.begin_interchange("UNOA", "1", "S", "R", "200101", "0900", "IC1")
+                .unwrap();
+            w.write_segment(&Segment::new(
+                "UNH",
+                vec![
+                    Element::of(&["1"]),
+                    Element::of(&["ORDERS", "D", "96A", "UN"]),
+                ],
+            ))
+            .unwrap();
+            w.write_segment(&Segment::new("BGM", vec![Element::of(&["220"])]))
+                .unwrap();
+            w.finish_unt("1").unwrap();
+        }
+        let out = String::from_utf8(buf).unwrap();
+        // UNH + BGM + UNT == 3, not 4 (which would count the UNB).
+        assert!(out.contains("UNT+3+1'"), "expected UNT+3, got {out}");
+    }
+
+    #[test]
+    fn write_segment_parts_records_unh_for_the_unt_count() {
+        let mut buf = Vec::new();
+        {
+            let mut w = Writer::new(&mut buf);
+            w.begin_interchange("UNOA", "1", "S", "R", "200101", "0900", "IC1")
+                .unwrap();
+            w.write_segment_parts(
+                "UNH",
+                &[
+                    vec!["1".to_owned()],
+                    vec![
+                        "ORDERS".to_owned(),
+                        "D".to_owned(),
+                        "96A".to_owned(),
+                        "UN".to_owned(),
+                    ],
+                ],
+            )
+            .unwrap();
+            w.write_raw("BGM", &["220"]).unwrap();
+            w.finish_unt("1").unwrap();
+        }
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("UNT+3+1'"), "expected UNT+3, got {out}");
+    }
+
+    #[test]
+    fn escape_value_handles_multi_byte_text() {
+        // The old implementation assembled a `Vec<u8>` and re-validated it with
+        // an `expect`.  Escaping around non-ASCII text is the case that made
+        // that conversion look fallible in the first place.
+        let w = Writer::new(std::io::sink());
+        assert_eq!(w.escape_value("Grüße+Köln"), "Grüße?+Köln");
+        assert_eq!(w.escape_value("Grüße"), "Grüße");
+        assert!(matches!(w.escape_value("plain"), Cow::Borrowed("plain")));
     }
 
     #[test]

@@ -1,7 +1,11 @@
-# Error Reference 🔴
++++
+title = "Error Reference"
+description = "Every EdifactError variant with its stable code E001-E037, the fields it carries, when it fires, and how to fix it."
+weight = 110
++++
 
 All errors returned by `edifact-rs` are variants of `EdifactError`. Every variant
-carries a stable, semver-protected code (`E001`–`E035`) accessible via
+carries a stable, semver-protected code (`E001`–`E037`) accessible via
 `err.stable_code()`. The enum is marked `#[non_exhaustive]` so future variants can
 be added without breaking existing match arms.
 
@@ -59,6 +63,8 @@ needed.
 | E033 | `UnknownDataElement` | Code-addressed access | — |
 | E034 | `AmbiguousDataElement` | Code-addressed access | — |
 | E035 | `SegmentLayoutMismatch` | Code-addressed access | — |
+| E036 | `LimitExceeded` | Parser (`ReaderConfig` budgets) | — |
+| E037 | `RepetitionSeparatorNotDeclared` | Writer | — |
 
 ---
 
@@ -562,15 +568,15 @@ match from_bytes(b"BAD").collect::<Result<Vec<_>, _>>() {
 ## Diagnostics (rich error output)
 
 Enable the `diagnostics` feature to get `miette::Diagnostic` on all variants with
-`offset` / `span` fields. See [Diagnostics](diagnostics.md) for details.
+`offset` / `span` fields. See [Diagnostics](@/docs/diagnostics.md) for details.
 
 ---
 
 ## Next steps
 
-- [Diagnostics](diagnostics.md) — miette span-annotated rendering
-- [Validation](validation.md) — `ValidationReport` vs `EdifactError`
-- [Performance](performance.md) — error-free fast paths
+- [Diagnostics](@/docs/diagnostics.md) — miette span-annotated rendering
+- [Validation](@/docs/validation.md) — `ValidationReport` vs `EdifactError`
+- [Performance](@/docs/performance.md) — error-free fast paths
 
 ---
 
@@ -660,6 +666,51 @@ prevent, so it is rejected before any lookup.
 **Fields**: `expected: String` (the layout's tag), `actual: String`.
 
 **Fix**: Look the definition up by the segment's own tag.
+
+---
+
+### E036 — `LimitExceeded`
+
+```text
+input exceeded the configured {limit} limit of {max}
+```
+
+**When**: The input carries more than a `ReaderConfig` whole-input budget allows —
+`max_segments`, `max_messages`, or `max_input_bytes`. The per-segment size guard
+has its own code (`E020 SegmentTooLong`).
+
+**Why an error and not a quiet stop**: a budget that merely ended the iterator is
+indistinguishable from a clean end of input, so
+`collect::<Result<Vec<_>, _>>()` would succeed on a **truncated** interchange and
+everything downstream would treat a fragment as the whole message. Input that ends
+*exactly* at a limit is not a violation.
+
+**Fields**: `limit: &'static str` (`"max_segments"`, `"max_messages"`, or
+`"max_input_bytes"`), `max: u64`.
+
+**Fix**: Raise the corresponding `ReaderConfig` budget if the input is legitimate,
+or reject it as oversized. Segments parsed before the violation are still
+delivered, so a manual iteration can keep the partial result.
+
+---
+
+### E037 — `RepetitionSeparatorNotDeclared`
+
+```text
+cannot write a repeating data element: the active service string advice
+declares no repetition separator
+```
+
+**When**: A `Segment` carrying an `Element` with repetitions (ISO 9735-4 §3.1) was
+handed to a `Writer` whose `ServiceStringAdvice` holds the space "not used"
+sentinel at UNA position 7.
+
+**Why**: There is no byte to write between the occurrences. Emitting the space
+anyway produces output that reads back as a *single* occurrence whose value
+contains a space — silent data corruption from a call that reported success.
+
+**Fix**: Build the writer with `Writer::with_una` and a `ServiceStringAdvice`
+whose `repetition_sep` is set, or flatten the repetitions before writing.
 
 ---
 

@@ -1,4 +1,8 @@
-# Validation ✅
++++
+title = "Validation"
+description = "The Validator trait, ValidationContext, and the layered envelope / structure / code-list / profile validation pipeline."
+weight = 70
++++
 
 `edifact-rs` provides a layered, composable validation pipeline that separates
 structural, code-list, and profile-level checks — each pluggable independently.
@@ -24,7 +28,7 @@ structural, code-list, and profile-level checks — each pluggable independently
 
 Implement `Validator` to encapsulate validation logic:
 
-```rust,ignore
+```rust
 use edifact_rs::{Validator, ValidationReport, ValidationRuleContext, Segment, validate_each, EdifactError};
 
 struct BgmCodeValidator;
@@ -45,8 +49,8 @@ impl Validator for BgmCodeValidator {
                         element_index: 0,
                         value: code.to_owned(),
                         code_list: "1001".to_owned(),
-                        offset: seg.span.start,
-                        suggestion: Some("Use 220 (original order), 231 (quote) or 261 (confirmation)".to_owned()),
+                        span: seg.span,
+                        suggestion: Some("Use 220 (original order), 231 (quote) or 261 (confirmation)"),
                     });
                 }
             }
@@ -75,12 +79,12 @@ Validators are registered per layer. Layers run in order:
 
 1. **`Structure`** — check mandatory segments, ordering, counts
 2. **`CodeList`** — check element values against UNTDID code lists
-3. **`Profile`** — check business/MIG rules (see [Profile Packs](profile-packs.md))
+3. **`Profile`** — check business/MIG rules (see [Profile Packs](@/docs/profile-packs.md))
 
-```rust,ignore
+```rust
 use edifact_rs::{
-    ValidationContext, ValidationLayer, Validator, ValidationReport, Segment,
-    from_bytes,
+    ValidationContext, ValidationLayer, Validator, ValidationReport,
+    ValidationRuleContext, Segment, from_bytes,
 };
 
 # struct BgmCodeValidator;
@@ -229,7 +233,7 @@ match ctx.validate_strict(&segs) {
 
 ## `ValidationReport` — working with results
 
-```rust,ignore
+```rust
 # use edifact_rs::{ValidationContext, from_bytes};
 # let segs: Vec<_> = from_bytes(b"BGM+220+PO-4711+9'").collect::<Result<_,_>>()?;
 # let ctx = ValidationContext::builder().build();
@@ -238,8 +242,8 @@ let report = ctx.validate_lenient(&segs);
 // Overall validity (no errors, no criticals)
 println!("valid: {}", report.is_valid());
 println!("errors: {}", report.errors().len());
-println!("warnings: {}", report.warnings.len());
-println!("infos: {}", report.infos.len());
+println!("warnings: {}", report.warnings().len());
+println!("infos: {}", report.infos().len());
 println!("total issues: {}", report.total_issues());
 
 // Deterministic string rendering (useful for snapshots / golden tests)
@@ -299,19 +303,20 @@ namespaced prefix so downstream code can extract domain identifiers without
 parsing the human-readable message:
 
 ```text
-"<PACK>-<PID>-<TAG>-<STATUS>"
- ^^^^^^^^              — pack/profile name (e.g. "AHB-13001")
-         ^^^^^         — affected segment tag
-               ^^^^^^^  — mandatory/conditional status or discriminator
+"<PACK>-<SCOPE>-<TAG>-<STATUS>"
+ ^^^^^^                          — the pack / profile that owns the rule
+        ^^^^^^^                  — a process identifier, group name, or other discriminator
+                ^^^^^            — the affected segment
+                      ^^^^^^^^   — M / C / … status or short discriminator
 ```
 
-Example: `"AHB-13001-BGM-M"` — pack `AHB`, process ID `13001`, segment `BGM`,
-mandatory (`M`). Extract the PID:
+Example: `"PROFILE-4711-BGM-M"` — pack `PROFILE`, scope `4711`, segment `BGM`,
+mandatory (`M`). Recover the scope:
 
 ```rust
-let rule_id = "AHB-13001-BGM-M";
-let pid = rule_id.strip_prefix("AHB-").and_then(|s| s.splitn(2, '-').next());
-assert_eq!(pid, Some("13001"));
+let rule_id = "PROFILE-4711-BGM-M";
+let scope = rule_id.strip_prefix("PROFILE-").and_then(|s| s.split('-').next());
+assert_eq!(scope, Some("4711"));
 ```
 
 For arbitrary domain metadata use `with_context_entry` instead:
@@ -320,11 +325,11 @@ For arbitrary domain metadata use `with_context_entry` instead:
 use edifact_rs::{Span, ValidationIssue, ValidationSeverity};
 
 let issue = ValidationIssue::new(ValidationSeverity::Error, "BGM code invalid")
-    .with_rule_id("AHB-13001-BGM-M")
-    .with_context_entry("pid", "13001")
+    .with_rule_id("PROFILE-4711-BGM-M")
+    .with_context_entry("pid", "4711")
     .with_context_entry("partner", "9900123456789");
 
-assert_eq!(issue.context_get("pid"), Some("13001"));
+assert_eq!(issue.context_get("pid"), Some("4711"));
 ```
 
 ---
@@ -375,7 +380,7 @@ impl Validator for ReferenceConsistencyValidator {
 }
 ```
 
-See [`cookbook_fixture_validation.rs`](../crates/edifact-rs/examples/cookbook_fixture_validation.rs)
+See [`cookbook_fixture_validation.rs`](https://github.com/hupe1980/edifact-rs/tree/main/crates/edifact-rs/examples/cookbook_fixture_validation.rs)
 for a complete validator with fixture-based test data.
 
 ---
@@ -423,7 +428,7 @@ for result in message_windows_from_reader(input) {
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-See [`cookbook_streamed_progressive_validation.rs`](../crates/edifact-rs/examples/cookbook_streamed_progressive_validation.rs)
+See [`cookbook_streamed_progressive_validation.rs`](https://github.com/hupe1980/edifact-rs/tree/main/crates/edifact-rs/examples/cookbook_streamed_progressive_validation.rs)
 for a complete example.
 
 ---
@@ -489,7 +494,7 @@ variants:
 | `validate_lenient_grouped_owned(root, segs)` | `(&SegmentGroupIndexed, &[OwnedSegment])` | owned | Collect all issues |
 | `validate_strict_grouped_owned(root, segs)` | `(&SegmentGroupIndexed, &[OwnedSegment])` | owned | `Err` on first error/critical |
 
-See [Profile Packs — Group-scoped rules](profile-packs.md#group-scoped-rules) for
+See [Profile Packs — Group-scoped rules](@/docs/profile-packs.md#group-scoped-rules) for
 how to build group rules.
 
 ---
@@ -583,12 +588,12 @@ a segment with a different tag.
 
 The derive has the same addressing under `#[edifact(layout = ...)]`, where
 resolution happens at compile time — see
-[Typed Derive](typed-derive.md#element--3055--data-element-identifier).
+[Typed Derive](@/docs/typed-derive.md#element-by-identifier).
 
 ---
 
 ## Next steps
 
-- [Profile Packs](profile-packs.md) — composable business-rule bundles
-- [Error Reference](error-reference.md) — stable codes for `ValidationIssue::error_code`
-- [Diagnostics](diagnostics.md) — human-readable error rendering
+- [Profile Packs](@/docs/profile-packs.md) — composable business-rule bundles
+- [Error Reference](@/docs/error-reference.md) — stable codes for `ValidationIssue::error_code`
+- [Diagnostics](@/docs/diagnostics.md) — human-readable error rendering

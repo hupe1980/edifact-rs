@@ -1,4 +1,8 @@
-# Performance ⚡
++++
+title = "Performance"
+description = "Zero-copy guarantees, allocation budgets, benchmark suite, and tuning guidance for high-throughput EDIFACT processing."
+weight = 120
++++
 
 `edifact-rs` is designed for high-throughput, low-allocation EDIFACT processing.
 This guide explains the key design decisions, how to measure them, and how to tune
@@ -38,7 +42,7 @@ entirely — which covers the large majority of real-world EDIFACT segments.
 
 `from_reader(reader)` is the reader-based API with minimal memory overhead:
 
-```rust,ignore
+```rust,no_run
 use edifact_rs::from_reader;
 
 let f = std::fs::File::open("large.edi")?;
@@ -62,7 +66,7 @@ for the whole interchange. It uses `edifact_deserialize_owned` internally to
 deserialize each `UNH..UNT` window as a typed value, then immediately drops the
 window segments:
 
-```rust,ignore
+```rust,no_run
 use edifact_rs::{deserialize_messages_from_reader, EdifactDeserialize};
 
 # #[derive(Debug, EdifactDeserialize)]
@@ -133,15 +137,20 @@ Criterion outputs are saved to `target/criterion/`. Open
 
 ### Benchmark groups (Criterion)
 
-| Group | Measures |
+| Benchmark | Measures |
 |---|---|
-| `tokenizer/small` | Tokenization throughput on a single message (~450 bytes) |
+| `tokenizer/small` | Tokenization throughput on a single message |
 | `tokenizer/1mb` | Tokenization throughput on a 1 MB interchange |
 | `parser/small` | Parse + collect on a single message |
 | `parser/1mb` | Parse + collect on 1 MB |
 | `reader/1mb` | `from_reader_collect` on 1 MB (reader overhead) |
-| `writer/utilmd_message` | Serialize a UTILMD-sized message |
-| `validation/d11a_structure` | Structure validation on D.11A rules |
+| `reader/parse_reader_chunked` | Reader path across read-buffer boundaries |
+| `writer/sample_message` | Serialize a message back to wire format |
+| `validation/validate_structure_orders` | Directory structure validation |
+| `validation/validate_profile_custom_pack` | A single `ProfileRulePack` |
+| `validation/validate_profile_composed_packs` | Composed packs (`extend_from`) |
+| `validation/parse_large_message` | Parse cost on a large message, for contrast |
+| `validation/validate_large_message` | Validation cost on the same message |
 
 ---
 
@@ -192,19 +201,23 @@ heaptrack_gui heaptrack.*.gz
 
 The reader-based APIs accept a `ReaderConfig` that controls the DOS guard:
 
-```rust,ignore
+```rust
 use edifact_rs::{from_bufread_stream_with_config, ReaderConfig};
 
-let config = ReaderConfig {
-    max_segment_bytes: 256 * 1024,  // default: 512 KB
-};
+// The builder methods leave every budget you do not name at its default.
+let config = ReaderConfig::default().max_segment_bytes(256 * 1024);
 let cursor = std::io::Cursor::new(b"...");
 let _iter = from_bufread_stream_with_config(cursor, config);
 ```
 
 Setting `max_segment_bytes` too low will cause `E020 SegmentTooLong` on large but
-legitimate segments (e.g. free-text `FTX` segments). 512 KB is a safe default for
-most deployments.
+legitimate segments (e.g. free-text `FTX` segments). The default is **64 KiB**,
+which comfortably covers real-world EDIFACT; raise it only if your trading
+partners genuinely send larger segments.
+
+The whole-input budgets — `max_segments`, `max_messages`, and `max_input_bytes` —
+are unset by default and raise `E036 LimitExceeded` when tripped. See
+[Parsing → DoS hardening](@/docs/parsing.md#dos-hardening-with-readerconfig).
 
 ---
 
@@ -222,6 +235,6 @@ most deployments.
 
 ## Next steps
 
-- [Streaming](streaming.md) — memory-efficient streaming APIs
-- [Async Integration](async-integration.md) — `spawn_blocking` patterns
-- [Error Reference](error-reference.md) — `E020 SegmentTooLong` and `ReaderConfig`
+- [Streaming](@/docs/streaming.md) — memory-efficient streaming APIs
+- [Async Integration](@/docs/async-integration.md) — `spawn_blocking` patterns
+- [Error Reference](@/docs/error-reference.md) — `E020 SegmentTooLong` and `ReaderConfig`

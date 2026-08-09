@@ -64,6 +64,20 @@ clippy:
 # Format, lint, and test — what to run before every commit.
 pre-commit: fmt-check clippy test
 
+# ── site ──────────────────────────────────────────────────────────────────────
+
+# Serve the Zola site with live reload at http://127.0.0.1:1111.
+site-serve:
+    cd site && zola serve
+
+# Build the Zola site into site/public.
+site-build:
+    cd site && zola build
+
+# Mirrors the `site` CI job: validates every internal link and anchor.
+site-check:
+    cd site && zola check --skip-external-links
+
 # ── documentation ─────────────────────────────────────────────────────────────
 
 # Build the public docs with warnings denied.

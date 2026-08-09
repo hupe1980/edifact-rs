@@ -2,7 +2,7 @@
 
 use crate::{
     error::EdifactError,
-    model::{Element, OwnedSegment, Segment, Span},
+    model::{Components, Element, OwnedSegment, Segment, Span},
     tokenizer::{Token, Tokenizer},
 };
 use memchr::memchr2;
@@ -10,19 +10,61 @@ use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Read};
 
-fn finish_element<'a>(
-    elements: &mut Vec<Element<'a>>,
-    current_components: &mut SmallVec<[(Cow<'a, str>, Span); 4]>,
-    current_element_start: &mut Option<usize>,
-) {
-    if let (Some(start), Some((_, last_span))) =
-        (current_element_start.take(), current_components.last())
-    {
-        let last_end = last_span.end;
+/// In-progress data element: the components of the repetition currently being
+/// read, plus every repetition already closed by a repetition separator.
+struct PendingElement<'a> {
+    start: Option<usize>,
+    components: Components<'a>,
+    repeats: Vec<Components<'a>>,
+}
+
+impl<'a> PendingElement<'a> {
+    fn new() -> Self {
+        Self {
+            start: None,
+            components: SmallVec::new(),
+            repeats: Vec::new(),
+        }
+    }
+
+    #[inline]
+    fn is_open(&self) -> bool {
+        self.start.is_some()
+    }
+
+    /// Open a new element (or, when already open, a further repetition of it).
+    #[inline]
+    fn open(&mut self, start: usize) {
+        if self.start.is_none() {
+            self.start = Some(start);
+        }
+    }
+
+    /// Close the current repetition and begin the next one.
+    #[inline]
+    fn end_repetition(&mut self) {
+        self.repeats.push(std::mem::take(&mut self.components));
+    }
+
+    /// Close the element and push it onto `elements`, returning its end offset.
+    fn flush(&mut self, elements: &mut Vec<Element<'a>>) -> Option<usize> {
+        let start = self.start.take()?;
+        let mut repeats = std::mem::take(&mut self.repeats);
+        repeats.push(std::mem::take(&mut self.components));
+        // The element ends at the last component of the last *non-empty*
+        // repetition; a trailing repetition separator with no value after it
+        // contributes no span.
+        let end = repeats
+            .iter()
+            .rev()
+            .find_map(|rep| rep.last().map(|(_, span)| span.end))?;
+        let components = repeats.remove(0);
         elements.push(Element {
-            span: Span::new(start, last_end),
-            components: std::mem::take(current_components),
+            span: Span::new(start, end),
+            components,
+            repeats,
         });
+        Some(end)
     }
 }
 
@@ -103,7 +145,9 @@ impl<'a> Iterator for Parser<'a> {
             match tok {
                 Ok(Token::SegmentTag { value, span }) => break (value, span),
                 Ok(Token::SegmentTerminator { .. }) => continue, // stray terminator — tolerated (blank line)
-                Ok(Token::DataElement { span, .. }) | Ok(Token::ComponentElement { span, .. }) => {
+                Ok(Token::DataElement { span, .. })
+                | Ok(Token::ComponentElement { span, .. })
+                | Ok(Token::RepeatElement { span, .. }) => {
                     return Some(Err(EdifactError::UnexpectedDataToken {
                         offset: span.start,
                     }));
@@ -117,9 +161,7 @@ impl<'a> Iterator for Parser<'a> {
         // segment while typical EDIFACT segments carry 2–5 elements.  Amortised
         // growth costs at most two reallocations for the common case.
         let mut elements: Vec<Element<'a>> = Vec::new();
-        let mut current_components: SmallVec<[(Cow<'a, str>, Span); 4]> = SmallVec::new();
-        let mut current_element_start: Option<usize> = None;
-        let mut in_element = false;
+        let mut pending = PendingElement::new();
         let mut segment_end = tag_span.end;
 
         loop {
@@ -127,16 +169,9 @@ impl<'a> Iterator for Parser<'a> {
                 Some(Ok(t)) => t,
                 Some(Err(e)) => return Some(Err(e)),
                 None => {
-                    // EOF — flush whatever we have
-                    if in_element {
-                        finish_element(
-                            &mut elements,
-                            &mut current_components,
-                            &mut current_element_start,
-                        );
-                        if let Some(last) = elements.last() {
-                            segment_end = last.span.end;
-                        }
+                    // EOF — flush whatever we have.
+                    if let Some(end) = pending.flush(&mut elements) {
+                        segment_end = end;
                     }
                     break;
                 }
@@ -152,56 +187,48 @@ impl<'a> Iterator for Parser<'a> {
                         value: next_tag,
                         span,
                     });
-                    if in_element {
-                        finish_element(
-                            &mut elements,
-                            &mut current_components,
-                            &mut current_element_start,
-                        );
-                        if let Some(last) = elements.last() {
-                            segment_end = last.span.end;
-                        }
+                    if let Some(end) = pending.flush(&mut elements) {
+                        segment_end = end;
                     }
                     break;
                 }
                 Token::SegmentTerminator { span } => {
-                    if in_element {
-                        finish_element(
-                            &mut elements,
-                            &mut current_components,
-                            &mut current_element_start,
-                        );
-                    }
+                    pending.flush(&mut elements);
                     segment_end = span.end;
                     break;
                 }
                 Token::DataElement { value, span } => {
-                    if in_element {
-                        finish_element(
-                            &mut elements,
-                            &mut current_components,
-                            &mut current_element_start,
-                        );
-                    }
+                    pending.flush(&mut elements);
                     let resolved = match resolve_release(value, self.release_char, span.start) {
                         Ok(v) => v,
                         Err(error) => return Some(Err(error)),
                     };
-                    current_components.push((resolved, span));
-                    current_element_start = Some(span.start);
-                    in_element = true;
+                    pending.open(span.start);
+                    pending.components.push((resolved, span));
                 }
                 Token::ComponentElement { value, span } => {
-                    if !in_element {
-                        // component before any element — treat as first element
-                        in_element = true;
-                        current_element_start = Some(span.start);
-                    }
+                    // A component before any element opens the first one.
                     let resolved = match resolve_release(value, self.release_char, span.start) {
                         Ok(v) => v,
                         Err(error) => return Some(Err(error)),
                     };
-                    current_components.push((resolved, span));
+                    pending.open(span.start);
+                    pending.components.push((resolved, span));
+                }
+                Token::RepeatElement { value, span } => {
+                    let resolved = match resolve_release(value, self.release_char, span.start) {
+                        Ok(v) => v,
+                        Err(error) => return Some(Err(error)),
+                    };
+                    // A repetition separator before any element is malformed:
+                    // there is nothing to repeat.
+                    if !pending.is_open() {
+                        return Some(Err(EdifactError::UnexpectedDataToken {
+                            offset: span.start,
+                        }));
+                    }
+                    pending.end_repetition();
+                    pending.components.push((resolved, span));
                 }
             }
         }
@@ -256,33 +283,26 @@ pub struct ReaderConfig {
     /// Default: 65 536 bytes (64 KiB).  Real-world EDIFACT segments are almost
     /// always below 4 KiB; consider using a tighter limit for untrusted inputs.
     pub max_segment_bytes: usize,
-    /// Maximum number of segments to yield before the stream stops.
+    /// Maximum number of segments the input may contain.
     ///
-    /// Once this many segments have been produced the segment stream returns
-    /// `None`, effectively truncating the message.  Useful for preventing
-    /// resource exhaustion when the total segment count in a message is expected
-    /// to be bounded.
+    /// A segment beyond this budget yields [`EdifactError::LimitExceeded`].
+    /// Input that ends exactly at the limit is not a violation.
     ///
     /// Default: `None` (unlimited).
     pub max_segments: Option<usize>,
-    /// Maximum total input bytes to consume before the stream stops.
+    /// Maximum number of input bytes the interchange may occupy.
     ///
-    /// The budget is checked **before** each segment is read.  If
-    /// `bytes_consumed >= max_input_bytes` at that point the stream stops
-    /// immediately without reading any further data.  A segment whose bytes
-    /// push `bytes_consumed` above the threshold is still yielded (parsing
-    /// cannot be abandoned mid-segment), but no subsequent segment will be
-    /// started.  Use in combination with `max_segment_bytes` for
-    /// defence-in-depth against maliciously large inputs.
+    /// A segment whose end offset passes this budget yields
+    /// [`EdifactError::LimitExceeded`] *instead of* the segment, so no data
+    /// beyond the cap is ever handed to the caller.  Combine with
+    /// `max_segment_bytes` for defence in depth against oversized input.
     ///
     /// Default: `None` (unlimited).
     pub max_input_bytes: Option<u64>,
-    /// Maximum number of EDIFACT messages (UNH/UNT pairs) to process before
-    /// the stream stops.
+    /// Maximum number of EDIFACT messages (`UNH`/`UNT` pairs) the input may contain.
     ///
-    /// Once this many complete messages have been yielded the stream returns
-    /// `None`. Useful for rate-limiting or sampling large interchanges without
-    /// parsing the entire file.
+    /// A segment belonging to a message beyond this budget yields
+    /// [`EdifactError::LimitExceeded`].
     ///
     /// Default: `None` (unlimited).
     pub max_messages: Option<usize>,
@@ -389,6 +409,58 @@ impl<R: BufRead> OwnedSegmentStream<R> {
             messages_yielded: 0,
             in_message: false,
             bytes_consumed: 0,
+        }
+    }
+
+    /// Check the whole-input budgets against a segment that has just been read.
+    ///
+    /// Checking *after* the read rather than before is what makes an input that
+    /// ends exactly at a limit finish cleanly: a budget is only exceeded when
+    /// there was genuinely more data than the caller allowed.
+    fn check_limits(&self, tag: &str) -> Option<EdifactError> {
+        if let Some(max) = self.config.max_segments {
+            if self.segments_yielded >= max {
+                return Some(EdifactError::LimitExceeded {
+                    limit: "max_segments",
+                    max: max as u64,
+                });
+            }
+        }
+        // Only a `UNH` opens a message, so only a `UNH` can push the count past
+        // the budget.  Testing every segment would trip on the interchange
+        // trailer, which belongs to no message.
+        if let Some(max) = self.config.max_messages {
+            if tag == "UNH" && self.messages_yielded >= max {
+                return Some(EdifactError::LimitExceeded {
+                    limit: "max_messages",
+                    max: max as u64,
+                });
+            }
+        }
+        if let Some(max) = self.config.max_input_bytes {
+            if self.bytes_consumed > max {
+                return Some(EdifactError::LimitExceeded {
+                    limit: "max_input_bytes",
+                    max,
+                });
+            }
+        }
+        None
+    }
+
+    /// Record a yielded segment against the segment and message counters.
+    ///
+    /// Only a `UNT` that closes a `UNH` already seen advances the message
+    /// counter; a bare `UNT` is malformed and must not inflate it.
+    fn account(&mut self, tag: &str) {
+        self.segments_yielded += 1;
+        if tag == "UNT" {
+            if self.in_message {
+                self.messages_yielded += 1;
+            }
+            self.in_message = false;
+        } else if tag == "UNH" {
+            self.in_message = true;
         }
     }
 }
@@ -506,30 +578,6 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
             return None;
         }
 
-        // Check segment count limit before attempting to read the next segment.
-        if let Some(max) = self.config.max_segments {
-            if self.segments_yielded >= max {
-                self.state = StreamState::Done;
-                return None;
-            }
-        }
-
-        // Check byte budget before attempting to read the next segment.
-        if let Some(max) = self.config.max_input_bytes {
-            if self.bytes_consumed >= max {
-                self.state = StreamState::Done;
-                return None;
-            }
-        }
-
-        // Check message count limit before attempting to read the next segment.
-        if let Some(max) = self.config.max_messages {
-            if self.messages_yielded >= max {
-                self.state = StreamState::Done;
-                return None;
-            }
-        }
-
         loop {
             // ── Fast path (after UNA has been consumed) ───────────────────
             if self.state == StreamState::Running {
@@ -548,27 +596,11 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
                         self.reader.consume(n as usize);
                         self.stream_offset += n;
                         self.bytes_consumed = self.stream_offset;
-                        self.segments_yielded += 1;
-                        // Track message boundaries for max_messages enforcement.
-                        // Only count a UNT that closes a UNH we already saw; a bare
-                        // UNT without a preceding UNH is malformed and must not inflate
-                        // the counter (matches the documented UNH/UNT-pair semantics).
-                        if seg.tag == "UNT" {
-                            if self.in_message {
-                                self.messages_yielded += 1;
-                            }
-                            self.in_message = false;
-                        } else if seg.tag == "UNH" {
-                            self.in_message = true;
+                        if let Some(error) = self.check_limits(&seg.tag) {
+                            self.state = StreamState::Done;
+                            return Some(Err(error));
                         }
-                        // Eagerly mark Done if the byte budget was exhausted by
-                        // this segment so the next next() call returns None
-                        // without a redundant read attempt.
-                        if let Some(max) = self.config.max_input_bytes {
-                            if self.bytes_consumed >= max {
-                                self.state = StreamState::Done;
-                            }
-                        }
+                        self.account(&seg.tag);
                         return Some(Ok(seg));
                     }
                     FastSegment::Skip(n) => {
@@ -628,16 +660,12 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
             let mut parser_iter = Parser::new(tok);
             match parser_iter.next() {
                 Some(Ok(s)) => {
-                    self.segments_yielded += 1;
                     let seg = OwnedSegment::from(s).offset(raw.start_offset);
-                    if seg.tag == "UNT" {
-                        if self.in_message {
-                            self.messages_yielded += 1;
-                        }
-                        self.in_message = false;
-                    } else if seg.tag == "UNH" {
-                        self.in_message = true;
+                    if let Some(error) = self.check_limits(&seg.tag) {
+                        self.state = StreamState::Done;
+                        return Some(Err(error));
                     }
+                    self.account(&seg.tag);
                     return Some(Ok(seg));
                 }
                 Some(Err(e)) => {

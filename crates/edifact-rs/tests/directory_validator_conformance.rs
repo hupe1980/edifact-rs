@@ -248,3 +248,58 @@ fn from_owned_definitions_accepts_valid_definitions() {
             )],
         )]);
 }
+
+// ── exhaustive per-segment reporting ─────────────────────────────────────────
+
+#[test]
+fn every_violation_in_a_segment_is_reported_not_just_the_first() {
+    // `NAD` declares two mandatory elements; supplying neither is two distinct
+    // faults. The validator used to return on the first `Err`, so a report whose
+    // whole purpose is to be exhaustive showed one issue per segment and the
+    // caller fixed the message one round-trip at a time.
+    let segments: Vec<_> = from_bytes(b"NAD++'")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parse");
+
+    let mut report = ValidationReport::default();
+    new_validator().validate_batch(&segments, &mut report, &ValidationRuleContext::empty());
+
+    let missing: Vec<_> = report
+        .errors()
+        .iter()
+        .filter(|i| i.error_code() == Some("E008"))
+        .collect();
+    assert_eq!(
+        missing.len(),
+        2,
+        "expected both mandatory elements reported, got {:#?}",
+        report.errors()
+    );
+    assert_eq!(missing[0].element_index, Some(0));
+    assert_eq!(missing[1].element_index, Some(1));
+}
+
+#[test]
+fn faults_from_different_check_families_are_all_reported() {
+    // One segment, two unrelated problems: a missing mandatory element (E008)
+    // and a composite whose component count does not match (E013).
+    let segments: Vec<_> = from_bytes(b"NAD++A:B'")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parse");
+
+    let mut report = ValidationReport::default();
+    new_validator().validate_batch(&segments, &mut report, &ValidationRuleContext::empty());
+
+    let codes: Vec<_> = report
+        .iter_issues()
+        .filter_map(|i| i.error_code())
+        .collect();
+    assert!(
+        codes.contains(&"E008"),
+        "missing element not reported: {codes:?}"
+    );
+    assert!(
+        codes.contains(&"E013"),
+        "component-count fault not reported: {codes:?}"
+    );
+}

@@ -1,0 +1,44 @@
+# Zola configuration — https://www.getzola.org/documentation/getting-started/configuration/
+#
+# `base_url` must match where the site is actually served, because every
+# canonical URL, Open Graph tag, and sitemap entry is derived from it. The CI
+# deploy job overrides it with `--base-url` when the target differs.
+base_url = "https://hupe1980.github.io/edifact-rs"
+
+title = "edifact-rs"
+description = "Zero-copy EDIFACT parsing, streaming deserialization, typed derive macros, and composable validation for Rust."
+default_language = "en"
+author = "hupe1980"
+
+compile_sass = true
+build_search_index = true
+generate_feeds = true
+feed_filenames = ["atom.xml"]
+
+# Internal `@/` links are resolved and validated at build time, so a renamed
+# guide fails the build instead of shipping a dead link.
+[markdown]
+smart_punctuation = false
+render_emoji = false
+bottom_footnotes = true
+insert_anchor_links = "heading"
+
+# Two stylesheets rather than one baked-in theme, so code blocks follow the
+# reader's light/dark preference like the rest of the page.
+[markdown.highlighting]
+# `style = "inline"` with a dual theme lets Zola emit both palettes and switch on
+# the reader's colour scheme, so code blocks match the rest of the page without a
+# second stylesheet or any JavaScript.
+style = "inline"
+light_theme = "github-light"
+dark_theme = "github-dark"
+add_color_scheme = true
+error_on_missing_language = false
+
+[search]
+index_format = "elasticlunr_json"
+
+[extra]
+repository = "https://github.com/hupe1980/edifact-rs"
+crates_io = "https://crates.io/crates/edifact-rs"
+docs_rs = "https://docs.rs/edifact-rs"

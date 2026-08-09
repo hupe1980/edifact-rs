@@ -658,10 +658,15 @@ pub trait SegmentAccessor<'a> {
     fn required_composite(&'a self, elem: usize, comp: usize) -> Result<&'a str, EdifactError>;
     /// Get `count` required components starting at `start_idx` from element `elem`.
     ///
+    /// This walks *components inside one data element* — the `:`-separated parts
+    /// of a composite. It has nothing to do with ISO 9735-4 repeating data
+    /// elements; for those, read
+    /// [`Element::repetitions`][crate::Element::repetitions].
+    ///
     /// Allocates a `Vec`.  For a zero-alloc alternative, use
-    /// [`repeating_components_iter`][Self::repeating_components_iter] and
+    /// [`component_range_iter`][Self::component_range_iter] and
     /// consume the iterator directly without collecting.
-    fn repeating_components(
+    fn component_range(
         &'a self,
         elem: usize,
         start_idx: usize,
@@ -669,15 +674,14 @@ pub trait SegmentAccessor<'a> {
     ) -> Result<Vec<&'a str>, EdifactError> {
         // Default implementation delegates to the zero-alloc iterator and
         // collects.  Implementors that can do better should override this.
-        self.repeating_components_iter(elem, start_idx, count)
-            .collect()
+        self.component_range_iter(elem, start_idx, count).collect()
     }
 
     /// Iterate over `count` required components starting at `start_idx` from element `elem`.
     ///
-    /// Allocation-free alternative to [`repeating_components`][Self::repeating_components];
+    /// Allocation-free alternative to [`component_range`][Self::component_range];
     /// the caller supplies the iteration budget and consumes results on the fly.
-    fn repeating_components_iter(
+    fn component_range_iter(
         &'a self,
         elem: usize,
         start_idx: usize,
@@ -744,7 +748,7 @@ where
         }
     }
 
-    fn repeating_components_iter(
+    fn component_range_iter(
         &'s self,
         elem: usize,
         start_idx: usize,
@@ -1655,7 +1659,7 @@ mod tests {
         assert_eq!(SegmentAccessor::required_composite(seg, 0, 1).unwrap(), "1");
         let parsed: i32 = SegmentAccessor::code_element(seg, 4).unwrap();
         assert_eq!(parsed, 1);
-        let reps = SegmentAccessor::repeating_components(seg, 3, 0, 2).unwrap();
+        let reps = SegmentAccessor::component_range(seg, 3, 0, 2).unwrap();
         assert_eq!(reps, vec!["200101", "0900"]);
     }
 

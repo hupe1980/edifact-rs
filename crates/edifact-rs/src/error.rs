@@ -488,6 +488,39 @@ pub enum EdifactError {
         data_element: String,
     },
 
+    /// A configured [`ReaderConfig`][crate::ReaderConfig] resource limit was exceeded.
+    ///
+    /// Raised by the parsing iterators when the input carries more segments,
+    /// messages, or bytes than the caller allowed.  The limit is reported rather
+    /// than silently applied: a budget that ends the iterator without an error is
+    /// indistinguishable from a clean end of input, so the caller would accept a
+    /// **truncated** interchange as complete.
+    ///
+    /// [`SegmentTooLong`][Self::SegmentTooLong] covers the per-segment size
+    /// guard; this variant covers the whole-input budgets.
+    #[error("input exceeded the configured {limit} limit of {max}")]
+    LimitExceeded {
+        /// Name of the limit that tripped: `"max_segments"`, `"max_messages"`,
+        /// or `"max_input_bytes"`.
+        limit: &'static str,
+        /// The configured ceiling.
+        max: u64,
+    },
+
+    /// A repeating data element was written under a service string advice that
+    /// declares no repetition separator.
+    ///
+    /// ISO 9735-4 §3.1 repetitions can only be expressed when `UNA` position 7
+    /// carries a real separator.  With the space "not used" sentinel there is no
+    /// byte to write between occurrences, and joining them anyway would emit
+    /// output that reads back as a single occurrence — silent data corruption.
+    /// Construct the writer with [`Writer::with_una`][crate::Writer::with_una]
+    /// and a service string advice whose `repetition_sep` is set.
+    #[error(
+        "cannot write a repeating data element: the active service string advice declares no repetition separator"
+    )]
+    RepetitionSeparatorNotDeclared,
+
     /// A [`SegmentLayout`][crate::SegmentLayout] was applied to a segment with a different tag.
     ///
     /// Passing the `NAD` definition to a `DTM` segment would resolve codes
@@ -549,6 +582,8 @@ impl EdifactError {
             Self::UnknownDataElement { .. } => "E033",
             Self::AmbiguousDataElement { .. } => "E034",
             Self::SegmentLayoutMismatch { .. } => "E035",
+            Self::LimitExceeded { .. } => "E036",
+            Self::RepetitionSeparatorNotDeclared => "E037",
         }
     }
 
@@ -630,6 +665,12 @@ impl EdifactError {
             Self::SegmentLayoutMismatch { .. } => {
                 Some("Resolve codes against the segment definition whose tag matches the segment")
             }
+            Self::LimitExceeded { .. } => {
+                Some("Raise the corresponding ReaderConfig limit, or reject the input as oversized")
+            }
+            Self::RepetitionSeparatorNotDeclared => Some(
+                "Build the writer with Writer::with_una and a ServiceStringAdvice whose repetition_sep is set",
+            ),
             Self::ValidationErrors { .. }
             | Self::MessageCountMismatch { .. }
             | Self::SegmentCountMismatch { .. }
@@ -831,6 +872,14 @@ impl miette::Diagnostic for EdifactError {
             Self::SegmentLayoutMismatch { expected, actual } => Some(Box::new(format!(
                 "The supplied layout describes segment {expected} but was applied to {actual}. \
                  Look up the definition by the segment's own tag",
+            ))),
+            Self::RepetitionSeparatorNotDeclared => Some(Box::new(
+                "UNA position 7 holds the space \"not used\" sentinel, so repeating data \
+                 elements cannot be expressed. Use Writer::with_una with a repetition_sep",
+            )),
+            Self::LimitExceeded { limit, max } => Some(Box::new(format!(
+                "The input exceeds the configured {limit} limit of {max}. \
+                 Raise it via ReaderConfig if the input is legitimate, or reject the input",
             ))),
         }
     }

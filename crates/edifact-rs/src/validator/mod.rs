@@ -24,9 +24,9 @@ use std::any::Any;
 /// # Example
 ///
 /// ```rust,ignore
-/// let pack = ProfileRulePack::new("AHB-11001")
+/// let pack = ProfileRulePack::new("PROFILE-4711")
 ///     .with_rule_fn(|segs, ctx, issues| {
-///         let Some(pruefid) = ctx.metadata::<Pruefid>() else { return };
+///         let Some(process_id) = ctx.metadata::<ProcessId>() else { return };
 ///         let msg_ref = ctx.message_ref.unwrap_or("<unknown>");
 ///     });
 /// ```

@@ -11,10 +11,164 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.14.0] — 2026-08-09
+
+A correctness audit of the parse → validate → write pipeline. Four of the changes
+below fix behaviour that silently produced or accepted **wrong data**; the rest
+close documented-but-missing features and gaps in the guides.
+
+### Breaking Changes
+
+- **`ReaderConfig` budgets report a violation instead of truncating.**
+  `max_segments`, `max_messages`, and `max_input_bytes` used to end the iterator
+  by returning `None`, which is indistinguishable from a clean end of input. The
+  idiomatic `collect::<Result<Vec<_>, _>>()` therefore *succeeded* on a truncated
+  interchange and every downstream stage treated a fragment as the whole message.
+  All three now yield [`EdifactError::LimitExceeded`] (`E036`). Input that ends
+  exactly at a limit is not a violation, and segments parsed before the violation
+  are still delivered. `max_input_bytes` is now a true cap: a segment whose end
+  offset would pass the budget is never handed out.
+  `from_bytes_with_config` also honours `max_messages`, which previously only the
+  reader path enforced.
+- **`Element` and `OwnedElement` gained a `repeats` field.** Code that constructs
+  them with a struct literal must add `repeats: Vec::new()`; `Element::of` and
+  every accessor are unchanged. See *Added* below.
+- **`ValidationSeverity` orders by severity.** The derived `Ord` followed
+  declaration order, ranking `Critical` **lowest** — so `max_by_key(|i| i.severity)`
+  returned the least important issue, contradicting `numeric_level()`. The order is
+  now `Info < Warning < Error < Critical`.
+- **`DirectoryValidator` reports every violation in a segment.** It returned after
+  the first `Err` per segment, so a validator whose whole purpose is an exhaustive
+  report showed one issue per segment and callers fixed messages one round-trip at
+  a time. A segment with two missing mandatory elements and a bad code is now three
+  findings.
+- **Writing a repeating data element without a declared repetition separator is an
+  error** ([`EdifactError::RepetitionSeparatorNotDeclared`], `E037`) rather than
+  output joined with the space sentinel, which read back as a single occurrence.
+
+### Added
+
+- **ISO 9735-4 §3.1 repeating data elements.** The repetition separator at `UNA`
+  position 7 was parsed into `ServiceStringAdvice` and escaped by the writer, but
+  the tokenizer never split on it — so `RFF+ON:1*ON:2` under a syntax-version-4
+  `UNA` parsed as *one* occurrence whose second component was the literal text
+  `1*ON`. Wrong data, delivered without a warning.
+  `Element`/`OwnedElement`/`BorrowedElement` now expose `repeat_count()`,
+  `repetition(n)`, and `repetitions()`; `components` still holds occurrence 0, so
+  every positional accessor and both derives behave exactly as before on the
+  interchanges that do not use the feature. `Element::and_repeat` builds one, and
+  `ServiceStringAdvice::is_repetition_active()` reports whether the separator is
+  live. Round-trips through `Writer::with_una` are byte-for-byte.
+- **`#[derive(EdifactCompositeDeserialize)]` and `#[derive(EdifactCompositeSerialize)]`.**
+  `#[edifact(element = N, composite)]` has always required these traits, and the
+  guides showed the derives — but only the hand-written `Vec<String>` impl existed,
+  so every composite example in the docs failed to compile. Fields map to
+  components in declaration order, `#[edifact(component = N)]` overrides the index,
+  and a bare `String` component is mandatory (`E021` when absent).
+
+### Fixed
+
+- **`Writer::write_segment` and `write_segment_parts` did not record `UNH`.**
+  `finish_unt` then derived DE 0074 from the writer-lifetime total, so a preceding
+  `UNB` inflated the count and the interchange failed its own validation. Every
+  emit path — including the `WriterEmitter` event path — now shares one bookkeeping
+  routine.
+- **Duplicate control-reference detection was O(n²).** `UNH` DE 0062 and `UNG`
+  DE 0048 uniqueness used `Vec::contains`; an interchange with 50 000 messages cost
+  over a billion string comparisons. Now a `HashSet`.
+- **An oversized segment containing multi-byte text reported `InvalidText`
+  (`E003`) instead of `SegmentTooLong` (`E020`).** The scan window can cut a UTF-8
+  sequence in half, and validating the text before the size guard blamed the
+  payload for an encoding problem that did not exist.
+- **`Writer::escape_value` no longer has a panic path.** It built a `Vec<u8>` and
+  re-validated it with an `expect`; it now builds the `String` directly.
+- **Removed an `unwrap` in envelope extraction** by folding the "inside a message"
+  flag and the `UNH` index into one `Option`.
+- **`ValidationReport::has_critical_errors` documented itself as O(1) "backed by an
+  incrementally maintained counter".** It is a linear scan; the doc now says so.
+- **`Components` and `OwnedComponents` are exported.** `Element::components` and
+  the new `repeats` are public fields whose type had no name outside the crate.
+- **The error-code documentation guard did not do what it claimed.** It compared a
+  hand-written array of sample values against the reference guide and asserted that
+  a new variant "fails to compile" — an array is not a match, and `EdifactError` is
+  `#[non_exhaustive]`, so an integration test cannot match it exhaustively anyway.
+  Two variants had already slipped past it. It now reads the codes straight out of
+  `stable_code`'s exhaustive match and checks both the summary table and the
+  per-code section.
+- **`docs/performance.md` listed benchmark groups that do not exist**
+  (`writer/large_message`, `validation/d11a_structure`, …); the table now mirrors
+  the real Criterion IDs.
+
+### Changed
+
+- **`SegmentAccessor::repeating_components` is now `component_range`** (and
+  `repeating_components_iter` → `component_range_iter`). It walks components
+  *inside one data element*; with real ISO 9735-4 repetitions in the model, the
+  old name pointed at the wrong concept.
+- **Install instructions use `cargo add` instead of hand-written `[dependencies]`
+  TOML.** The snippets carried a pinned version that had to be bumped in six
+  places every release — and had already drifted a minor version behind. `cargo
+  add` resolves the current version itself, so there is nothing left to go stale.
+- **Documentation and fixtures no longer name specific organisations, industry
+  bodies, or market verticals.** `edifact-rs` is a general-purpose ISO 9735
+  library; examples now use neutral profile names and the UN/EDIFACT message
+  types (`ORDERS`, `INVOIC`) that need no domain context.
+
+### Site
+
+- **The guides moved from `docs/` to a Zola site under `site/`** and are now
+  published as a landing page plus a documentation section, with a CI job that
+  builds and deploys to GitHub Pages. `README.md` links to the published guides
+  rather than to raw Markdown, so the canonical copy is the one readers and search
+  engines see.
+- The guides are unchanged prose — they gained TOML front matter (title,
+  description, ordering) and their cross-links became Zola's checked `@/` form.
+  `zola check` validates every internal link **and anchor**, which immediately
+  caught two dead anchors that plain relative links had hidden.
+- Every Rust snippet is still compiled and run as a doctest from its new location,
+  so the site cannot drift from the crate.
+- SEO and accessibility come from the templates, not a plugin: per-page `<title>`
+  and meta description, canonical URLs, Open Graph and Twitter tags, JSON-LD
+  (`SoftwareSourceCode`, `WebSite`, `TechArticle`, `BreadcrumbList`, `FAQPage`),
+  an auto-generated sitemap and Atom feed, semantic landmarks, a skip link, and
+  visible focus rings. No JavaScript and no web fonts.
+- **`README.md` shrank from 609 to ~215 lines.** It had grown into a second copy
+  of the guides; it is now a front door — install, three worked examples, the
+  design positions that distinguish the crate, and links to the site.
+
+### Documentation
+
+- **The guides are now actually compiled.** 45 of 126 code blocks were
+  `rust,ignore`, so nothing checked them and they had drifted. Un-ignoring them
+  surfaced roughly a dozen real bugs, all fixed: references to a
+  `ValidationReport.errors`/`.warnings`/`.infos` *field* (private — the accessors
+  are `errors()` and friends), `EdifactError::InvalidCodeValue { offset }` (the
+  field is `span`), `WriterEmitter::into_inner` (it is `finish`), `to_bytes` on a
+  `Segment` slice (that is `segments_to_bytes`), and derives that did not exist.
+  Doctests went from 118 to 155 passing, with ignored blocks down from 68 to 33 —
+  the remainder genuinely need `anyhow`, `tracing`, or a live file.
+- **The `UNA` diagram in `core-concepts.md` was misaligned and mislabelled**, each
+  arrow pointing one position right of its label and the decimal mark, release
+  character, and repetition separator listed in the wrong order. Replaced with a
+  correct diagram plus a table.
+- **`docs/writing.md`'s custom-delimiter example wrote data elements separated by
+  the *component* separator** and asserted a `UNA` prefix that omitted the
+  repetition slot; `docs/parsing.md` had the same delimiter mix-up. Both now
+  round-trip under assertion.
+- `docs/performance.md` claimed the default `max_segment_bytes` was 512 KB; it is
+  64 KiB.
+- New sections: repeating data elements (`core-concepts.md`, `writing.md`), the
+  `ReaderConfig` budget table and rationale (`parsing.md`), and `E036`/`E037`
+  (`error-reference.md`).
+
+[`EdifactError::LimitExceeded`]: https://docs.rs/edifact-rs/latest/edifact_rs/enum.EdifactError.html
+[`EdifactError::RepetitionSeparatorNotDeclared`]: https://docs.rs/edifact-rs/latest/edifact_rs/enum.EdifactError.html
+
+---
+
 ## [0.13.0] — 2026-07-26
 
-Addresses feedback from the [mako](https://github.com/hupe1980) EDIFACT stack
-(`edi-energy`, `dvgw-edi`, `makod`).
+Addresses feedback from downstream profile crates built on this library.
 
 ### Breaking Changes
 

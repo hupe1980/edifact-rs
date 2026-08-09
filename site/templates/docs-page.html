@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+
+{% block structured_data %}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": {{ page.title | json_encode | safe }},
+  "description": {{ page.description | json_encode | safe }},
+  "url": {{ page.permalink | json_encode | safe }},
+  "inLanguage": "en",
+  "isPartOf": {
+    "@type": "WebSite",
+    "name": {{ config.title | json_encode | safe }},
+    "url": {{ config.base_url | json_encode | safe }}
+  },
+  "author": { "@type": "Person", "name": {{ config.author | json_encode | safe }} }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    { "@type": "ListItem", "position": 1, "name": "Home",
+      "item": {{ config.base_url | json_encode | safe }} },
+    { "@type": "ListItem", "position": 2, "name": "Documentation",
+      "item": {{ get_url(path="@/docs/_index.md") | json_encode | safe }} },
+    { "@type": "ListItem", "position": 3, "name": {{ page.title | json_encode | safe }},
+      "item": {{ page.permalink | json_encode | safe }} }
+  ]
+}
+</script>
+{% endblock %}
+
+{% block content %}
+{% set docs = get_section(path="docs/_index.md") %}
+<div class="wrap docs-layout">
+
+  <aside class="docs-sidebar">
+    <nav aria-label="Documentation">
+      <p class="sidebar-title">Documentation</p>
+      <ol>
+        {% for p in docs.pages %}
+        <li>
+          <a href="{{ p.permalink }}"{% if p.permalink == page.permalink %} aria-current="page"{% endif %}>{{ p.title }}</a>
+        </li>
+        {% endfor %}
+      </ol>
+    </nav>
+  </aside>
+
+  <article class="docs-body">
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <a href="{{ get_url(path='@/_index.md') }}">Home</a> ›
+      <a href="{{ docs.permalink }}">Docs</a>
+    </nav>
+
+    <h1>{{ page.title }}</h1>
+    <p class="lede">{{ page.description }}</p>
+
+    {% if page.toc | length > 1 %}
+    <details class="toc" open>
+      <summary>On this page</summary>
+      <ol>
+        {% for h in page.toc %}
+        <li><a href="{{ h.permalink | safe }}">{{ h.title }}</a>
+          {% if h.children %}
+          <ol>{% for c in h.children %}<li><a href="{{ c.permalink | safe }}">{{ c.title }}</a></li>{% endfor %}</ol>
+          {% endif %}
+        </li>
+        {% endfor %}
+      </ol>
+    </details>
+    {% endif %}
+
+    {{ page.content | safe }}
+
+    <nav class="pager" aria-label="Guide">
+      {% if page.lower %}<a class="prev" href="{{ page.lower.permalink }}"><span>Previous</span>{{ page.lower.title }}</a>{% endif %}
+      {% if page.higher %}<a class="next" href="{{ page.higher.permalink }}"><span>Next</span>{{ page.higher.title }}</a>{% endif %}
+    </nav>
+
+    <p class="edit-link">
+      <a href="{{ config.extra.repository }}/edit/main/site/content/docs/{{ page.relative_path | split(pat='/') | last }}" rel="noopener">Edit this page on GitHub</a>
+    </p>
+  </article>
+</div>
+{% endblock %}

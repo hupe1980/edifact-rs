@@ -24,3 +24,5 @@ target
 REVIEW.md
 FINDINGS.md
 .DS_Store
+# Zola build output and search index
+site/public/

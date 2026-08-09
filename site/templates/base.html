@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="{{ lang | default(value=config.default_language) }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+{#- Zola exposes `page` on pages and `section` on sections; resolve both so the
+    head is correct everywhere instead of silently falling back to the site title. -#}
+{%- if page %}
+  {%- set meta_title = page.title %}
+  {%- set meta_desc = page.description | default(value=config.description) %}
+  {%- set meta_url = page.permalink %}
+  {%- set meta_type = "article" %}
+{%- elif section %}
+  {%- set meta_title = section.title %}
+  {%- set meta_desc = section.description | default(value=config.description) %}
+  {%- set meta_url = section.permalink %}
+  {%- set meta_type = "website" %}
+{%- else %}
+  {%- set meta_title = config.title %}
+  {%- set meta_desc = config.description %}
+  {%- set meta_url = config.base_url %}
+  {%- set meta_type = "website" %}
+{%- endif %}
+{#- The home page already carries the product name, so avoid "name · name". -#}
+{%- if meta_url == config.base_url ~ "/" or meta_url == config.base_url %}
+  {%- set full_title = meta_title %}
+{%- else %}
+  {%- set full_title = meta_title ~ " · " ~ config.title %}
+{%- endif %}
+<title>{{ full_title }}</title>
+<meta name="description" content="{{ meta_desc }}">
+<link rel="canonical" href="{{ meta_url | safe }}">
+
+{#- Open Graph / Twitter: what link previews and search engines read.
+    No image is shipped, so the card type is `summary` — claiming
+    `summary_large_image` without one renders an empty box. -#}
+<meta property="og:type" content="{{ meta_type }}">
+<meta property="og:site_name" content="{{ config.title }}">
+<meta property="og:title" content="{{ meta_title }}">
+<meta property="og:description" content="{{ meta_desc }}">
+<meta property="og:url" content="{{ meta_url | safe }}">
+<meta property="og:locale" content="en_US">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="{{ meta_title }}">
+<meta name="twitter:description" content="{{ meta_desc }}">
+
+<link rel="alternate" type="application/atom+xml" title="{{ config.title }}" href="{{ get_url(path='atom.xml', trailing_slash=false) }}">
+<link rel="icon" href="{{ get_url(path='favicon.svg', trailing_slash=false) }}" type="image/svg+xml">
+
+<link rel="stylesheet" href="{{ get_url(path='main.css', trailing_slash=false) }}">
+
+{%- block structured_data %}
+{#- Tera has no dict literal, so the JSON-LD is written out and every injected
+    value goes through `json_encode`, which quotes and escapes it. -#}
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareSourceCode",
+  "name": "edifact-rs",
+  "description": {{ config.description | json_encode | safe }},
+  "url": {{ config.base_url | json_encode | safe }},
+  "codeRepository": {{ config.extra.repository | json_encode | safe }},
+  "programmingLanguage": "Rust",
+  "runtimePlatform": "Rust",
+  "license": "https://spdx.org/licenses/MIT.html",
+  "author": { "@type": "Person", "name": {{ config.author | json_encode | safe }} }
+}
+</script>
+{%- endblock %}
+</head>
+<body>
+<a class="skip-link" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href="{{ get_url(path='@/_index.md') }}">
+      <span class="brand-mark" aria-hidden="true">⚡</span>
+      <span class="brand-name">edifact-rs</span>
+    </a>
+    <nav class="site-nav" aria-label="Main">
+      <a href="{{ get_url(path='@/docs/_index.md') }}">Docs</a>
+      <a href="{{ get_url(path='@/docs/getting-started.md') }}">Get started</a>
+      <a href="{{ config.extra.docs_rs }}" rel="noopener">API</a>
+      <a href="{{ config.extra.repository }}" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+  {%- block content %}{% endblock %}
+</main>
+
+<footer class="site-footer">
+  <div class="wrap footer-inner">
+    <p>
+      <strong>edifact-rs</strong> — EDIFACT (ISO 9735) for Rust.
+      Dual-licensed <a href="{{ config.extra.repository }}/blob/main/LICENSE-MIT">MIT</a> or
+      <a href="{{ config.extra.repository }}/blob/main/LICENSE-APACHE">Apache-2.0</a>.
+    </p>
+    <p class="footer-links">
+      <a href="{{ config.extra.crates_io }}" rel="noopener">crates.io</a>
+      <a href="{{ config.extra.docs_rs }}" rel="noopener">docs.rs</a>
+      <a href="{{ config.extra.repository }}" rel="noopener">GitHub</a>
+      <a href="{{ get_url(path='atom.xml', trailing_slash=false) }}">Atom</a>
+    </p>
+  </div>
+</footer>
+</body>
+</html>

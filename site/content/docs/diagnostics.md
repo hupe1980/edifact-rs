@@ -1,4 +1,8 @@
-# Diagnostics 🩺
++++
+title = "Diagnostics"
+description = "Human-readable, span-annotated EDIFACT error output powered by miette."
+weight = 90
++++
 
 The `diagnostics` feature adds rich, span-annotated error output to `EdifactError`
 via the [`miette`](https://docs.rs/miette) crate. It is **opt-in** — enabling it has
@@ -9,16 +13,14 @@ programmatically.
 
 ## Enabling the feature
 
-```toml
-[dependencies]
-edifact-rs = { version = "0.12", features = ["diagnostics"] }
+```bash
+cargo add edifact-rs --features diagnostics
 ```
 
-You also need `miette` in your dependencies to render errors:
+You also need `miette` to render the errors:
 
-```toml
-[dependencies]
-miette = { version = "7", features = ["fancy"] }
+```bash
+cargo add miette --features fancy
 ```
 
 ---
@@ -99,12 +101,13 @@ fn parse_edi(input: &[u8]) -> anyhow::Result<Vec<edifact_rs::OwnedSegment>> {
 `ValidationReport::render_deterministic()` always produces the same output for the
 same input, making it suitable for snapshot tests:
 
-```rust,ignore
+```rust
 use edifact_rs::{from_bytes, ValidationContext, ValidationLayer, Validator, ValidationReport, Segment};
+# use edifact_rs::ValidationRuleContext;
 
 # struct DemoValidator;
 # impl Validator for DemoValidator {
-#     fn validate_batch(&self, _: &[Segment<'_>], _: &mut ValidationReport) {}
+#     fn validate_batch(&self, _: &[Segment<'_>], _: &mut ValidationReport, _: &ValidationRuleContext<'_>) {}
 #     fn set_message_type(&mut self, _: Option<&str>) {}
 # }
 let segs: Vec<_> = from_bytes(b"BGM+220+PO-4711+9'").collect::<Result<_, _>>()?;
@@ -158,7 +161,7 @@ fn setup_error_handler() {
 
 ## Example
 
-See [`cookbook_diagnostics.rs`](../crates/edifact-rs/examples/cookbook_diagnostics.rs)
+See [`cookbook_diagnostics.rs`](https://github.com/hupe1980/edifact-rs/tree/main/crates/edifact-rs/examples/cookbook_diagnostics.rs)
 for a full example that triggers a code-value validation error and renders it with
 `miette::Report`:
 
@@ -193,6 +196,6 @@ Sample output (with `miette`'s `fancy` feature):
 
 ## Next steps
 
-- [Error Reference](error-reference.md) — all error codes and their span fields
-- [Validation](validation.md) — `ValidationReport::render_deterministic()`
-- [Getting Started](getting-started.md) — feature flag installation
+- [Error Reference](@/docs/error-reference.md) — all error codes and their span fields
+- [Validation](@/docs/validation.md) — `ValidationReport::render_deterministic()`
+- [Getting Started](@/docs/getting-started.md) — feature flag installation

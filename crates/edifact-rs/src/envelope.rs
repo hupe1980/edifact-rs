@@ -22,6 +22,7 @@ use crate::{
     error::EdifactError,
     model::{Segment, Span},
 };
+use std::collections::HashSet;
 
 // ── Sealed segment-access trait ──────────────────────────────────────────────
 
@@ -170,7 +171,7 @@ pub struct InterchangeEnvelope {
     pub acknowledgement_request: bool,
     /// Communications agreement identifier (UNB DE 0032, element index 9), if present.
     ///
-    /// Identifies the agreement controlling the interchange, e.g. `"EANCOM"`.
+    /// Identifies the agreement controlling the interchange.
     pub communications_agreement_id: Option<String>,
     /// Test indicator flag (UNB DE 0035, element index 10).
     ///
@@ -262,7 +263,7 @@ pub struct MessageEnvelope {
     /// Common access reference (UNH DE 0068, element index 2), if present.
     ///
     /// A reference shared across related messages or exchanges on the same network
-    /// path.  Used by some EDI network profiles (e.g. certain gas-market MIGs) to
+    /// path.  Used by some EDI network profiles to
     /// correlate messages that belong to a single business transaction.
     /// `None` when element \[2\] is absent or empty.
     pub common_access_ref: Option<String>,
@@ -355,7 +356,7 @@ pub struct ValidatedInterchange {
     /// Functional groups, when the interchange uses `UNG`/`UNE` wrappers.
     ///
     /// Empty when messages appear directly under the interchange (the common
-    /// case for BDEW MaKo and most modern EDIFACT implementations).
+    /// case for most modern EDIFACT implementations).
     pub functional_groups: Vec<FunctionalGroupEnvelope>,
     /// Flat list of all messages in the interchange.
     ///
@@ -1005,7 +1006,7 @@ fn extract_content<S: SegmentReader>(
             .collect();
         Ok((groups, messages))
     } else {
-        let mut seen_refs: Vec<String> = Vec::new();
+        let mut seen_refs = HashSet::new();
         let messages = extract_messages_flat(inner, sink, &mut seen_refs)?;
         Ok((vec![], messages))
     }
@@ -1042,8 +1043,8 @@ fn extract_with_groups<S: SegmentReader>(
     let mut groups: Vec<FunctionalGroupEnvelope> = Vec::new();
     // DE 0048 must be unique within the interchange (ISO 9735-1 §8); DE 0062
     // must be unique across the whole interchange, so the set spans all groups.
-    let mut seen_group_refs: Vec<String> = Vec::new();
-    let mut seen_message_refs: Vec<String> = Vec::new();
+    let mut seen_group_refs: HashSet<String> = HashSet::new();
+    let mut seen_message_refs: HashSet<String> = HashSet::new();
     let mut i = 0;
 
     while i < inner.len() {
@@ -1068,14 +1069,12 @@ fn extract_with_groups<S: SegmentReader>(
                 };
                 // UNG DE 0048 — group reference number (mandatory per ISO 9735-1 §8)
                 let group_ref = sink.required(ung, 4, 0);
-                if seen_group_refs.contains(&group_ref) {
+                if !seen_group_refs.insert(group_ref.clone()) {
                     sink.push(EdifactError::DuplicateReference {
                         tag: "UNG".to_owned(),
                         reference: group_ref.clone(),
                         span: ung.span(),
                     });
-                } else {
-                    seen_group_refs.push(group_ref.clone());
                 }
                 let controlling_agency = ung.component(5, 0).unwrap_or("").to_owned();
                 // UNG S008 — version (DE 0052, comp 0) + release (DE 0054, comp 1)
@@ -1167,40 +1166,37 @@ fn extract_with_groups<S: SegmentReader>(
 fn extract_messages_flat<S: SegmentReader>(
     segments: &[S],
     sink: &mut ErrorSink,
-    seen_refs: &mut Vec<String>,
+    seen_refs: &mut HashSet<String>,
 ) -> Result<Vec<MessageEnvelope>, EdifactError> {
     let mut messages: Vec<MessageEnvelope> = Vec::new();
-    let mut in_message = false;
-    let mut msg_start_idx: usize = 0;
+    // Index of the `UNH` that opened the message currently being read.  A single
+    // `Option` carries the whole "are we inside a message" state, so the index
+    // cannot be read while absent.
     let mut unh_idx: Option<usize> = None;
 
     for (i, seg) in segments.iter().enumerate() {
         match seg.tag() {
             "UNH" => {
-                if in_message {
+                if unh_idx.is_some() {
                     return Err(EdifactError::InvalidSegmentForMessage {
                         tag: "UNH".to_owned(),
                         message_type: "ENVELOPE".to_owned(),
                         span: seg.span(),
                     });
                 }
-                in_message = true;
-                msg_start_idx = i;
                 unh_idx = Some(i);
             }
-            "UNT" if in_message => {
-                let u_idx = unh_idx.take().unwrap();
-                let unh = &segments[u_idx];
+            "UNT" if unh_idx.is_some() => {
+                let msg_start_idx = unh_idx.take().expect("guarded by the match arm");
+                let unh = &segments[msg_start_idx];
 
                 let message_ref = sink.required(unh, 0, 0);
-                if seen_refs.contains(&message_ref) {
+                if !seen_refs.insert(message_ref.clone()) {
                     sink.push(EdifactError::DuplicateReference {
                         tag: "UNH".to_owned(),
                         reference: message_ref.clone(),
                         span: unh.span(),
                     });
-                } else {
-                    seen_refs.push(message_ref.clone());
                 }
                 let message_type = sink.required(unh, 1, 0);
                 let version = sink.required(unh, 1, 1);
@@ -1248,7 +1244,6 @@ fn extract_messages_flat<S: SegmentReader>(
                     u32::MAX,
                 );
 
-                in_message = false;
                 messages.push(MessageEnvelope {
                     message_ref,
                     message_type,
@@ -1270,14 +1265,14 @@ fn extract_messages_flat<S: SegmentReader>(
                     span: seg.span(),
                 });
             }
-            "UNB" | "UNZ" | "UNG" | "UNE" if in_message => {
+            "UNB" | "UNZ" | "UNG" | "UNE" if unh_idx.is_some() => {
                 return Err(EdifactError::InvalidSegmentForMessage {
                     tag: seg.tag().to_owned(),
                     message_type: "ENVELOPE".to_owned(),
                     span: seg.span(),
                 });
             }
-            _ if !in_message => {
+            _ if unh_idx.is_none() => {
                 return Err(EdifactError::InvalidSegmentForMessage {
                     tag: seg.tag().to_owned(),
                     message_type: "ENVELOPE".to_owned(),
@@ -1288,7 +1283,7 @@ fn extract_messages_flat<S: SegmentReader>(
         }
     }
 
-    if in_message {
+    if unh_idx.is_some() {
         return Err(EdifactError::MissingSegment {
             tag: "UNT".to_owned(),
             expected_position: "end of message group".to_owned(),
@@ -1592,7 +1587,7 @@ mod tests {
     #[test]
     fn communications_agreement_id_extracted() {
         // DE 0032 at element index 9; elements [5]-[8] empty.
-        let input = b"UNB+UNOA:3+S+R+200101:0900+1+++++EANCOM'\
+        let input = b"UNB+UNOA:3+S+R+200101:0900+1+++++AGREEMENT-1'\
                       UNH+1+ORDERS:D:96A:UN'\
                       BGM+220+PO-001+9'\
                       UNT+3+1'\
@@ -1600,7 +1595,7 @@ mod tests {
         let r = parse_and_validate(input).expect("UNB with comms-agreement must parse ok");
         assert_eq!(
             r.interchange.communications_agreement_id.as_deref(),
-            Some("EANCOM")
+            Some("AGREEMENT-1")
         );
     }
 

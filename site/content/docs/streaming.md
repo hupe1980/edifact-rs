@@ -1,9 +1,13 @@
-# Streaming 🌊
++++
+title = "Streaming"
+description = "Process gigabyte interchanges in constant memory with reader iterators, message windows, and typed extraction."
+weight = 60
++++
 
 `edifact-rs` provides multiple streaming APIs for processing large EDIFACT
 interchanges without loading the entire file into memory. All reader-based APIs are
 synchronous (`std::io::Read`) and can be bridged to async runtimes — see
-[Async Integration](async-integration.md).
+[Async Integration](@/docs/async-integration.md).
 
 ---
 
@@ -28,7 +32,7 @@ synchronous (`std::io::Read`) and can be bridged to async runtimes — see
 
 Process one `OwnedSegment` at a time without loading the interchange into memory:
 
-```rust,ignore
+```rust,no_run
 use edifact_rs::from_reader;
 use std::fs::File;
 
@@ -78,7 +82,7 @@ for result in from_bytes_windows(interchange) {
 
 ### `message_windows_from_reader` — reader source
 
-```rust,ignore
+```rust,no_run
 use edifact_rs::message_windows_from_reader;
 use std::fs::File;
 
@@ -249,7 +253,7 @@ for result in message_windows_from_reader(input) {
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-See the full example in [`cookbook_streamed_progressive_validation.rs`](../crates/edifact-rs/examples/cookbook_streamed_progressive_validation.rs).
+See the full example in [`cookbook_streamed_progressive_validation.rs`](https://github.com/hupe1980/edifact-rs/tree/main/crates/edifact-rs/examples/cookbook_streamed_progressive_validation.rs).
 
 ---
 
@@ -309,6 +313,6 @@ for result in from_reader(input) {
 
 ## Next steps
 
-- [Validation](validation.md) — validate windows and messages
-- [Async Integration](async-integration.md) — bridging to tokio
-- [Performance](performance.md) — allocation analysis and benchmarks
+- [Validation](@/docs/validation.md) — validate windows and messages
+- [Async Integration](@/docs/async-integration.md) — bridging to tokio
+- [Performance](@/docs/performance.md) — allocation analysis and benchmarks

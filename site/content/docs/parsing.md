@@ -1,4 +1,8 @@
-# Parsing 🔍
++++
+title = "Parsing"
+description = "Zero-copy slice parsing, streaming readers, byte spans, UNA handling, and the ReaderConfig budgets that guard against oversized input."
+weight = 30
++++
 
 This guide covers every entry point for reading EDIFACT data — byte slices, readers,
 custom delimiter configuration, and envelope-level helpers.
@@ -47,17 +51,24 @@ for result in from_bytes(input) {
 
 ### `element_str(n)` — the most common pattern
 
-```rust,ignore
+```rust
+# use edifact_rs::from_bytes;
+# let input: &[u8] = b"UNA:+.? 'BGM+220+PO-4711+9'NAD+BY+4000001::9'";
+# let segments: Vec<_> = from_bytes(input).collect::<Result<Vec<_>, _>>()?;
 let bgm = &segments[0];
 
 // component 0 of element n — covers the vast majority of EDIFACT fields
 assert_eq!(bgm.element_str(0), Some("220"));
 assert_eq!(bgm.element_str(99), None); // out-of-bounds → None
+# Ok::<(), edifact_rs::EdifactError>(())
 ```
 
 ### `get_element(n)` + `get_component(c)` — composite fields
 
-```rust,ignore
+```rust
+# use edifact_rs::from_bytes;
+# let input: &[u8] = b"UNA:+.? 'BGM+220+PO-4711+9'NAD+BY+4000001::9'";
+# let segments: Vec<_> = from_bytes(input).collect::<Result<Vec<_>, _>>()?;
 // NAD element 1 is composite: party_id : qualifier : code_list_qual
 let nad = &segments[1];
 let party_id = nad
@@ -68,13 +79,22 @@ let code = nad
     .get_element(1)
     .and_then(|e| e.get_component(2))
     .unwrap_or("");
+assert_eq!(party_id, "4000001");
+assert_eq!(code, "9");
+# Ok::<(), edifact_rs::EdifactError>(())
 ```
 
 ### `component_or_empty(n)` — avoid `Option` unwrapping
 
-```rust,ignore
+```rust
+# use edifact_rs::from_bytes;
+# let input: &[u8] = b"UNA:+.? 'BGM+220+PO-4711+9'NAD+BY+4000001::9'";
+# let segments: Vec<_> = from_bytes(input).collect::<Result<Vec<_>, _>>()?;
+# let seg = &segments[1];
 let elem = seg.get_element(1).unwrap();
 let val = elem.component_or_empty(0); // "" if absent, no panic
+assert_eq!(val, "4000001");
+# Ok::<(), edifact_rs::EdifactError>(())
 ```
 
 ---
@@ -84,7 +104,10 @@ let val = elem.component_or_empty(0); // "" if absent, no panic
 Every `Segment`, `Element`, and component carries a `Span { start, end }` pointing
 into the **original input slice**.
 
-```rust,ignore
+```rust
+# use edifact_rs::from_bytes;
+# let input: &[u8] = b"UNA:+.? 'BGM+220+PO-4711+9'NAD+BY+4000001::9'";
+# let segments: Vec<_> = from_bytes(input).collect::<Result<Vec<_>, _>>()?;
 let seg = &segments[0];
 println!("segment spans bytes {}..{}", seg.span.start, seg.span.end);
 
@@ -93,8 +116,9 @@ println!("element spans bytes {}..{}", elem.span.start, elem.span.end);
 
 if let Some(span) = elem.component_span(0) {
     let raw = &input[span.start..span.end];
-    println!("raw bytes: {:?}", raw);
+    assert_eq!(raw, b"220");
 }
+# Ok::<(), edifact_rs::EdifactError>(())
 ```
 
 Spans are stable across all parsing modes and are used by the `diagnostics` feature
@@ -110,14 +134,18 @@ to show source-annotated error messages.
 - **UNA absent**: EDIFACT defaults (`+`, `:`, `.`, ` `, `?`, `'`) are used.
 - **Malformed UNA**: parsing fails immediately with `EdifactError::InvalidUna`.
 
-```rust,ignore
-// Custom delimiters via UNA
-let custom = b"UNA;|.? !'BGM;220;PO-4711;9!";
-//               ^^                         ^
-//               comp sep = ;               term = !
+```rust
+# use edifact_rs::from_bytes;
+// Custom delimiters via UNA: `;` component, `|` element, `!` terminator.
+let custom = b"UNA;|.? !BGM|220|PO-4711|9!";
+//                ││   │└── segment terminator
+//                ││   └─── repetition separator (space = not used)
+//                │└─────── element separator
+//                └──────── component separator
 let segs: Vec<_> = from_bytes(custom).collect::<Result<_, _>>()?;
 assert_eq!(segs[0].tag, "BGM");
 assert_eq!(segs[0].element_str(0), Some("220"));
+assert_eq!(segs[0].element_str(1), Some("PO-4711"));
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
@@ -127,7 +155,7 @@ assert_eq!(segs[0].element_str(0), Some("220"));
 
 ### `from_reader_collect` — read all at once
 
-```rust,ignore
+```rust,no_run
 use edifact_rs::from_reader_collect;
 use std::fs::File;
 
@@ -138,7 +166,7 @@ let segments = from_reader_collect(f)?; // Vec<OwnedSegment>
 
 ### `from_reader` — streaming, one segment at a time
 
-```rust,ignore
+```rust,no_run
 use edifact_rs::from_reader;
 use std::fs::File;
 
@@ -155,30 +183,68 @@ immediately drops the internal buffer before reading the next segment.
 
 ---
 
-## DOS hardening with `ReaderConfig`
+## DoS hardening with `ReaderConfig`
 
-The `max_segment_bytes` guard prevents a malicious payload from exhausting memory
-by sending an extremely long segment. It is enforced on **both** the fast path
-(when the segment fits in the OS read buffer) and the slow path.
+`ReaderConfig` carries four independent budgets. Every one of them is a **hard cap
+that reports an error** — none of them ever ends the iterator quietly.
 
-```rust,ignore
-use edifact_rs::{ReaderConfig, from_bufread_stream_with_config};
-use std::io::BufReader;
+| Field | Default | Raised as |
+|---|---|---|
+| `max_segment_bytes` | 65 536 (64 KiB) | `SegmentTooLong { offset, limit }` (E020) |
+| `max_segments` | unlimited | `LimitExceeded { limit: "max_segments", max }` (E036) |
+| `max_messages` | unlimited | `LimitExceeded { limit: "max_messages", max }` (E036) |
+| `max_input_bytes` | unlimited | `LimitExceeded { limit: "max_input_bytes", max }` (E036) |
 
-let config = ReaderConfig {
-    max_segment_bytes: 8_192, // reject any segment > 8 KiB
-    ..Default::default()
-};
+The same config applies to both front ends: `from_bytes_with_config` for the
+borrowed slice path and `from_reader_with_config` /
+`from_bufread_stream_with_config` for the owned reader path.
 
-let reader = BufReader::new(std::io::Cursor::new(b"BGM+220+test'"));
-let segments = from_bufread_stream_with_config(reader, config)?;
+```rust
+use edifact_rs::{EdifactError, ReaderConfig, from_bytes_with_config};
+
+let config = ReaderConfig::default()
+    .max_segment_bytes(8_192)   // reject any single segment over 8 KiB
+    .max_segments(10_000)       // …and any input with more than 10 000 segments
+    .max_input_bytes(1 << 20);  // …or more than 1 MiB in total
+
+let segments: Vec<_> = from_bytes_with_config(b"BGM+220+test'", config)
+    .collect::<Result<_, _>>()?;
+assert_eq!(segments.len(), 1);
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-Exceeding the limit returns `EdifactError::SegmentTooLong { offset, limit }`.
+### Why the limits are errors and not a quiet stop
 
-The default limit is **65 536 bytes** per segment (64 KiB), which comfortably
-covers all real-world EDIFACT messages.
+A budget that merely returned `None` is indistinguishable from a clean end of
+input. The idiomatic call —
+
+```rust,ignore
+let segments: Vec<_> = from_bytes_with_config(input, config).collect::<Result<_, _>>()?;
+```
+
+— would then succeed on a **truncated** interchange, and everything downstream
+would treat a fragment as the whole message. Reporting the violation is the only
+outcome a caller cannot accidentally ignore:
+
+```rust
+use edifact_rs::{EdifactError, ReaderConfig, from_bytes_with_config};
+
+let config = ReaderConfig::default().max_segments(1);
+let err = from_bytes_with_config(b"BGM+220'DTM+137'", config)
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap_err();
+assert!(matches!(
+    err,
+    EdifactError::LimitExceeded { limit: "max_segments", max: 1 },
+));
+```
+
+Input that ends *exactly* at a limit is not a violation and finishes normally.
+Segments parsed before the violation are still delivered, so a caller iterating
+manually can keep the partial result and decide what to do with it.
+
+`max_input_bytes` is a true cap: a segment whose end offset would pass the budget
+is never handed out at all.
 
 ---
 
@@ -229,8 +295,8 @@ match from_bytes(bad_input).collect::<Result<Vec<_>, _>>() {
 }
 ```
 
-See the [Error Reference](error-reference.md) for a complete list of all variants
-and their stable codes (E001–E032).
+See the [Error Reference](@/docs/error-reference.md) for a complete list of all variants
+and their stable codes (E001–E037).
 
 ---
 
@@ -272,6 +338,6 @@ assert!(result.errors.len() >= 2); // both problems reported
 
 ## Next steps
 
-- [Writing](writing.md) — serialize segments back to EDIFACT bytes
-- [Typed Derive](typed-derive.md) — map segments to strongly-typed Rust structs
-- [Streaming](streaming.md) — process multi-message interchanges lazily
+- [Writing](@/docs/writing.md) — serialize segments back to EDIFACT bytes
+- [Typed Derive](@/docs/typed-derive.md) — map segments to strongly-typed Rust structs
+- [Streaming](@/docs/streaming.md) — process multi-message interchanges lazily

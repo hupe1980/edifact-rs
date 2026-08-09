@@ -14,7 +14,7 @@
 fn sample_msg() -> &'static [u8] {
     b"\
 UNA:+.? '\
-UNH+1+UTILMD:D:11A:UN:FV2604'\
+UNH+1+ORDERS:D:11A:UN'\
 UNH+1+ORDERS:D:11A:UN'\
 BGM+220+PO-4711+9'\
 DTM+137:20260401:102'\

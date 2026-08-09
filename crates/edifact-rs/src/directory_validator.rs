@@ -1104,7 +1104,7 @@ fn default_required_segments(_message_type: &str) -> &'static [&'static str] {
 /// `element_index` and `component_index` are zero-based.
 ///
 /// Covers the most frequently validated qualifier/code elements across ORDERS,
-/// INVOIC, UTILMD, and similar message types.
+/// INVOIC, and similar message types.
 pub(crate) fn base_code_list_rules(tag: &str) -> &'static [(usize, usize, &'static str)] {
     match tag {
         "BGM" => &[(0, 0, "1001")],
@@ -1385,17 +1385,18 @@ impl DirectoryValidator {
         u8::try_from(count).ok()
     }
 
-    fn validate_component_counts(
+    fn collect_component_count_issues(
         &self,
         seg: &Segment<'_>,
         def: &SegmentDefRef<'_>,
-    ) -> Result<(), EdifactError> {
+        out: &mut Vec<EdifactError>,
+    ) {
         for idx in 0..seg.elements.len() {
             let actual = Self::effective_component_count(seg, idx).unwrap_or(0);
             // The `expected_components` hook is an exact count and wins when set.
             if let Some(expected) = (self.expected_components)(seg.tag, idx) {
                 if actual != expected {
-                    return Err(EdifactError::InvalidComponentCount {
+                    out.push(EdifactError::InvalidComponentCount {
                         tag: seg.tag.to_owned(),
                         element_index: idx,
                         expected,
@@ -1410,7 +1411,7 @@ impl DirectoryValidator {
             // while fewer is normal (conditional components may be omitted).
             if let Some(declared) = def.declared_component_count(idx) {
                 if actual > declared {
-                    return Err(EdifactError::InvalidComponentCount {
+                    out.push(EdifactError::InvalidComponentCount {
                         tag: seg.tag.to_owned(),
                         element_index: idx,
                         expected: declared,
@@ -1420,13 +1421,10 @@ impl DirectoryValidator {
                 }
             }
         }
-        Ok(())
     }
 
-    fn validate_code_lists(&self, seg: &Segment<'_>) -> Result<(), EdifactError> {
-        let rules = (self.code_list_rules)(seg.tag);
-
-        for (elem_idx, comp_idx, de) in rules {
+    fn collect_code_list_issues(&self, seg: &Segment<'_>, out: &mut Vec<EdifactError>) {
+        for (elem_idx, comp_idx, de) in (self.code_list_rules)(seg.tag) {
             let value = seg
                 .get_element(*elem_idx)
                 .and_then(|e| e.get_component(*comp_idx))
@@ -1439,7 +1437,7 @@ impl DirectoryValidator {
                     .get_element(*elem_idx)
                     .and_then(|e| e.component_span(*comp_idx))
                     .unwrap_or(seg.span);
-                return Err(EdifactError::InvalidCodeValue {
+                out.push(EdifactError::InvalidCodeValue {
                     tag: seg.tag.to_owned(),
                     element_index: *elem_idx,
                     value: value.to_owned(),
@@ -1449,8 +1447,6 @@ impl DirectoryValidator {
                 });
             }
         }
-
-        Ok(())
     }
 }
 
@@ -1464,14 +1460,21 @@ impl DirectoryValidator {
         }
     }
 
-    fn validate_segment(&self, seg: &Segment<'_>) -> Result<(), EdifactError> {
+    /// Check one segment, appending **every** violation found to `out`.
+    ///
+    /// Reporting continues past the first fault: a segment missing two mandatory
+    /// elements and carrying an invalid code is three findings, and a validator
+    /// whose whole purpose is an exhaustive report has no business hiding two of
+    /// them.  Only the checks that cannot proceed without a resolved definition
+    /// short-circuit.
+    fn collect_segment_issues(&self, seg: &Segment<'_>, out: &mut Vec<EdifactError>) {
         if !self.structure_checks && !self.code_list_checks {
-            return Ok(());
+            return;
         }
 
         let Some(def) = self.resolve_def(seg.tag) else {
             if self.structure_checks && self.enforce_known_tags {
-                return Err(EdifactError::InvalidSegmentForMessage {
+                out.push(EdifactError::InvalidSegmentForMessage {
                     tag: seg.tag.to_owned(),
                     message_type: self
                         .message_type
@@ -1480,68 +1483,74 @@ impl DirectoryValidator {
                     span: seg.tag_span,
                 });
             }
-            return Ok(());
+            // Without a definition there is nothing further to check against.
+            return;
         };
 
-        let max_elements = def.max_element_position();
-        let min_elements = def.last_mandatory_position();
-        let actual = seg.elements.len();
-
-        if self.structure_checks && (actual < min_elements || actual > max_elements) {
-            return Err(EdifactError::InvalidElementCount {
-                tag: seg.tag.to_owned(),
-                min: min_elements,
-                max: max_elements,
-                actual,
-                span: seg.span,
-            });
-        }
-
         if self.structure_checks {
-            def.for_each_mandatory_position(|idx, _de| {
+            let max_elements = def.max_element_position();
+            let min_elements = def.last_mandatory_position();
+            let actual = seg.elements.len();
+            if actual < min_elements || actual > max_elements {
+                out.push(EdifactError::InvalidElementCount {
+                    tag: seg.tag.to_owned(),
+                    min: min_elements,
+                    max: max_elements,
+                    actual,
+                    span: seg.span,
+                });
+            }
+
+            def.for_each_mandatory_position::<std::convert::Infallible, _>(|idx, _de| {
                 let is_present = seg.elements.get(idx).is_some_and(|elem| {
                     elem.components.iter().any(|(c, _)| !c.as_ref().is_empty())
                 });
                 if !is_present {
-                    return Err(EdifactError::MissingRequiredElement {
+                    out.push(EdifactError::MissingRequiredElement {
                         tag: seg.tag.to_owned(),
                         element_index: idx,
                     });
                 }
                 Ok(())
-            })?;
+            })
+            .unwrap_or_else(|never| match never {});
+
             // Mandatory *components* inside declared composites.  Only fires for
             // definitions built with `ElementRef::composite` / `with_components`;
             // an element that is absent entirely is already reported above as a
             // missing element, so only present elements are checked here.
-            def.for_each_mandatory_component(|elem_idx, comp_idx, _de| {
-                let Some(elem) = seg.elements.get(elem_idx) else {
-                    return Ok(());
-                };
-                let present = elem
-                    .get_component(comp_idx)
-                    .is_some_and(|value| !value.is_empty());
-                if !present {
-                    return Err(EdifactError::MissingRequiredComponent {
-                        tag: seg.tag.to_owned(),
-                        element_index: elem_idx,
-                        component_index: comp_idx,
-                    });
-                }
-                Ok(())
-            })?;
-            self.validate_component_counts(seg, &def)?;
+            def.for_each_mandatory_component::<std::convert::Infallible, _>(
+                |elem_idx, comp_idx, _de| {
+                    let Some(elem) = seg.elements.get(elem_idx) else {
+                        return Ok(());
+                    };
+                    let present = elem
+                        .get_component(comp_idx)
+                        .is_some_and(|value| !value.is_empty());
+                    if !present {
+                        out.push(EdifactError::MissingRequiredComponent {
+                            tag: seg.tag.to_owned(),
+                            element_index: elem_idx,
+                            component_index: comp_idx,
+                        });
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap_or_else(|never| match never {});
+
+            self.collect_component_count_issues(seg, &def, out);
 
             if let Some(rule) = &self.additional_structure_rule {
-                rule(seg)?;
+                if let Err(error) = rule(seg) {
+                    out.push(error);
+                }
             }
         }
 
         if self.code_list_checks {
-            self.validate_code_lists(seg)?;
+            self.collect_code_list_issues(seg, out);
         }
-
-        Ok(())
     }
 }
 
@@ -1556,8 +1565,10 @@ impl Validator for DirectoryValidator {
         report: &mut ValidationReport,
         _context: &ValidationRuleContext<'_>,
     ) {
+        let mut issues = Vec::new();
         for seg in segments {
-            if let Err(err) = self.validate_segment(seg) {
+            self.collect_segment_issues(seg, &mut issues);
+            for err in issues.drain(..) {
                 report_error(report, err);
             }
         }
@@ -1650,7 +1661,7 @@ impl DirectoryValidatorBuilder {
     /// Create a new builder with the given directory identifier.
     ///
     /// The identifier is used in error messages; set a human-readable value
-    /// such as `"UTILMD-5.5.3a"` or `"custom-profile"`.
+    /// such as `"ORDERS-MIG-5.5"` or `"custom-profile"`.
     pub fn new(directory_id: impl Into<String>) -> Self {
         Self {
             directory_id: Some(directory_id.into()),

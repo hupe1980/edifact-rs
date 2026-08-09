@@ -20,9 +20,9 @@ use std::path::{Path, PathBuf};
 fn docs_dir() -> PathBuf {
     // CARGO_MANIFEST_DIR is crates/edifact-rs; the guides live at the repo root.
     Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs")
+        .join("../../site/content/docs")
         .canonicalize()
-        .expect("docs/ directory must exist next to the workspace root")
+        .expect("site/content/docs must exist under the workspace root")
 }
 
 /// Every name re-exported from the crate root, plus the public modules.
@@ -38,6 +38,8 @@ const PUBLIC_API: &[&str] = &[
     "report",
     "ser",
     // core model
+    "Components",
+    "OwnedComponents",
     "BorrowedElement",
     "BorrowedSegment",
     "Element",
@@ -228,7 +230,7 @@ fn guides_only_reference_public_api_items() {
     let mut problems: Vec<String> = Vec::new();
 
     let mut sources: Vec<(String, String)> = Vec::new();
-    for entry in std::fs::read_dir(docs_dir()).expect("read docs/") {
+    for entry in std::fs::read_dir(docs_dir()).expect("read the guides directory") {
         let path = entry.expect("dir entry").path();
         if path.extension().is_some_and(|e| e == "md") {
             let text = std::fs::read_to_string(&path).expect("read guide");
@@ -280,119 +282,61 @@ fn public_api_list_is_accurate() {
 /// prose only.
 #[test]
 fn error_reference_documents_every_stable_code() {
-    use edifact_rs::EdifactError;
+    // Driven by `error.rs` itself rather than a hand-maintained list of sample
+    // values.  The previous shape built an array of one value per variant and
+    // claimed a new variant "fails to compile" — it does not: an array is not a
+    // match, and `EdifactError` is `#[non_exhaustive]`, so an integration test
+    // cannot match it exhaustively anyway.  Two variants had already slipped
+    // through.  `stable_code` *is* an exhaustive match inside the crate, so
+    // reading the codes out of it covers every variant by construction.
+    let source =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/error.rs"))
+            .expect("src/error.rs must be readable");
 
-    // One representative value per variant. `EdifactError` is `#[non_exhaustive]`
-    // for downstream crates but exhaustive here, so adding a variant without
-    // adding it to this list fails to compile — which is the point.
-    let all = [
-        EdifactError::UnexpectedEof { offset: 0 },
-        EdifactError::InvalidDelimiter { byte: 0, offset: 0 },
-        EdifactError::InvalidText { offset: 0 },
-        EdifactError::InvalidReleaseSequence { offset: 0 },
-        EdifactError::MessageCountMismatch {
-            expected: 0,
-            actual: 0,
-        },
-        EdifactError::SegmentCountMismatch {
-            expected: 0,
-            actual: 0,
-            message_ref: String::new(),
-        },
-        EdifactError::InvalidSegmentTag(String::new()),
-        EdifactError::InvalidUna,
-        EdifactError::MissingRequiredElement {
-            tag: String::new(),
-            element_index: 0,
-        },
-        EdifactError::MissingRequiredComponent {
-            tag: String::new(),
-            element_index: 0,
-            component_index: 0,
-        },
-        EdifactError::InvalidUtf8,
-        EdifactError::InvalidSegmentForMessage {
-            tag: String::new(),
-            message_type: String::new(),
-            span: edifact_rs::Span::new(0, 0),
-        },
-        EdifactError::InvalidElementCount {
-            tag: String::new(),
-            actual: 0,
-            min: 0,
-            max: 0,
-            span: edifact_rs::Span::new(0, 0),
-        },
-        EdifactError::InvalidComponentCount {
-            tag: String::new(),
-            element_index: 0,
-            actual: 0,
-            expected: 0,
-            span: edifact_rs::Span::new(0, 0),
-        },
-        EdifactError::MissingSegment {
-            tag: String::new(),
-            expected_position: String::new(),
-        },
-        EdifactError::QualifierMismatch {
-            tag: String::new(),
-            actual: String::new(),
-            expected: String::new(),
-            span: edifact_rs::Span::new(0, 0),
-        },
-        EdifactError::ConditionalRequirementNotMet {
-            tag: String::new(),
-            element_index: 0,
-            condition: String::new(),
-            span: edifact_rs::Span::new(0, 0),
-        },
-        EdifactError::SegmentTooLong {
-            offset: 0,
-            limit: 0,
-        },
-        EdifactError::UnexpectedMessageType {
-            message_type: String::new(),
-        },
-        EdifactError::InterchangeTooLarge { count: 0 },
-        EdifactError::InvalidEventSequence { message: "" },
-        EdifactError::InvalidElementPosition,
-        EdifactError::InvalidFieldValue {
-            tag: String::new(),
-            element_index: 0,
-            value: String::new(),
-        },
-        EdifactError::UnexpectedDataToken { offset: 0 },
-        EdifactError::UnrecognisedSyntaxIdentifier(String::new()),
-        EdifactError::DuplicateReference {
-            tag: String::new(),
-            reference: String::new(),
-            span: edifact_rs::Span::new(0, 0),
-        },
-        EdifactError::UnknownDataElement {
-            tag: String::new(),
-            data_element: String::new(),
-        },
-        EdifactError::AmbiguousDataElement {
-            tag: String::new(),
-            data_element: String::new(),
-        },
-        EdifactError::SegmentLayoutMismatch {
-            expected: String::new(),
-            actual: String::new(),
-        },
-    ];
+    let body_start = source
+        .find("pub const fn stable_code(")
+        .expect("stable_code must exist");
+    let body_end = source[body_start..]
+        .find("\n    }")
+        .map(|i| body_start + i)
+        .expect("stable_code body must be delimited");
+    let body = &source[body_start..body_end];
+
+    let codes: BTreeSet<String> = body
+        .match_indices("=> \"E")
+        .map(|(i, _)| {
+            // `i` points at `=`; the code literal starts four bytes later.
+            let rest = &body[i + 4..];
+            let end = rest.find('"').expect("code literal must be closed");
+            rest[..end].to_owned()
+        })
+        .collect();
+
+    assert!(
+        codes.len() >= 35,
+        "expected to find every stable code, only parsed {}: {codes:?}",
+        codes.len()
+    );
 
     let guide = std::fs::read_to_string(docs_dir().join("error-reference.md"))
         .expect("error-reference.md must exist");
 
-    let missing: Vec<&str> = all
+    let missing: Vec<&String> = codes
         .iter()
-        .map(EdifactError::stable_code)
         .filter(|code| !guide.contains(&format!("### {code} —")))
         .collect();
-
     assert!(
         missing.is_empty(),
-        "error-reference.md is missing sections for: {missing:?}"
+        "error-reference.md is missing a `### <code> —` section for: {missing:?}"
+    );
+
+    // …and the summary table at the top must list them too.
+    let table_missing: Vec<&String> = codes
+        .iter()
+        .filter(|code| !guide.contains(&format!("| {code} | `")))
+        .collect();
+    assert!(
+        table_missing.is_empty(),
+        "error-reference.md summary table is missing rows for: {table_missing:?}"
     );
 }

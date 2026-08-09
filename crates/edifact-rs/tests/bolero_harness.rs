@@ -127,7 +127,7 @@ fn fuzz_validation_layers_no_panic() {
             };
 
             let context = ValidationContext::builder()
-                .with_message_type("UTILMD")
+                .with_message_type("ORDERS")
                 .with_validator(ValidationLayer::Structure, NoopValidator)
                 .with_validator(ValidationLayer::CodeList, NoopValidator)
                 .build();
@@ -823,5 +823,67 @@ fn fuzz_group_segments_indexed_no_panic() {
             };
             // Must not panic regardless of segment content.
             let _ = group_segments_indexed(&segs, DEEP_SCHEMA, "ROOT");
+        });
+}
+
+/// parse → write → reparse must preserve ISO 9735-4 repetitions exactly.
+///
+/// The repetition separator is the one delimiter that changes an element's
+/// *shape* rather than its text, so a bug here silently merges or splits
+/// occurrences instead of producing a parse error.
+#[test]
+fn fuzz_repetition_round_trip_is_stable() {
+    use edifact_rs::{ServiceStringAdvice, Writer};
+
+    check!()
+        .with_type::<(Vec<u8>, u8)>()
+        .cloned()
+        .for_each(|(seed, count): (Vec<u8>, u8)| {
+            // 1..=8 occurrences of a two-component element, values drawn from
+            // the seed so escaping and empty components are both exercised.
+            let repeats = (count % 8) as usize + 1;
+            let value = |i: usize| -> String {
+                seed.get(i)
+                    .map(|b| ((b'A' + (b % 26)) as char).to_string())
+                    .unwrap_or_default()
+            };
+
+            let ssa = ServiceStringAdvice {
+                repetition_sep: b'*',
+                ..ServiceStringAdvice::default()
+            };
+
+            let owned: Vec<String> = (0..repeats).map(value).collect();
+            let mut built = edifact_rs::Element::of(&["ON", owned[0].as_str()]);
+            for v in owned.iter().skip(1) {
+                built = built.and_repeat(&["ON", v.as_str()]);
+            }
+            let segment = edifact_rs::Segment::new("RFF", vec![built]);
+
+            let mut buf = Vec::new();
+            {
+                let mut writer = Writer::with_una(&mut buf, ssa).expect("valid UNA");
+                writer.write_segment(&segment).expect("write must succeed");
+            }
+
+            let reparsed = from_bytes(&buf)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap_or_else(|e| panic!("re-parse of own output failed: {e}"));
+            assert_eq!(reparsed.len(), 1);
+
+            let element = reparsed[0].get_element(0).expect("element present");
+            assert_eq!(
+                element.repeat_count(),
+                repeats,
+                "repetition count changed for {owned:?}"
+            );
+            for (i, expected) in owned.iter().enumerate() {
+                let components = element.repetition(i).expect("repetition present");
+                assert_eq!(components[0].0.as_ref(), "ON");
+                // A trailing empty component is dropped on the wire, so an empty
+                // value legitimately reparses as a one-component repetition.
+                let actual = components.get(1).map(|(c, _)| c.as_ref()).unwrap_or("");
+                assert_eq!(actual, expected.as_str(), "value changed at repetition {i}");
+            }
         });
 }

@@ -1,0 +1,82 @@
+name: site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "site/**"
+      - ".github/workflows/site.yml"
+  pull_request:
+    paths:
+      - "site/**"
+      - ".github/workflows/site.yml"
+  workflow_dispatch:
+
+# Allow one concurrent deployment; a newer commit supersedes an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  ZOLA_VERSION: "0.22.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    name: build
+    steps:
+      - uses: actions/checkout@v4
+
+      # Supplies the real Pages base URL, which every canonical link, Open Graph
+      # tag, and sitemap entry is built from.
+      - id: pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v5
+
+      - name: Install Zola
+        run: |
+          curl -sSfL "https://github.com/getzola/zola/releases/download/v${ZOLA_VERSION}/zola-v${ZOLA_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C /usr/local/bin zola
+
+      # `zola check` validates every internal `@/` link *and its anchor*, so a
+      # renamed guide or a retitled heading fails here rather than shipping a
+      # dead link. External links are skipped: a third-party outage is not a
+      # reason to fail our build.
+      - name: Check links
+        working-directory: site
+        run: zola check --skip-external-links
+
+      - name: Build
+        working-directory: site
+        # On a pull request there is no Pages environment, so fall back to the
+        # value in zola.toml just to prove the site compiles.
+        run: |
+          if [ -n "${{ steps.pages.outputs.base_url }}" ]; then
+            zola build --base-url "${{ steps.pages.outputs.base_url }}"
+          else
+            zola build
+          fi
+
+      - name: Upload artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/public
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    name: deploy
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -13,8 +13,17 @@ use crate::model::Span;
 ///
 /// Marked `#[non_exhaustive]` so that adding new severity levels in future
 /// releases is not a breaking change for downstream match arms.
+///
+/// # Ordering
+///
+/// Comparison follows *severity*, not declaration order:
+/// `Info < Warning < Error < Critical`.  The derived ordering said the opposite
+/// — it ranked `Critical` lowest, so `issues.max_by_key(|i| i.severity)` picked
+/// the least important issue — while [`numeric_level`][Self::numeric_level] said
+/// the reverse.  One of the two had to give, and the one that matches the word
+/// "severity" wins.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ValidationSeverity {
     /// Structural parse failure; processing cannot continue.
@@ -49,7 +58,10 @@ impl ValidationSeverity {
     /// Return a numeric priority for this severity level.
     ///
     /// Higher values indicate higher severity: `Critical = 3`, `Error = 2`,
-    /// `Warning = 1`, `Info = 0`.
+    /// `Warning = 1`, `Info = 0`.  This is also the basis of the [`Ord`] impl.
+    ///
+    /// Because the enum is `#[non_exhaustive]`, a variant added in a future
+    /// release that this build does not know about ranks below `Info`.
     #[must_use]
     pub fn numeric_level(self) -> u8 {
         match self {
@@ -57,7 +69,24 @@ impl ValidationSeverity {
             Self::Warning => 1,
             Self::Error => 2,
             Self::Critical => 3,
+            #[allow(unreachable_patterns)]
+            _ => 0,
         }
+    }
+}
+
+impl Ord for ValidationSeverity {
+    /// Orders by [`numeric_level`][Self::numeric_level]: `Info` is least, `Critical` greatest.
+    #[inline]
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.numeric_level().cmp(&other.numeric_level())
+    }
+}
+
+impl PartialOrd for ValidationSeverity {
+    #[inline]
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -84,21 +113,20 @@ impl std::fmt::Display for ValidationSeverity {
 ///
 /// ```text
 /// "<PACK>-<SCOPE>-<TAG>-<STATUS>"
-///  ^^^^^^^^                        — identifies the pack / profile (e.g. "AHB-13001")
-///              ^^^^^^^             — identifies the rule scope (e.g. "SG5", "BGM")
-///                      ^^^         — identifies the affected segment
-///                          ^^^^^^^  — M/C/... status or short discriminator
+///  ^^^^^^                          — the pack / profile that owns the rule
+///         ^^^^^^^                  — a process identifier, group name, or other discriminator
+///                 ^^^^^            — the affected segment
+///                       ^^^^^^^^   — M / C / … status or short discriminator
 /// ```
 ///
-/// Example: `"AHB-13001-BGM-M"` encodes the AHB process identifier (`13001`),
-/// the affected segment (`BGM`), and the mandatory status (`M`).  Downstream code
-/// can extract the PID with a simple string split:
+/// Example: `"PROFILE-4711-BGM-M"` names the pack `PROFILE`, the scope `4711`,
+/// the affected segment `BGM`, and the mandatory status `M`.  Downstream code can
+/// recover the scope with a plain string split:
 ///
 /// ```rust
-/// # let rule_id = "AHB-13001-BGM-M";
-/// if let Some(pid) = rule_id.strip_prefix("AHB-").and_then(|s| s.splitn(2, '-').next()) {
-///     println!("process identifier: {pid}"); // "13001"
-/// }
+/// let rule_id = "PROFILE-4711-BGM-M";
+/// let scope = rule_id.strip_prefix("PROFILE-").and_then(|s| s.split('-').next());
+/// assert_eq!(scope, Some("4711"));
 /// ```
 ///
 /// For truly arbitrary domain metadata, use the [`context`](Self::context) map and
@@ -178,16 +206,16 @@ pub struct ValidationIssue {
     /// Arbitrary domain-specific key-value metadata attached to this issue.
     ///
     /// Use this for information that does not fit into the structured fields above
-    /// — for example the PID a downstream MIG crate is validating against, a
+    /// — for example the process identifier a downstream profile crate is validating against, a
     /// trading-partner identifier, or a document UUID:
     ///
     /// ```rust
     /// # use edifact_rs::{ValidationIssue, ValidationSeverity};
     /// let issue = ValidationIssue::new(ValidationSeverity::Error, "BGM code invalid")
-    ///     .with_rule_id("AHB-13001-BGM-M")
-    ///     .with_context_entry("pid", "13001")
+    ///     .with_rule_id("PROFILE-4711-BGM-M")
+    ///     .with_context_entry("pid", "4711")
     ///     .with_context_entry("partner", "9900123456789");
-    /// assert_eq!(issue.context_get("pid"), Some("13001"));
+    /// assert_eq!(issue.context_get("pid"), Some("4711"));
     /// ```
     ///
     /// The vec is empty by default and is never populated by the built-in rules;
@@ -236,9 +264,9 @@ impl ValidationIssue {
     /// let from_const = ValidationIssue::new(ValidationSeverity::Error, "bad code")
     ///     .with_error_code("E014");
     /// let from_owned = ValidationIssue::new(ValidationSeverity::Error, "bad code")
-    ///     .with_error_code(format!("AHB-{}", 13001));
+    ///     .with_error_code(format!("PROFILE-{}", 4711));
     /// assert_eq!(from_const.error_code(), Some("E014"));
-    /// assert_eq!(from_owned.error_code(), Some("AHB-13001"));
+    /// assert_eq!(from_owned.error_code(), Some("PROFILE-4711"));
     /// ```
     pub fn with_error_code(mut self, code: impl Into<Cow<'static, str>>) -> Self {
         self.error_code = Some(code.into());
@@ -336,11 +364,11 @@ impl ValidationIssue {
     /// ```rust
     /// # use edifact_rs::{ValidationIssue, ValidationSeverity};
     /// let issue = ValidationIssue::new(ValidationSeverity::Error, "BGM code invalid")
-    ///     .with_rule_id("AHB-13001-BGM-M")
-    ///     .with_context_entry("pid", "13001")
+    ///     .with_rule_id("PROFILE-4711-BGM-M")
+    ///     .with_context_entry("pid", "4711")
     ///     .with_context_entry("partner", "9900123456789");
     ///
-    /// assert_eq!(issue.context_get("pid"), Some("13001"));
+    /// assert_eq!(issue.context_get("pid"), Some("4711"));
     /// assert_eq!(issue.context_get("partner"), Some("9900123456789"));
     /// ```
     pub fn with_context_entry(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
@@ -361,11 +389,11 @@ impl ValidationIssue {
     ///
     /// ```rust
     /// # use edifact_rs::{ValidationIssue, ValidationSeverity};
-    /// let meta = [("pid", "13001"), ("partner", "9900123456789")];
+    /// let meta = [("pid", "4711"), ("partner", "9900123456789")];
     /// let issue = ValidationIssue::new(ValidationSeverity::Error, "test")
     ///     .with_context_entries(meta);
     ///
-    /// assert_eq!(issue.context_get("pid"), Some("13001"));
+    /// assert_eq!(issue.context_get("pid"), Some("4711"));
     /// ```
     pub fn with_context_entries<K, V, I>(mut self, entries: I) -> Self
     where
@@ -537,7 +565,7 @@ impl ValidationReport {
     ///
     /// This is the primary escape hatch for code that needs to inject advisory
     /// issues into a report outside the normal validation pipeline — for example,
-    /// a middleware layer that wants to attach AHB-layer skip notices without
+    /// a middleware layer that wants to attach profile-layer skip notices without
     /// registering a synthetic `ProfileRulePack` rule.
     ///
     /// # Example
@@ -546,8 +574,8 @@ impl ValidationReport {
     /// let mut report = ctx.validate_lenient(&segments);
     /// let advisory = ValidationReport::from_issues(
     ///     vec![],
-    ///     vec![ValidationIssue::new(ValidationSeverity::Warning, "AHB layer skipped")
-    ///         .with_rule_id("AHB-SKIP-001")],
+    ///     vec![ValidationIssue::new(ValidationSeverity::Warning, "profile layer skipped")
+    ///         .with_rule_id("PROFILE-SKIP-001")],
     ///     vec![],
     /// );
     /// report.merge(advisory);
@@ -616,7 +644,9 @@ impl ValidationReport {
 
     /// Check if the report contains at least one `Critical`-severity issue.
     ///
-    /// O(1) — backed by an incrementally maintained counter.
+    /// Linear in the number of error-severity issues, which is the bucket that
+    /// can hold them.  Reports are small enough in practice that caching a
+    /// counter would cost more in complexity than it saves.
     pub fn has_critical_errors(&self) -> bool {
         self.errors
             .iter()
@@ -966,6 +996,21 @@ impl FromIterator<ValidationIssue> for ValidationReport {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn severity_orders_by_severity_not_declaration_order() {
+        use ValidationSeverity::*;
+        // The derived ordering ranked `Critical` lowest, so `max_by_key` on a
+        // report returned the least important issue.
+        assert!(Critical > Error);
+        assert!(Error > Warning);
+        assert!(Warning > Info);
+
+        let mut levels = vec![Warning, Critical, Info, Error];
+        levels.sort();
+        assert_eq!(levels, vec![Info, Warning, Error, Critical]);
+        assert_eq!(levels.iter().copied().max(), Some(Critical));
+    }
+
     use super::*;
 
     #[test]
@@ -1079,7 +1124,7 @@ mod tests {
         let issue = ValidationIssue::new(ValidationSeverity::Error, "BGM code invalid")
             .with_error_code("E014")
             .with_span(Span::new(9, 22))
-            .with_rule_id("AHB-13001-BGM-M");
+            .with_rule_id("PROFILE-4711-BGM-M");
         let json = serde_json::to_string(&issue).expect("serialize");
         let back: ValidationIssue = serde_json::from_str(&json).expect("deserialize");
 
@@ -1120,20 +1165,20 @@ mod tests {
     #[test]
     fn context_map_builder() {
         let issue = ValidationIssue::new(ValidationSeverity::Error, "BGM code invalid")
-            .with_context_entry("pid", "13001")
+            .with_context_entry("pid", "4711")
             .with_context_entry("partner", "9900123456789");
 
-        assert_eq!(issue.context_get("pid"), Some("13001"));
+        assert_eq!(issue.context_get("pid"), Some("4711"));
         assert_eq!(issue.context_get("partner"), Some("9900123456789"));
         assert_eq!(issue.context_get("missing"), None);
     }
 
     #[test]
     fn context_map_extend() {
-        let meta = [("pid", "13001"), ("partner", "9900123456789")];
+        let meta = [("pid", "4711"), ("partner", "9900123456789")];
         let issue =
             ValidationIssue::new(ValidationSeverity::Error, "test").with_context_entries(meta);
-        assert_eq!(issue.context_get("pid"), Some("13001"));
+        assert_eq!(issue.context_get("pid"), Some("4711"));
     }
 
     #[test]

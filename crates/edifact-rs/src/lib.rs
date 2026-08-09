@@ -20,7 +20,12 @@
 //! # Crate features
 //!
 //! - `derive` (enabled by default): re-exports the derive macros from
-//!   `edifact-rs-derive`.
+//!   `edifact-rs-derive` — [`EdifactDeserialize`][macro@EdifactDeserialize] /
+//!   [`EdifactSerialize`][macro@EdifactSerialize] for segment and message
+//!   structs, and
+//!   [`EdifactCompositeDeserialize`][macro@EdifactCompositeDeserialize] /
+//!   [`EdifactCompositeSerialize`][macro@EdifactCompositeSerialize] for the
+//!   composite-element structs they reference.
 //! - `diagnostics` (disabled by default): enables rich diagnostic output via `miette`.
 //!   When enabled, errors implement `miette::Diagnostic` for enhanced error reporting.
 //!   This feature adds an optional dependency and has no impact on parsing performance.
@@ -74,6 +79,14 @@
 //!   A trailing `?` at end-of-input is rejected (`E019`).
 //! - Malformed delimiters and truncated segments are reported with stable
 //!   error codes rather than panicking.
+//! - Every [`ReaderConfig`] budget is a hard cap that **reports** a violation
+//!   (`E020` for the per-segment size guard, `E036` for the whole-input
+//!   budgets). A limit never ends the iterator quietly, because that is
+//!   indistinguishable from a clean end of input and would let a caller accept
+//!   a truncated interchange as a complete one.
+//! - When a `UNA` declares a repetition separator at position 7, repeating data
+//!   elements are split into [`Element::repetitions`] rather than left glued
+//!   into the value (ISO 9735-4 §3.1).
 //!
 //! These contracts apply to both slice-based parsing (`from_bytes`) and
 //! reader-based parsing (`from_reader`).
@@ -196,7 +209,8 @@ pub use group::{
     GroupDef, SegmentGroupIndexed, group_owned_segments_indexed, group_segments_indexed,
 };
 pub use model::{
-    BorrowedElement, BorrowedSegment, Element, OwnedElement, OwnedSegment, Segment, Span,
+    BorrowedElement, BorrowedSegment, Components, Element, OwnedComponents, OwnedElement,
+    OwnedSegment, Segment, Span,
 };
 pub use parser::{
     OwnedSegmentStream, Parser, ReaderConfig, from_bufread, from_bufread_stream,
@@ -230,9 +244,20 @@ pub use de::{
 /// enabling parallel or lazy per-message processing without copying data.
 ///
 /// # Example
-/// ```rust,ignore
+/// ```rust
 /// use edifact_rs::from_bytes_windows;
-/// let windows: Vec<_> = from_bytes_windows(input).collect();
+///
+/// let input = b"UNB+UNOA:1+S+R+200101:0900+1'\
+///               UNH+1+ORDERS:D:96A:UN'BGM+220+A+9'UNT+3+1'\
+///               UNH+2+ORDERS:D:96A:UN'BGM+220+B+9'UNT+3+2'\
+///               UNZ+2+1'";
+/// let windows: Vec<_> = from_bytes_windows(input).collect::<Result<Vec<_>, _>>()?;
+///
+/// assert_eq!(windows.len(), 2);
+/// // Each window spans exactly one UNH..UNT pair.
+/// assert_eq!(windows[0].segments.first().unwrap().tag, "UNH");
+/// assert_eq!(windows[0].segments.last().unwrap().tag, "UNT");
+/// # Ok::<(), edifact_rs::EdifactError>(())
 /// ```
 pub use de::message_windows_bytes as from_bytes_windows;
 
@@ -244,7 +269,9 @@ pub use directory_validator::{
 };
 #[cfg(feature = "derive")]
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
-pub use edifact_rs_derive::{EdifactDeserialize, EdifactSerialize};
+pub use edifact_rs_derive::{
+    EdifactCompositeDeserialize, EdifactCompositeSerialize, EdifactDeserialize, EdifactSerialize,
+};
 pub use event::{EdifactEvent, EventEmitter, OwnedEdifactEvent, VecEmitter, WriterEmitter};
 pub use ser::{
     DecimalFloat, DecimalFloatDisplay, EdifactCompositeSerialize, EdifactSerialize,
@@ -259,14 +286,13 @@ use std::io::{Read, Write};
 pub struct FromBytesIter<'a> {
     parser: Option<parser::Parser<'a>>,
     pending_error: Option<EdifactError>,
-    /// Remaining segment allowance (`None` = unlimited).
-    segments_remaining: Option<usize>,
-    /// Maximum byte budget (`None` = unlimited).
-    bytes_remaining: Option<u64>,
-    /// Byte offset of the start of the current parse position (approximated
-    /// as the sum of previously yielded segment spans — the borrowed tokenizer
-    /// does not expose a byte counter, so we track it from `Segment::span`).
-    bytes_consumed: u64,
+    config: ReaderConfig,
+    /// Segments successfully yielded so far.
+    segments_yielded: usize,
+    /// Complete `UNH`/`UNT` message pairs yielded so far.
+    messages_yielded: usize,
+    /// Whether a `UNH` has been yielded without its matching `UNT`.
+    in_message: bool,
 }
 
 /// Iterator returned by [`from_reader`].
@@ -287,43 +313,61 @@ impl<'a> Iterator for FromBytesIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(err) = self.pending_error.take() {
+            self.parser = None;
             return Some(Err(err));
         }
-        // max_segments guard
-        if let Some(ref mut remaining) = self.segments_remaining {
-            if *remaining == 0 {
+        // Limits are checked against a segment that is actually available, so an
+        // input ending exactly at the limit finishes cleanly instead of being
+        // reported as a violation.
+        let seg = match self.parser.as_mut()?.next()? {
+            Ok(seg) => seg,
+            Err(error) => {
                 self.parser = None;
-                return None;
+                return Some(Err(error));
+            }
+        };
+
+        if let Some(max) = self.config.max_segments {
+            if self.segments_yielded >= max {
+                return Some(Err(self.exceeded("max_segments", max as u64)));
             }
         }
-        // max_input_bytes guard — uses absolute byte offset from the input start.
-        // `bytes_consumed` holds `seg.span.end` of the last yielded segment, which
-        // is an absolute position in the input slice and therefore naturally includes
-        // the 9-byte UNA header and the segment terminator character.
-        if let Some(max) = self.bytes_remaining {
-            if self.bytes_consumed >= max {
-                self.parser = None;
-                return None;
+        // Only a `UNH` opens a message, so only a `UNH` can push the count past
+        // the budget.  Testing every segment would trip on the interchange
+        // trailer, which belongs to no message.
+        if let Some(max) = self.config.max_messages {
+            if seg.tag == "UNH" && self.messages_yielded >= max {
+                return Some(Err(self.exceeded("max_messages", max as u64)));
             }
         }
-        let item = self.parser.as_mut()?.next();
-        if let Some(Ok(ref seg)) = item {
-            // Decrement segment allowance
-            if let Some(ref mut remaining) = self.segments_remaining {
-                *remaining = remaining.saturating_sub(1);
-            }
-            // Track the absolute input position at the end of this segment.
-            // `seg.span.end` is the byte offset just past the segment terminator —
-            // a monotonically increasing absolute cursor that automatically accounts
-            // for the UNA header, element/component separators, and terminators.
-            self.bytes_consumed = seg.span.end as u64;
-            if let Some(max) = self.bytes_remaining {
-                if self.bytes_consumed >= max {
-                    self.parser = None;
-                }
+        // `seg.span.end` is the byte offset just past this segment's terminator —
+        // an absolute cursor that already accounts for the UNA header, the
+        // separators, and the terminator itself.
+        if let Some(max) = self.config.max_input_bytes {
+            if seg.span.end as u64 > max {
+                return Some(Err(self.exceeded("max_input_bytes", max)));
             }
         }
-        item
+
+        self.segments_yielded += 1;
+        if seg.tag == "UNT" {
+            if self.in_message {
+                self.messages_yielded += 1;
+            }
+            self.in_message = false;
+        } else if seg.tag == "UNH" {
+            self.in_message = true;
+        }
+        Some(Ok(seg))
+    }
+}
+
+impl FromBytesIter<'_> {
+    /// Terminate the iterator and report the limit that tripped.
+    #[inline]
+    fn exceeded(&mut self, limit: &'static str, max: u64) -> EdifactError {
+        self.parser = None;
+        EdifactError::LimitExceeded { limit, max }
     }
 }
 
@@ -341,52 +385,52 @@ pub fn from_bytes(input: &[u8]) -> FromBytesIter<'_> {
 
 /// Parse `input` bytes into an iterator of [`Segment`]s with explicit configuration.
 ///
-/// All three [`ReaderConfig`] limits are enforced:
-/// - `max_segment_bytes`: returns [`EdifactError::SegmentTooLong`] if a single segment
-///   exceeds the threshold.
-/// - `max_segments`: stops the iterator after this many segments have been yielded.
-/// - `max_input_bytes`: **stop-after** limit — the iterator stops once the cumulative
-///   byte position (tracked via `Segment::span.end`) reaches or exceeds this value.
-///   The last segment whose `span.end` exceeds the limit is **still returned**;
-///   no further segments are fetched after that.  This means at most one segment
-///   worth of bytes can be processed beyond the limit, which is sufficient for a
-///   DoS guard but is not a strict hard cap.  If your use case requires that every
-///   yielded segment fits entirely within `max_input_bytes` bytes, collect and
-///   filter the output, or set the limit conservatively below the true boundary.
+/// Every [`ReaderConfig`] limit is enforced as a **hard cap that yields an error**,
+/// never as a silent stop:
 ///
-/// Pass `ReaderConfig::default()` to use the default 64 KiB per-segment limit with
-/// no segment-count or byte-budget cap.
+/// - `max_segment_bytes` — [`EdifactError::SegmentTooLong`] when a single segment
+///   exceeds the threshold.
+/// - `max_segments`, `max_messages`, `max_input_bytes` —
+///   [`EdifactError::LimitExceeded`] when the input carries more than the budget.
+///
+/// A budget that merely ended the iterator would be indistinguishable from a clean
+/// end of input, so a caller collecting into a `Vec` would silently accept a
+/// **truncated** interchange as a complete one.  Input that ends exactly at a limit
+/// is not a violation and finishes normally.
+///
+/// Pass `ReaderConfig::default()` for the default 64 KiB per-segment limit with no
+/// segment-count, message-count, or byte budget.
 ///
 /// # Example
 ///
 /// ```
-/// use edifact_rs::{ReaderConfig, from_bytes_with_config};
+/// use edifact_rs::{EdifactError, ReaderConfig, from_bytes_with_config};
 ///
-/// let cfg = ReaderConfig::default().max_segment_bytes(128);
-/// let result: Result<Vec<_>, _> = from_bytes_with_config(b"BGM+220+1+9'", cfg).collect();
-/// assert!(result.is_ok());
+/// // Exactly at the limit: fine.
+/// let cfg = ReaderConfig::default().max_segments(1);
+/// assert!(from_bytes_with_config(b"BGM+220'", cfg).collect::<Result<Vec<_>, _>>().is_ok());
+///
+/// // One segment too many: a loud error, not a quiet truncation.
+/// let err = from_bytes_with_config(b"BGM+220'DTM+137'", cfg)
+///     .collect::<Result<Vec<_>, _>>()
+///     .unwrap_err();
+/// assert!(matches!(err, EdifactError::LimitExceeded { limit: "max_segments", max: 1 }));
 /// ```
 pub fn from_bytes_with_config(input: &[u8], config: parser::ReaderConfig) -> FromBytesIter<'_> {
-    let segments_remaining = config.max_segments;
-    let bytes_remaining = config.max_input_bytes;
-    match tokenizer::ServiceStringAdvice::from_bytes(input) {
+    let (parser, pending_error) = match tokenizer::ServiceStringAdvice::from_bytes(input) {
         Ok(ssa) => {
             let t = tokenizer::Tokenizer::with_limit(input, ssa, config.max_segment_bytes);
-            FromBytesIter {
-                parser: Some(parser::Parser::new(t)),
-                pending_error: None,
-                segments_remaining,
-                bytes_remaining,
-                bytes_consumed: 0,
-            }
+            (Some(parser::Parser::new(t)), None)
         }
-        Err(error) => FromBytesIter {
-            parser: None,
-            pending_error: Some(error),
-            segments_remaining,
-            bytes_remaining,
-            bytes_consumed: 0,
-        },
+        Err(error) => (None, Some(error)),
+    };
+    FromBytesIter {
+        parser,
+        pending_error,
+        config,
+        segments_yielded: 0,
+        messages_yielded: 0,
+        in_message: false,
     }
 }
 
@@ -560,7 +604,7 @@ mod tests {
     }
 }
 
-/// Compiles and runs every ```` ```rust ```` block in the `docs/` guides as a
+/// Compiles and runs every ```` ```rust ```` block in the published guides as a
 /// doctest.
 ///
 /// The guides drifted from the API — snippets referenced private module paths
@@ -579,30 +623,39 @@ mod doc_guides {
         };
     }
 
-    guide!(CoreConcepts, "../../../docs/core-concepts.md");
-    guide!(Parsing, "../../../docs/parsing.md");
-    guide!(ProfilePacks, "../../../docs/profile-packs.md");
-    guide!(Validation, "../../../docs/validation.md");
+    guide!(CoreConcepts, "../../../site/content/docs/core-concepts.md");
+    guide!(Parsing, "../../../site/content/docs/parsing.md");
+    guide!(ProfilePacks, "../../../site/content/docs/profile-packs.md");
+    guide!(Validation, "../../../site/content/docs/validation.md");
 
     // Guides whose examples use the derive macros.
     #[cfg(feature = "derive")]
-    guide!(AsyncIntegration, "../../../docs/async-integration.md");
+    guide!(
+        AsyncIntegration,
+        "../../../site/content/docs/async-integration.md"
+    );
     #[cfg(feature = "derive")]
-    guide!(ErrorReference, "../../../docs/error-reference.md");
+    guide!(
+        ErrorReference,
+        "../../../site/content/docs/error-reference.md"
+    );
     #[cfg(feature = "derive")]
-    guide!(GettingStarted, "../../../docs/getting-started.md");
+    guide!(
+        GettingStarted,
+        "../../../site/content/docs/getting-started.md"
+    );
     #[cfg(feature = "derive")]
-    guide!(Performance, "../../../docs/performance.md");
+    guide!(Performance, "../../../site/content/docs/performance.md");
     #[cfg(feature = "derive")]
-    guide!(Streaming, "../../../docs/streaming.md");
+    guide!(Streaming, "../../../site/content/docs/streaming.md");
     #[cfg(feature = "derive")]
-    guide!(TypedDerive, "../../../docs/typed-derive.md");
+    guide!(TypedDerive, "../../../site/content/docs/typed-derive.md");
     #[cfg(feature = "derive")]
-    guide!(Writing, "../../../docs/writing.md");
+    guide!(Writing, "../../../site/content/docs/writing.md");
 
     // The diagnostics guide's examples use `miette` types.
     #[cfg(feature = "diagnostics")]
-    guide!(Diagnostics, "../../../docs/diagnostics.md");
+    guide!(Diagnostics, "../../../site/content/docs/diagnostics.md");
 
     // The README is the crate's front page on docs.rs and crates.io, and drifts
     // for exactly the same reason the guides did.

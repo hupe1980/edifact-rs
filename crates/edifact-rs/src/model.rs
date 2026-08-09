@@ -250,6 +250,12 @@ impl<'a> Segment<'a> {
     }
 }
 
+/// Components of one repetition of a data element, each paired with its span.
+pub type Components<'a> = SmallVec<[(Cow<'a, str>, Span); 4]>;
+
+/// Components of one repetition of an owned data element.
+pub type OwnedComponents = SmallVec<[(String, Span); 4]>;
+
 /// A data element, which may have one or more component values.
 ///
 /// Uses [`SmallVec`] with an inline capacity of 4 to avoid heap allocation
@@ -260,19 +266,69 @@ impl<'a> Segment<'a> {
 ///
 /// Each entry is a `(value, span)` pair, guaranteeing that the component
 /// string and its byte span are always in sync.
+///
+/// # Repetition (ISO 9735-4 §3.1)
+///
+/// [`components`][Self::components] holds the **first** repetition, which is the
+/// only one for every interchange that does not declare a repetition separator
+/// in its `UNA` — that is, virtually all of them.  Further repetitions land in
+/// [`repeats`][Self::repeats]; read them together with
+/// [`repetitions`][Self::repetitions].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Element<'a> {
-    /// Span covering the whole element.
+    /// Span covering the whole element, including every repetition.
     pub span: Span,
-    /// Element components in positional order, each paired with its byte span.
-    pub components: SmallVec<[(Cow<'a, str>, Span); 4]>,
+    /// Components of the first repetition, in positional order.
+    pub components: Components<'a>,
+    /// Second and subsequent repetitions of this data element.
+    ///
+    /// Empty — and therefore unallocated — unless the interchange declares a
+    /// repetition separator and the element actually repeats.
+    pub repeats: Vec<Components<'a>>,
 }
 
 impl<'a> Element<'a> {
-    /// Return the component at position `n` (0-indexed), if it exists.
+    /// Return the component at position `n` (0-indexed) of the first repetition.
     #[inline]
     pub fn get_component(&self, n: usize) -> Option<&str> {
         self.components.get(n).map(|(c, _)| c.as_ref())
+    }
+
+    /// Number of repetitions of this data element — always at least 1.
+    #[inline]
+    pub fn repeat_count(&self) -> usize {
+        1 + self.repeats.len()
+    }
+
+    /// Components of repetition `n` (0-indexed), if it exists.
+    #[inline]
+    pub fn repetition(&self, n: usize) -> Option<&[(Cow<'a, str>, Span)]> {
+        match n {
+            0 => Some(&self.components),
+            _ => self.repeats.get(n - 1).map(|r| r.as_slice()),
+        }
+    }
+
+    /// Iterate over every repetition of this element, first one included.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// // `UNA` byte 7 declares `*` as the repetition separator.
+    /// let segments: Vec<_> = edifact_rs::from_bytes(b"UNA:+.?*'RFF+ON:1*ON:2'")
+    ///     .collect::<Result<Vec<_>, _>>()?;
+    /// let rff = segments[0].get_element(0).unwrap();
+    ///
+    /// let refs: Vec<&str> = rff
+    ///     .repetitions()
+    ///     .map(|components| components[1].0.as_ref())
+    ///     .collect();
+    /// assert_eq!(refs, ["1", "2"]);
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    #[inline]
+    pub fn repetitions(&self) -> impl Iterator<Item = &[(Cow<'a, str>, Span)]> {
+        std::iter::once(self.components.as_slice()).chain(self.repeats.iter().map(|r| r.as_slice()))
     }
 
     /// Return the component at position `n`, or `""` if absent.
@@ -301,7 +357,24 @@ impl<'a> Element<'a> {
                 .copied()
                 .map(|c| (Cow::Borrowed(c), Span::default()))
                 .collect(),
+            repeats: Vec::new(),
         }
+    }
+
+    /// Append a further repetition of this data element (ISO 9735-4 §3.1).
+    ///
+    /// Useful when building segments for [`Writer::write_segment`][crate::Writer::write_segment];
+    /// the writer joins repetitions with the active repetition separator.
+    #[must_use]
+    pub fn and_repeat(mut self, components: &[&'a str]) -> Self {
+        self.repeats.push(
+            components
+                .iter()
+                .copied()
+                .map(|c| (Cow::Borrowed(c), Span::default()))
+                .collect(),
+        );
+        self
     }
 }
 
@@ -311,10 +384,12 @@ impl<'a> Element<'a> {
 /// and its byte span structurally in sync.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedElement {
-    /// Span covering the whole element.
+    /// Span covering the whole element, including every repetition.
     pub span: Span,
-    /// Owned element components in positional order, each paired with its byte span.
-    pub components: SmallVec<[(String, Span); 4]>,
+    /// Components of the first repetition, in positional order.
+    pub components: OwnedComponents,
+    /// Second and subsequent repetitions (ISO 9735-4 §3.1); usually empty.
+    pub repeats: Vec<OwnedComponents>,
 }
 
 impl OwnedElement {
@@ -325,19 +400,48 @@ impl OwnedElement {
         for (_, span) in &mut self.components {
             *span = span.offset(delta);
         }
+        for repeat in &mut self.repeats {
+            for (_, span) in repeat {
+                *span = span.offset(delta);
+            }
+        }
         self
+    }
+
+    /// Number of repetitions of this data element — always at least 1.
+    #[inline]
+    pub fn repeat_count(&self) -> usize {
+        1 + self.repeats.len()
+    }
+
+    /// Components of repetition `n` (0-indexed), if it exists.
+    #[inline]
+    pub fn repetition(&self, n: usize) -> Option<&[(String, Span)]> {
+        match n {
+            0 => Some(&self.components),
+            _ => self.repeats.get(n - 1).map(|r| r.as_slice()),
+        }
+    }
+
+    /// Iterate over every repetition of this element, first one included.
+    #[inline]
+    pub fn repetitions(&self) -> impl Iterator<Item = &[(String, Span)]> {
+        std::iter::once(self.components.as_slice()).chain(self.repeats.iter().map(|r| r.as_slice()))
     }
 }
 
 impl<'a> From<Element<'a>> for OwnedElement {
     fn from(value: Element<'a>) -> Self {
-        Self {
-            span: value.span,
-            components: value
-                .components
+        fn own(components: Components<'_>) -> OwnedComponents {
+            components
                 .into_iter()
                 .map(|(c, s)| (c.into_owned(), s))
-                .collect(),
+                .collect()
+        }
+        Self {
+            span: value.span,
+            components: own(value.components),
+            repeats: value.repeats.into_iter().map(own).collect(),
         }
     }
 }
@@ -419,6 +523,28 @@ impl<'a> BorrowedElement<'a> {
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &'a str> {
         self.0.components.iter().map(|(c, _)| c.as_str())
+    }
+
+    /// Number of repetitions of this data element — always at least 1.
+    #[inline]
+    pub fn repeat_count(&self) -> usize {
+        self.0.repeat_count()
+    }
+
+    /// Components of repetition `n` (0-indexed), if it exists.
+    #[inline]
+    pub fn repetition(&self, n: usize) -> Option<&'a [(String, Span)]> {
+        match n {
+            0 => Some(&self.0.components),
+            _ => self.0.repeats.get(n - 1).map(|r| r.as_slice()),
+        }
+    }
+
+    /// Iterate over every repetition of this element, first one included.
+    #[inline]
+    pub fn repetitions(&self) -> impl Iterator<Item = &'a [(String, Span)]> {
+        std::iter::once(self.0.components.as_slice())
+            .chain(self.0.repeats.iter().map(|r| r.as_slice()))
     }
 }
 
@@ -648,13 +774,18 @@ impl OwnedSegment {
             elements: self
                 .elements
                 .iter()
-                .map(|elem| Element {
-                    span: elem.span,
-                    components: elem
-                        .components
-                        .iter()
-                        .map(|(c, s)| (Cow::Borrowed(c.as_str()), *s))
-                        .collect(),
+                .map(|elem| {
+                    fn borrow(components: &OwnedComponents) -> Components<'_> {
+                        components
+                            .iter()
+                            .map(|(c, s)| (Cow::Borrowed(c.as_str()), *s))
+                            .collect()
+                    }
+                    Element {
+                        span: elem.span,
+                        components: borrow(&elem.components),
+                        repeats: elem.repeats.iter().map(borrow).collect(),
+                    }
                 })
                 .collect(),
         }

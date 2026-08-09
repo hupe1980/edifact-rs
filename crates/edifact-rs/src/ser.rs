@@ -132,7 +132,7 @@ impl_serialize_int!(
 ///
 /// Rust's [`Display`][std::fmt::Display] for `f32`/`f64` always uses `.` as the
 /// decimal separator.  EDIFACT interchanges can declare a different decimal mark
-/// in the UNA service string — most commonly `,` in German EDI\@Energy messages.
+/// in the UNA service string — `,` is the common alternative.
 ///
 /// # Required for float serialization
 ///

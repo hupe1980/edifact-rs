@@ -1,4 +1,8 @@
-# Profile Packs 📦
++++
+title = "Profile Packs"
+description = "Author, compose, merge, and filter business-rule packs with ProfileRulePack, including group-scoped rules."
+weight = 80
++++
 
 `ProfileRulePack` is the primary extension point for downstream MIG/profile crates
 and trading-partner–specific validation logic. Packs are authored using only public
@@ -97,15 +101,15 @@ or override specific ones:
 ```rust
 use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
 
-let base_pack = ProfileRulePack::new("UTILMD-BASE")
-    .for_message_type("UTILMD")
+let base_pack = ProfileRulePack::new("ORDERS-BASE")
+    .for_message_type("ORDERS")
     .with_named_stateless_rule_fn("BASE-BGM", |_segs, _issues| {
         // shared baseline rules …
     });
 
 // Partner-specific pack that prepends the base rules before its own:
-let partner_pack = ProfileRulePack::new("UTILMD-ACME")
-    .for_message_type("UTILMD")
+let partner_pack = ProfileRulePack::new("ORDERS-ACME")
+    .for_message_type("ORDERS")
     .with_stateless_rule_fn(|_segs, _issues| {
         // ACME-specific rules — appended after base rules …
     })
@@ -121,14 +125,14 @@ rules (identified by their stable rule ID):
 ```rust
 use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
 
-let base = ProfileRulePack::new("UTILMD-5.4")
-    .for_message_type("UTILMD")
-    .with_named_stateless_rule_fn("AHB-11001-BGM-M", |_segs, _issues| {
+let base = ProfileRulePack::new("ORDERS-5.4")
+    .for_message_type("ORDERS")
+    .with_named_stateless_rule_fn("PROFILE-4711-BGM-M", |_segs, _issues| {
         // 5.4 BGM rule …
     });
 
-let delta = ProfileRulePack::new("UTILMD-5.5-delta")
-    .with_named_stateless_rule_fn("AHB-11001-BGM-M", |_segs, _issues| {
+let delta = ProfileRulePack::new("ORDERS-5.5-delta")
+    .with_named_stateless_rule_fn("PROFILE-4711-BGM-M", |_segs, _issues| {
         // updated 5.5 BGM rule — replaces the 5.4 version
     });
 
@@ -156,7 +160,7 @@ Packs check the `UNH` segment element 1 component 0 (the message identifier):
 let invoic_pack = ProfileRulePack::new("INVOIC-RULES")
     .for_message_type("INVOIC")
     .with_stateless_rule_fn(|_segs, _issues| {
-        // Will not run for ORDERS, UTILMD, etc.
+        // Will not run for ORDERS, ORDERS, etc.
     });
 
 // Without for_message_type, rules run for all message types:
@@ -230,7 +234,7 @@ println!("ORDERS-DOC-P001 findings: {p001_count}");
 Instead of returning `ValidationIssue` to your application layer, map rule IDs to
 your own domain error type:
 
-```rust,ignore
+```rust
 use edifact_rs::{ProfileRulePack, ValidationContext, ValidationIssue, ValidationSeverity, from_bytes};
 
 #[derive(Debug)]
@@ -280,7 +284,7 @@ fn validate_orders(input: &[u8]) -> Result<(), Vec<TradeError>> {
     }
 
     let errors: Vec<TradeError> = report
-        .errors
+        .errors()
         .iter()
         .filter_map(|issue| match issue.rule_id.as_deref() {
             Some("ORDERS-DOC-P001") => {
@@ -295,7 +299,7 @@ fn validate_orders(input: &[u8]) -> Result<(), Vec<TradeError>> {
 }
 ```
 
-See [`cookbook_profile_error_mapping.rs`](../crates/edifact-rs/examples/cookbook_profile_error_mapping.rs)
+See [`cookbook_profile_error_mapping.rs`](https://github.com/hupe1980/edifact-rs/tree/main/crates/edifact-rs/examples/cookbook_profile_error_mapping.rs)
 for a complete example with a custom `Validator` implementation alongside profile packs.
 
 ---
@@ -393,7 +397,7 @@ Use `group::group_segments_indexed` to build the tree, then pass it to
 For full control, supply a closure via `with_scoped_group_rule_fn(group_scope, rule_id, closure)`.
 The closure receives `(group: &SegmentGroupIndexed, segs: &[Segment], ctx: &ValidationRuleContext, issues: &mut Vec<ValidationIssue>)`:
 
-```rust,ignore
+```rust
 use edifact_rs::{
     ProfileRulePack, ValidationIssue, ValidationSeverity,
     group::SegmentGroupIndexed,
@@ -425,7 +429,7 @@ let pack = ProfileRulePack::new("ORDERS-GROUPS")
 ```
 
 Group rules are run via `validate_lenient_grouped` / `validate_strict_grouped` on
-`ValidationContext`. See [Validation](validation.md) for how to supply a `GroupDef`
+`ValidationContext`. See [Validation](@/docs/validation.md) for how to supply a `GroupDef`
 schema and run the group pass.
 
 ---
@@ -470,6 +474,6 @@ println!("types:       {:?}", pack.message_types().collect::<Vec<_>>()); // ["OR
 
 ## Next steps
 
-- [Validation](validation.md) — multi-layer `ValidationContext` and the `Validator` trait
-- [Streaming](streaming.md) — progressive per-window validation over reader streams
-- [Diagnostics](diagnostics.md) — human-friendly rendering of `ValidationReport`
+- [Validation](@/docs/validation.md) — multi-layer `ValidationContext` and the `Validator` trait
+- [Streaming](@/docs/streaming.md) — progressive per-window validation over reader streams
+- [Diagnostics](@/docs/diagnostics.md) — human-friendly rendering of `ValidationReport`
