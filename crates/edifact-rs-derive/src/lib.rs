@@ -1218,13 +1218,31 @@ fn impl_serialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
             ));
         }
         // ── Segment struct: emit one EDIFACT segment ──────────────────────────
-        // When a struct-level qualifier is declared, inject it at slot 0.
-        // Fields at (element=0, component>=1) extend it as composite components.
-        // Fields at element >= 1 are emitted as regular elements.
-        let (qualifier_emit, start_slot, elem0_comp_stmts) = if let Some(qual) =
-            &struct_attrs.qualifier
-        {
-            // Error only if a field claims element=0 with no component or component=0.
+        //
+        // Fields are laid out on a two-dimensional grid — data element index by
+        // component index — at macro-expansion time, so the generated code stays
+        // straight-line event emission with no runtime allocation.
+        //
+        // The grid is what makes components work at all. Keying the layout on
+        // the element index alone collapsed every field sharing an element into
+        // one entry, so all but the last were silently dropped on write:
+        // a `DTM` with three `component` fields went out as `DTM+102'` instead of
+        // `DTM+137:20260101:102'`, and the loss was invisible until a partner
+        // rejected the file.
+
+        /// What occupies one `(element, component)` cell of the layout.
+        enum Cell {
+            /// The struct-level `#[edifact(qualifier = "…")]`, which owns (0, 0).
+            Qualifier,
+            /// An index into `field_data`.
+            Field(usize),
+        }
+
+        let mut grid: std::collections::BTreeMap<u32, std::collections::BTreeMap<u32, Cell>> =
+            std::collections::BTreeMap::new();
+
+        if struct_attrs.qualifier.is_some() {
+            // The qualifier occupies element 0 / component 0, so a field cannot.
             for (i, (ident, _, attrs)) in field_data.iter().enumerate() {
                 let elem = static_element_index(attrs, i);
                 let comp = attrs.component.unwrap_or(0);
@@ -1235,84 +1253,73 @@ fn impl_serialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                             .or(attrs.component_span)
                             .unwrap_or_else(|| ident.span()),
                         format!(
-                            "field `{}`: cannot use #[edifact(qualifier = ...)] with a field at element = 0 without component >= 1; the qualifier occupies component 0",
-                            ident
+                            "field `{ident}`: cannot use #[edifact(qualifier = ...)] with a field at element = 0 without component >= 1; the qualifier occupies component 0"
                         ),
                     ));
                 }
             }
-            // Collect fields at element=0, component>0, sorted by component.
-            let mut comp_fields: Vec<(u32, usize)> = field_data
-                .iter()
-                .enumerate()
-                .filter_map(|(i, (_, _, attrs))| {
-                    let elem = static_element_index(attrs, i);
-                    let comp = attrs.component.unwrap_or(0);
-                    if elem == 0 && comp > 0 {
-                        Some((comp, i))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            comp_fields.sort_by_key(|(c, _)| *c);
-            let comp_stmts: Vec<TokenStream2> = comp_fields
-                .iter()
-                .map(|(_, fi)| {
-                    let (ident, ty, _) = &field_data[*fi];
-                    emit_component_element(ident, ty)
-                })
-                .collect();
-            let q = quote! {
-                emitter.emit(::edifact_rs::EdifactEvent::Element { value: #qual })?;
-            };
-            (q, 1u32, quote! { #(#comp_stmts)* })
-        } else {
-            (quote! {}, 0u32, quote! {})
+            grid.entry(0).or_default().insert(0, Cell::Qualifier);
+        }
+
+        for (i, (_, _, attrs)) in field_data.iter().enumerate() {
+            // Group fields belong to message structs and occupy no slot;
+            // `validate_field_attrs` already rejects them on a segment struct.
+            if attrs.group {
+                continue;
+            }
+            let element = static_element_index(attrs, i);
+            let component = attrs.component.unwrap_or(0);
+            // `check_duplicate_slots` has already proved this cell is free.
+            grid.entry(element)
+                .or_default()
+                .insert(component, Cell::Field(i));
+        }
+
+        let empty_element = quote! {
+            emitter.emit(::edifact_rs::EdifactEvent::Element { value: "" })?;
+        };
+        let empty_component = quote! {
+            emitter.emit(::edifact_rs::EdifactEvent::ComponentElement { value: "" })?;
         };
 
-        // Rebuild indexed/field_map excluding element=0 fields (handled above).
-        let regular_field_data: Vec<(u32, usize)> = field_data
-            .iter()
-            .enumerate()
-            .filter_map(|(i, (_, _, attrs))| {
-                let elem = static_element_index(attrs, i);
-                if elem < start_slot {
-                    None
-                } else {
-                    Some((elem, i))
-                }
-            })
-            .collect();
-        let reg_max_idx = regular_field_data
-            .iter()
-            .map(|(e, _)| *e)
-            .max()
-            .unwrap_or(start_slot.saturating_sub(1));
-        let reg_field_map: std::collections::HashMap<u32, usize> =
-            regular_field_data.iter().copied().collect();
-
         let mut elem_stmts: Vec<TokenStream2> = Vec::new();
-        for slot in start_slot..=reg_max_idx {
-            if let Some(&fi) = reg_field_map.get(&slot) {
-                let (ident, ty, attrs) = &field_data[fi];
-                if attrs.composite {
-                    elem_stmts.push(emit_composite_field(ident, ty));
-                } else {
-                    elem_stmts.push(emit_element(ident, ty));
+        if let Some(&max_element) = grid.keys().max() {
+            for element in 0..=max_element {
+                let Some(components) = grid.get(&element) else {
+                    // A declared gap between elements is an empty element.
+                    elem_stmts.push(empty_element.clone());
+                    continue;
+                };
+                let max_component = components.keys().max().copied().unwrap_or(0);
+                for component in 0..=max_component {
+                    match components.get(&component) {
+                        Some(Cell::Qualifier) => {
+                            let qual = struct_attrs.qualifier.as_deref().unwrap_or("");
+                            elem_stmts.push(quote! {
+                                emitter.emit(::edifact_rs::EdifactEvent::Element { value: #qual })?;
+                            });
+                        }
+                        Some(Cell::Field(index)) => {
+                            let (ident, ty, attrs) = &field_data[*index];
+                            if attrs.composite {
+                                // A composite field emits its own Element plus
+                                // ComponentElement events for the whole slot.
+                                elem_stmts.push(emit_composite_field(ident, ty));
+                            } else if component == 0 {
+                                elem_stmts.push(emit_element(ident, ty));
+                            } else {
+                                elem_stmts.push(emit_component_element(ident, ty));
+                            }
+                        }
+                        None if component == 0 => elem_stmts.push(empty_element.clone()),
+                        None => elem_stmts.push(empty_component.clone()),
+                    }
                 }
-            } else {
-                // Gap: emit an empty element separator.
-                elem_stmts.push(quote! {
-                    emitter.emit(::edifact_rs::EdifactEvent::Element { value: "" })?;
-                });
             }
         }
 
         quote! {
             emitter.emit(::edifact_rs::EdifactEvent::StartSegment { tag: #seg_tag })?;
-            #qualifier_emit
-            #elem0_comp_stmts
             #(#elem_stmts)*
             emitter.emit(::edifact_rs::EdifactEvent::EndSegment)?;
         }

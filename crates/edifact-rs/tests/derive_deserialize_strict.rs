@@ -256,3 +256,81 @@ fn qualified_group_deserializes_identically_borrowed_and_owned() {
         "the NAD+BY segment must not be collected"
     );
 }
+
+// ── component-aware serialization ─────────────────────────────────────────────
+
+/// `EdifactSerialize` laid fields out on a map keyed by the element index alone,
+/// so every field sharing an element collapsed into one entry and all but the
+/// last were dropped on write.  `#[edifact(component = N)]` was honoured on read
+/// and silently ignored on write, which made the derive round-trip lossy.
+#[derive(Debug, PartialEq, edifact_rs::EdifactDeserialize, edifact_rs::EdifactSerialize)]
+#[edifact(segment = "DTM")]
+struct Dtm {
+    #[edifact(element = 0, component = 0)]
+    qualifier: String,
+    #[edifact(element = 0, component = 1)]
+    value: String,
+    #[edifact(element = 0, component = 2)]
+    format: String,
+}
+
+#[test]
+fn a_multi_component_element_round_trips_through_the_derive() {
+    let input = b"DTM+137:20260101:102'";
+    let segments: Vec<_> = edifact_rs::from_bytes(input)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parse");
+
+    let dtm = Dtm::edifact_deserialize(&segments).expect("deserialize");
+    assert_eq!(dtm.qualifier, "137");
+    assert_eq!(dtm.value, "20260101");
+    assert_eq!(dtm.format, "102");
+
+    // The whole composite must survive the write, not just its last component.
+    let wire = edifact_rs::to_edifact_string(&dtm).expect("serialize");
+    assert_eq!(wire, "DTM+137:20260101:102'");
+
+    let round_tripped: Vec<_> = edifact_rs::from_bytes(wire.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .expect("reparse");
+    assert_eq!(Dtm::edifact_deserialize(&round_tripped).unwrap(), dtm);
+}
+
+#[derive(Debug, edifact_rs::EdifactSerialize)]
+#[edifact(segment = "NAD")]
+struct NadSparse {
+    #[edifact(element = 0)]
+    qualifier: String,
+    #[edifact(element = 1, component = 0)]
+    party_id: String,
+    /// Component 1 is deliberately skipped — the gap must be emitted.
+    #[edifact(element = 1, component = 2)]
+    agency: String,
+}
+
+#[test]
+fn a_gap_between_components_is_emitted_as_an_empty_component() {
+    let wire = edifact_rs::to_edifact_string(&NadSparse {
+        qualifier: "BY".into(),
+        party_id: "4000001000002".into(),
+        agency: "9".into(),
+    })
+    .expect("serialize");
+    assert_eq!(wire, "NAD+BY+4000001000002::9'");
+}
+
+#[derive(Debug, edifact_rs::EdifactSerialize)]
+#[edifact(segment = "RFF", qualifier = "ON")]
+struct RffOn {
+    #[edifact(element = 0, component = 1)]
+    number: String,
+}
+
+#[test]
+fn a_struct_level_qualifier_still_owns_component_zero() {
+    let wire = edifact_rs::to_edifact_string(&RffOn {
+        number: "PO-4711".into(),
+    })
+    .expect("serialize");
+    assert_eq!(wire, "RFF+ON:PO-4711'");
+}

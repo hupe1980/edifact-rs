@@ -321,6 +321,37 @@ is refused with `EdifactError::RepetitionSeparatorNotDeclared` (`E037`) rather
 than silently joined with the space sentinel — which would read back as a single
 occurrence.
 
+The refusal is checked before the first byte leaves the writer, so a rejected
+segment writes **nothing**. The writer stays usable: log the error, skip the
+segment, and keep going — the next segment starts at a clean boundary rather
+than after a dangling `RFF+`.
+
+---
+
+## Character repertoires
+
+`UNB` S001 names the repertoire the payload is written in. A writer that emits
+UTF-8 into a `UNOC` interchange produces mojibake at the far end with nothing in
+the file to explain it, so bind the writer to the repertoire and let it encode:
+
+```rust
+use edifact_rs::{Charset, Writer};
+
+let mut writer = Writer::new(Vec::new()).with_charset(Charset::UnoC);
+writer.write_composites("NAD", &[&["BY"], &["Müller"]])?;
+// `ü` goes out as the single ISO 8859-1 byte 0xFC.
+assert_eq!(writer.finish()?, b"NAD+BY+M\xFCller'".to_vec());
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+A character the repertoire cannot carry is refused with
+`EdifactError::CharacterNotInRepertoire` (`E038`), and a `UNB` declaring a
+repertoire the writer does not encode is refused with
+`CharacterRepertoireMismatch` (`E041`) — the header cannot lie about the body.
+
+See [Character Sets](@/docs/character-sets.md) for the read side and for
+repertoire validation.
+
 ---
 
 ## Escape handling

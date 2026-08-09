@@ -117,7 +117,7 @@ pub(super) struct NamedGroupRule {
     #[allow(clippy::type_complexity)]
     pub(super) rule: Arc<
         dyn Fn(
-                &SegmentGroupIndexed,
+                &SegmentGroupIndexed<'_>,
                 &[Segment<'_>],
                 &ValidationRuleContext<'_>,
                 &mut Vec<ValidationIssue>,
@@ -401,7 +401,7 @@ impl ProfileRulePack {
     pub fn with_group_rule_fn<F>(mut self, rule: F) -> Self
     where
         F: Fn(
-                &SegmentGroupIndexed,
+                &SegmentGroupIndexed<'_>,
                 &[Segment<'_>],
                 &ValidationRuleContext<'_>,
                 &mut Vec<ValidationIssue>,
@@ -421,7 +421,7 @@ impl ProfileRulePack {
     pub fn with_named_group_rule_fn<F>(mut self, id: impl Into<Arc<str>>, rule: F) -> Self
     where
         F: Fn(
-                &SegmentGroupIndexed,
+                &SegmentGroupIndexed<'_>,
                 &[Segment<'_>],
                 &ValidationRuleContext<'_>,
                 &mut Vec<ValidationIssue>,
@@ -467,7 +467,7 @@ impl ProfileRulePack {
     ) -> Self
     where
         F: Fn(
-                &SegmentGroupIndexed,
+                &SegmentGroupIndexed<'_>,
                 &[Segment<'_>],
                 &ValidationRuleContext<'_>,
                 &mut Vec<ValidationIssue>,
@@ -591,6 +591,34 @@ impl ProfileRulePack {
         self.group_rules.len()
     }
 
+    // ── Scope filtering ────────────────────────────────────────────────────
+
+    /// Whether this pack's message-type and release scopes admit `segments`.
+    ///
+    /// Both scopes read `UNH` S009 — the message type is component 0, the
+    /// association assigned code (DE 0057) is component 4 — so the flat and the
+    /// group pass share one implementation instead of two copies that could
+    /// drift.  The `UNH` is looked up only for the scopes that are actually
+    /// configured, and the message type is taken from the pre-extracted
+    /// [`ValidationRuleContext`] when the surrounding
+    /// [`ValidationContext`][super::context::ValidationContext] already found it.
+    fn scope_admits(&self, segments: &[Segment<'_>], context: &ValidationRuleContext<'_>) -> bool {
+        if !self.message_types.is_empty() {
+            let message_type = context
+                .message_type
+                .or_else(|| unh_s009(segments).and_then(|e| e.get_component(0)));
+            if !message_type.is_some_and(|mt| self.message_types.iter().any(|x| x == mt)) {
+                return false;
+            }
+        }
+        if let Some(bound_release) = &self.release {
+            if unh_s009(segments).and_then(|e| e.get_component(4)) != Some(bound_release.as_str()) {
+                return false;
+            }
+        }
+        true
+    }
+
     // ── Private group validation engine ────────────────────────────────────
 
     /// Recursively walk the segment-group tree and evaluate group-scoped rules.
@@ -598,7 +626,7 @@ impl ProfileRulePack {
     /// Called internally by [`Validator::validate_group_batch`].
     fn walk_group_tree(
         &self,
-        group: &SegmentGroupIndexed,
+        group: &SegmentGroupIndexed<'_>,
         all_segments: &[Segment<'_>],
         report: &mut ValidationReport,
         context: &ValidationRuleContext<'_>,
@@ -820,6 +848,17 @@ impl ProfileRulePack {
     }
 }
 
+/// The `UNH` S009 composite (message identifier), if the slice carries a `UNH`.
+///
+/// One lookup answers both scope questions: message type is component 0,
+/// association assigned code (DE 0057) is component 4.
+fn unh_s009<'s, 'd>(segments: &'s [Segment<'d>]) -> Option<&'s crate::model::Element<'d>> {
+    segments
+        .iter()
+        .find(|s| s.tag == "UNH")
+        .and_then(|s| s.get_element(1))
+}
+
 pub(super) fn merge_release_scopes(
     current: Option<String>,
     incoming: Option<String>,
@@ -842,38 +881,8 @@ impl Validator for ProfileRulePack {
         report: &mut ValidationReport,
         context: &ValidationRuleContext<'_>,
     ) {
-        // Use the pre-extracted message type from the rule context when available
-        // (set by ValidationContext to avoid per-pack O(n) UNH scans, F-017).
-        let unh_e1_storage;
-        let unh_e1: Option<&crate::model::Element<'_>> = if context.message_type.is_some() {
-            None
-        } else {
-            unh_e1_storage = segments
-                .iter()
-                .find(|s| s.tag == "UNH")
-                .and_then(|s| s.get_element(1));
-            unh_e1_storage
-        };
-
-        let message_type = context
-            .message_type
-            .or_else(|| unh_e1.and_then(|e| e.get_component(0)));
-
-        if !self.message_types.is_empty()
-            && !message_type.is_some_and(|mt| self.message_types.iter().any(|x| x.as_str() == mt))
-        {
+        if !self.scope_admits(segments, context) {
             return;
-        }
-
-        if let Some(bound_release) = &self.release {
-            let msg_association = segments
-                .iter()
-                .find(|s| s.tag == "UNH")
-                .and_then(|s| s.get_element(1))
-                .and_then(|e| e.get_component(4));
-            if msg_association != Some(bound_release.as_str()) {
-                return;
-            }
         }
 
         let mut rule_issues: Vec<ValidationIssue> = Vec::new();
@@ -906,7 +915,7 @@ impl Validator for ProfileRulePack {
 
     fn validate_group_batch(
         &self,
-        root: &SegmentGroupIndexed,
+        root: &SegmentGroupIndexed<'_>,
         all_segments: &[Segment<'_>],
         report: &mut ValidationReport,
         context: &ValidationRuleContext<'_>,
@@ -915,36 +924,8 @@ impl Validator for ProfileRulePack {
             return;
         }
 
-        // Apply message-type and release scope filters (same as validate_batch).
-        let unh_e1_storage;
-        let unh_e1: Option<&crate::model::Element<'_>> = if context.message_type.is_some() {
-            None
-        } else {
-            unh_e1_storage = all_segments
-                .iter()
-                .find(|s| s.tag == "UNH")
-                .and_then(|s| s.get_element(1));
-            unh_e1_storage
-        };
-        let message_type = context
-            .message_type
-            .or_else(|| unh_e1.and_then(|e| e.get_component(0)));
-
-        if !self.message_types.is_empty()
-            && !message_type.is_some_and(|mt| self.message_types.iter().any(|x| x.as_str() == mt))
-        {
+        if !self.scope_admits(all_segments, context) {
             return;
-        }
-
-        if let Some(bound_release) = &self.release {
-            let msg_association = all_segments
-                .iter()
-                .find(|s| s.tag == "UNH")
-                .and_then(|s| s.get_element(1))
-                .and_then(|e| e.get_component(4));
-            if msg_association != Some(bound_release.as_str()) {
-                return;
-            }
         }
 
         self.walk_group_tree(root, all_segments, report, context);
@@ -1022,7 +1003,7 @@ impl Validator for Arc<ProfileRulePack> {
 
     fn validate_group_batch(
         &self,
-        root: &SegmentGroupIndexed,
+        root: &SegmentGroupIndexed<'_>,
         all_segments: &[Segment<'_>],
         report: &mut ValidationReport,
         context: &ValidationRuleContext<'_>,

@@ -50,6 +50,16 @@ const PUBLIC_API: &[&str] = &[
     // errors
     "EdifactError",
     "IoError",
+    // character repertoires
+    "Charset",
+    "CharsetValidator",
+    "DecodingReader",
+    "charset",
+    "decode_interchange",
+    "decode_reader",
+    "sniff_charset",
+    // ISO 9735 service-segment layouts
+    "service",
     // envelope
     "FunctionalGroupEnvelope",
     "GroupIdentifier",

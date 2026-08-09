@@ -215,3 +215,66 @@ fn writing_a_repetition_without_a_declared_separator_is_refused() {
         b"RFF+ON:1'".to_vec()
     );
 }
+
+/// The reader parses each segment from its own zero-based slice and then rebases
+/// the spans onto the stream.  `OwnedSegment::offset` walked `components` but
+/// not `repeats`, so every occurrence after the first kept its segment-relative
+/// span and pointed into the wrong part of the input.
+#[test]
+fn reader_rebases_repetition_spans_onto_the_stream() {
+    let input = b"UNA:+.?*'RFF+ON:1*ON:2'RFF+AAA:9*AAA:8'";
+
+    let borrowed: Vec<_> = edifact_rs::from_bytes(input)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("slice parse");
+    let owned: Vec<edifact_rs::OwnedSegment> =
+        edifact_rs::from_reader_collect(std::io::Cursor::new(&input[..])).expect("reader parse");
+
+    assert_eq!(borrowed.len(), owned.len());
+    for (b, o) in borrowed.iter().zip(&owned) {
+        for (be, oe) in b.elements.iter().zip(&o.elements) {
+            assert_eq!(be.span, oe.span, "element span for {}", b.tag);
+            for (rep, (br, or)) in be.repeats.iter().zip(&oe.repeats).enumerate() {
+                for (bc, oc) in br.iter().zip(or.iter()) {
+                    assert_eq!(
+                        bc.1,
+                        oc.1,
+                        "{} repetition {} component span",
+                        b.tag,
+                        rep + 1
+                    );
+                }
+            }
+        }
+    }
+
+    // And the span must actually address the bytes it claims to.
+    let second = owned[0].elements[0].repeats[0][1].1;
+    assert_eq!(&input[second.start..second.end], b"2");
+}
+
+/// Rejecting a repeating element mid-write left `RFF+` in the sink, so a caller
+/// that logged the error and carried on emitted a corrupt interchange.
+#[test]
+fn a_rejected_repetition_writes_no_bytes_at_all() {
+    use edifact_rs::Writer;
+
+    let seg = Segment::new(
+        "RFF",
+        vec![Element::of(&["ON", "1"]).and_repeat(&["ON", "2"])],
+    );
+    let mut buf = Vec::new();
+    {
+        let mut writer = Writer::new(&mut buf);
+        let err = writer
+            .write_segment(&seg)
+            .expect_err("a repetition needs a declared separator");
+        assert!(matches!(err, EdifactError::RepetitionSeparatorNotDeclared));
+        // The writer stays usable, and the next segment is not corrupted by a
+        // dangling `RFF+` prefix.
+        writer
+            .write_segment(&Segment::new("BGM", vec![Element::of(&["220"])]))
+            .expect("write after a rejected segment");
+    }
+    assert_eq!(buf, b"BGM+220'");
+}

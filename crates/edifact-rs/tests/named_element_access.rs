@@ -351,3 +351,78 @@ fn absent_optional_component_serializes_as_an_empty_slot() {
         "NAD+MS+9900112233445::'"
     );
 }
+
+// ── composites that repeat a data element by design ───────────────────────────
+
+/// `C080 PARTY NAME` carries `3036` five times, then `3045`.
+///
+/// Declared as five separate `ComponentRef::new` entries, `code_positions` counts
+/// five positions and `3036` resolves as ambiguous — so a *faithful* declaration
+/// made the component unaddressable, and the only way to use named access was to
+/// declare the composite incompletely.
+const C080_FAITHFUL: &[ComponentRef] = &[
+    ComponentRef::repeated(1, "3036", Status::Mandatory, 5),
+    ComponentRef::new(6, "3045", Status::Conditional),
+];
+const NAD_C080_ELEMENTS: &[ElementRef] = &[
+    ElementRef::new(1, "3035", Status::Mandatory, 1),
+    ElementRef::composite(2, "C080", Status::Conditional, 1, C080_FAITHFUL),
+];
+const NAD_C080: SegmentDefinition =
+    SegmentDefinition::new("NAD", "Name and address", NAD_C080_ELEMENTS);
+
+#[test]
+fn a_by_design_repeat_stays_addressable_and_points_at_the_first_occurrence() {
+    assert_eq!(
+        NAD_C080.code_positions("3036"),
+        1,
+        "one entry, one position"
+    );
+
+    let path = NAD_C080.resolve_code("3036").expect("addressable");
+    assert_eq!((path.element, path.component), (1, Some(0)));
+
+    let segments: Vec<_> = edifact_rs::from_bytes(b"NAD+BY+ACME:GMBH:::+X'")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parse");
+    assert_eq!(
+        segments[0].value_by_code(&NAD_C080, "3036").unwrap(),
+        Some("ACME"),
+    );
+    // The later components keep the positions the repeat pushed them to.
+    assert_eq!(NAD_C080.resolve_code("3045").unwrap().component, Some(5));
+}
+
+#[test]
+fn the_repeat_count_is_recorded_rather_than_lost() {
+    let c080 = NAD_C080.elements[1];
+    assert_eq!(c080.components()[0].repeat_count(), 5);
+    assert_eq!(c080.components()[1].repeat_count(), 1);
+}
+
+#[test]
+fn a_repeated_composite_is_not_capped_at_its_entry_count() {
+    // Six values in the composite: the arity check must count slots (6), not
+    // declared entries (2), or a conformant C080 is rejected.
+    let segments: Vec<_> = edifact_rs::from_bytes(b"NAD+BY+A:B:C:D:E:F'")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parse");
+
+    let validator =
+        edifact_rs::DirectoryValidator::from_definitions(std::slice::from_ref(&NAD_C080_STATIC));
+    let report = edifact_rs::ValidationContext::builder()
+        .with_validator(edifact_rs::ValidationLayer::Structure, validator)
+        .build()
+        .validate_lenient(&segments);
+
+    assert!(
+        !report
+            .errors()
+            .iter()
+            .any(|i| i.error_code() == Some("E013")),
+        "six components must fit a composite declaring 5+1 slots: {:#?}",
+        report.errors(),
+    );
+}
+
+static NAD_C080_STATIC: SegmentDefinition = NAD_C080;

@@ -358,9 +358,10 @@ group instance its own isolated segment list. This lets you enforce intra-group
 invariants (e.g. every `SG5` must contain at least one `LIN`) without writing manual
 tree-walking code.
 
-> **Note on `GroupDef`**: `GroupDef` is a plain struct with `pub name`, `pub trigger`,
-> and `pub children: &'static [GroupDef]` fields — no `new()` constructor exists.
-> Define your schema as a `static` or `const`.
+> **Note on `GroupDef`**: build a leaf group with `GroupDef::new(name, trigger)`
+> and a nesting one with `GroupDef::with_children(name, trigger, children)`. Both
+> are `const`, so a schema can be a `static`; both borrow, so a schema read from a
+> MIG at startup works too. The fields stay public for exhaustive construction.
 
 ### Convenience builders
 
@@ -368,16 +369,8 @@ tree-walking code.
 use edifact_rs::{ProfileRulePack, group::GroupDef};
 
 // Schema: SG5 contains LIN and zero or more SG6 children.
-// GroupDef uses &'static [GroupDef] children — must be a static.
-static ORDERS_SCHEMA: &[GroupDef] = &[GroupDef {
-    name: "SG5",
-    trigger: "LIN",
-    children: &[GroupDef {
-        name: "SG6",
-        trigger: "RFF",
-        children: &[],
-    }],
-}];
+static SG6: &[GroupDef] = &[GroupDef::new("SG6", "RFF")];
+static ORDERS_SCHEMA: &[GroupDef] = &[GroupDef::with_children("SG5", "LIN", SG6)];
 
 let pack = ProfileRulePack::new("ORDERS-GROUPS")
     .for_message_type("ORDERS")
@@ -410,7 +403,7 @@ let pack = ProfileRulePack::new("ORDERS-GROUPS")
     .with_scoped_group_rule_fn(
         "SG5",              // fires only inside SG5 occurrences
         "ORDERS-SG5-QTY-M", // stable rule id
-        |_group: &SegmentGroupIndexed,
+        |_group: &SegmentGroupIndexed<'_>,
          segs: &[Segment<'_>],
          _ctx: &ValidationRuleContext<'_>,
          issues: &mut Vec<ValidationIssue>| {

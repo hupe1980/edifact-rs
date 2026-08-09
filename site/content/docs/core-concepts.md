@@ -282,10 +282,32 @@ UNH + 1 + ORDERS : D : 96A : UN '
 
 ## Character set
 
-`edifact-rs` expects all segment text to be valid **UTF-8**. ISO 9735 defines
-several character sets (UNOA, UNOB, UNOC/UTF-8, …), but the library operates on
-decoded text and rejects invalid byte sequences with `EdifactError::InvalidText`
-(error code `E003`).
+`edifact-rs` operates on **UTF-8** text throughout, and rejects invalid byte
+sequences with `EdifactError::InvalidText` (`E003`).
+
+That is not the whole story, because **UTF-8 is not a superset of `UNOC`**. `UNB`
+S001 component 1 names the repertoire the payload is written in, and `UNOC` is
+ISO 8859-1 — where `ü` is the single byte `0xFC`, which is not valid UTF-8. A
+conformant German interchange therefore has to be decoded before it can be
+parsed:
+
+```rust
+use edifact_rs::{decode_interchange, from_bytes};
+
+let mut raw = b"UNB+UNOC:3+S+R+260101:0900+IC1'NAD+BY+M".to_vec();
+raw.push(0xFC);
+raw.extend_from_slice(b"ller'UNZ+0+IC1'");
+
+let utf8 = decode_interchange(&raw)?;                     // reads UNB S001
+let segments: Vec<_> = from_bytes(&utf8).collect::<Result<Vec<_>, _>>()?;
+assert_eq!(segments[1].element_str(1), Some("Müller"));
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+`decode_interchange` copies nothing when the payload is already ASCII or `UNOY`,
+so it is safe to call on every input. See
+[Character Sets](@/docs/character-sets.md) for the streaming decoder, the write
+side, and repertoire validation.
 
 ---
 

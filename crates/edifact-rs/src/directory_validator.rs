@@ -29,12 +29,15 @@ pub enum Status {
 /// Fields are private to enforce the one-based position invariant.
 #[derive(Debug, Clone, Copy)]
 pub struct ComponentRef {
-    /// One-based component position within the composite.
+    /// One-based position of the **first** slot this component occupies.
     position: u8,
     /// UN/EDIFACT component data element identifier.
     data_element: &'static str,
     /// Requirement status of the component.
     status: Status,
+    /// How many consecutive slots this component occupies; `1` unless the
+    /// composite repeats it by design.
+    repeat_count: u8,
 }
 
 impl ComponentRef {
@@ -64,7 +67,84 @@ impl ComponentRef {
             position,
             data_element,
             status,
+            repeat_count: 1,
         }
+    }
+
+    /// Declare a component the composite repeats by design.
+    ///
+    /// Several standard composites carry the same data element several times
+    /// over: `C080 PARTY NAME` is `3036` five times followed by `3045`, `C059
+    /// STREET` is `3042` four times.  Spelling that out as five separate
+    /// [`new`][Self::new] entries made the code count as five positions, so
+    /// [`resolve_code`][SegmentLayout::resolve_code] reported it
+    /// [ambiguous][EdifactError::AmbiguousDataElement] and the component could
+    /// not be code-addressed at all — a faithful declaration was punished, and
+    /// the only way to use named access was to declare the composite
+    /// incompletely and disagree with the directory it claims to model.
+    ///
+    /// One `repeated` entry is one position, so `3036` resolves to occurrence 1
+    /// — what "the party name" means in every real message — while the
+    /// definition still records that five slots belong to it.
+    ///
+    /// `position` is the **first** slot; the next component follows at
+    /// `position + repeat_count`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `position == 0` or `repeat_count == 0`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use edifact_rs::{ComponentRef, ElementRef, SegmentDefinition, SegmentLayout, Status};
+    ///
+    /// // C080 PARTY NAME: 3036 ×5, then 3045 at position 6.
+    /// static C080: &[ComponentRef] = &[
+    ///     ComponentRef::repeated(1, "3036", Status::Mandatory, 5),
+    ///     ComponentRef::new(6, "3045", Status::Conditional),
+    /// ];
+    /// static NAD_ELEMENTS: &[ElementRef] = &[
+    ///     ElementRef::new(1, "3035", Status::Mandatory, 1),
+    ///     ElementRef::composite(4, "C080", Status::Conditional, 1, C080),
+    /// ];
+    /// static NAD: SegmentDefinition = SegmentDefinition::new("NAD", "Name and address", NAD_ELEMENTS);
+    ///
+    /// // Addressable, and it points at the first occurrence.
+    /// let path = NAD.resolve_code("3036")?;
+    /// assert_eq!((path.element, path.component), (3, Some(0)));
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    #[must_use]
+    pub const fn repeated(
+        position: u8,
+        data_element: &'static str,
+        status: Status,
+        repeat_count: u8,
+    ) -> Self {
+        assert!(
+            position != 0,
+            "ComponentRef position must be >= 1 (one-based)"
+        );
+        assert!(
+            repeat_count != 0,
+            "ComponentRef repeat_count must be >= 1; use `new` for a component that does not repeat"
+        );
+        Self {
+            position,
+            data_element,
+            status,
+            repeat_count,
+        }
+    }
+
+    /// How many consecutive slots this component occupies.
+    ///
+    /// `1` for a component declared with [`new`][Self::new].
+    #[must_use]
+    #[inline]
+    pub const fn repeat_count(&self) -> u8 {
+        self.repeat_count
     }
 
     /// One-based component position within the composite.
@@ -426,9 +506,17 @@ impl SegmentDefinition {
     /// message that names the offending field.
     #[must_use]
     pub const fn element_slot(&self, data_element: &str) -> usize {
+        // Two asserts rather than one: a const panic message cannot be
+        // formatted, so naming the identifier is impossible — but saying which
+        // of the two problems occurred is not, and it is the part that decides
+        // what the author has to change.
+        assert!(
+            self.code_positions(data_element) != 0,
+            "this segment definition declares no such data element identifier — check it against the directory"
+        );
         assert!(
             self.code_positions(data_element) == 1,
-            "data element identifier is unknown or ambiguous in this segment definition"
+            "this data element identifier is declared at more than one position; address it positionally, or declare the repeat with ComponentRef::repeated"
         );
         let mut i = 0;
         while i < self.elements.len() {
@@ -461,8 +549,12 @@ impl SegmentDefinition {
     #[must_use]
     pub const fn component_slot(&self, data_element: &str) -> usize {
         assert!(
+            self.code_positions(data_element) != 0,
+            "this segment definition declares no such data element identifier — check it against the directory"
+        );
+        assert!(
             self.code_positions(data_element) == 1,
-            "data element identifier is unknown or ambiguous in this segment definition"
+            "this data element identifier is declared at more than one position; address it positionally, or declare the repeat with ComponentRef::repeated"
         );
         let mut i = 0;
         while i < self.elements.len() {
@@ -599,12 +691,14 @@ pub struct OwnedElementRef {
 /// [`SegmentDefinition`] tables do.
 #[derive(Debug, Clone)]
 pub struct OwnedComponentRef {
-    /// One-based component position within the composite.
+    /// One-based position of the first slot this component occupies.
     position: u8,
     /// UN/EDIFACT component data element identifier.
     data_element: String,
     /// Requirement status.
     status: Status,
+    /// How many consecutive slots this component occupies.
+    repeat_count: u8,
 }
 
 impl OwnedComponentRef {
@@ -622,7 +716,38 @@ impl OwnedComponentRef {
             position,
             data_element,
             status,
+            repeat_count: 1,
         }
+    }
+
+    /// Runtime counterpart of [`ComponentRef::repeated`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `position == 0` or `repeat_count == 0`.
+    #[must_use]
+    pub fn repeated(position: u8, data_element: String, status: Status, repeat_count: u8) -> Self {
+        assert!(
+            position != 0,
+            "OwnedComponentRef::repeated: position must be >= 1 (one-based), got 0"
+        );
+        assert!(
+            repeat_count != 0,
+            "OwnedComponentRef::repeated: repeat_count must be >= 1"
+        );
+        Self {
+            position,
+            data_element,
+            status,
+            repeat_count,
+        }
+    }
+
+    /// How many consecutive slots this component occupies.
+    #[inline]
+    #[must_use]
+    pub fn repeat_count(&self) -> u8 {
+        self.repeat_count
     }
 
     /// Construct an owned component reference, returning an error for position `0`.
@@ -642,6 +767,7 @@ impl OwnedComponentRef {
             position,
             data_element,
             status,
+            repeat_count: 1,
         })
     }
 
@@ -1061,23 +1187,28 @@ impl SegmentDefRef<'_> {
         Ok(())
     }
 
-    /// Number of declared components for the element at zero-based `index`.
+    /// Number of declared component **slots** for the element at zero-based `index`.
+    ///
+    /// A component declared with [`ComponentRef::repeated`] occupies several
+    /// slots, so this sums repeat counts rather than counting entries: counting
+    /// entries would cap `C080` at two components and reject the four extra
+    /// `3036` occurrences the composite is defined to carry.
     ///
     /// `None` when the element is not defined, or is defined without
     /// components — in which case its arity is not constrained by the layout.
     fn declared_component_count(&self, index: usize) -> Option<u8> {
         let position = u8::try_from(index.checked_add(1)?).ok()?;
-        let count = match self {
+        let count: u32 = match self {
             Self::Static(d) => d
                 .elements
                 .iter()
                 .find(|e| e.position == position)
-                .map(|e| e.components.len())?,
+                .map(|e| e.components.iter().map(|c| u32::from(c.repeat_count)).sum())?,
             Self::Owned(d) => d
                 .elements
                 .iter()
                 .find(|e| e.position == position)
-                .map(|e| e.components.len())?,
+                .map(|e| e.components.iter().map(|c| u32::from(c.repeat_count)).sum())?,
         };
         if count == 0 {
             return None;

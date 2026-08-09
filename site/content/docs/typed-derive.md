@@ -153,6 +153,48 @@ struct SenderParty {
 
 `layout` requires `segment`, since a layout describes exactly one segment.
 
+#### Where layouts come from
+
+The crate ships the **ISO 9735 service segments** — `UNB`, `UNG`, `UNH`, `UNT`,
+`UNE`, `UNZ`, `UNS` — in `edifact_rs::service`, ready to point `layout` at. They
+are fixed by the syntax standard, so there is one correct answer and no directory
+version to choose:
+
+```rust
+use edifact_rs::{EdifactDeserialize, service};
+
+#[derive(EdifactDeserialize)]
+#[edifact(segment = "UNB", layout = service::UNB)]
+struct InterchangeHeader {
+    #[edifact(element = "0020")]
+    control_reference: String,
+    #[edifact(element = "0035")]
+    test_indicator: Option<String>,
+}
+```
+
+For **message-level** segments — `BGM`, `DTM`, `NAD`, `LIN` and their composites
+`C002`, `C507`, `C082`, … — you supply the layout yourself. That data belongs to
+a UN/EDIFACT *directory release*: it differs between D.96A and D.24B, it is
+large, and it is licensed separately, so the crate does not ship it. Write the
+subset you touch as `const` tables (as in the `NAD` example above), generate them
+from your directory of record, or load them at startup with
+`DirectoryValidatorBuilder` for the runtime-validation path.
+
+A composite that repeats a data element by design — `C080 PARTY NAME` is `3036`
+five times — must be declared with `ComponentRef::repeated`, not with five
+`ComponentRef::new` entries. Five entries count as five positions, and the code
+then resolves as ambiguous and cannot be addressed at all:
+
+```rust
+use edifact_rs::{ComponentRef, Status};
+
+const C080: &[ComponentRef] = &[
+    ComponentRef::repeated(1, "3036", Status::Mandatory, 5),
+    ComponentRef::new(6, "3045", Status::Conditional),
+];
+```
+
 ---
 
 ## Field-level attributes (`#[edifact(...)]` on a field)
@@ -417,6 +459,10 @@ The identifier in `#[edifact(element = "…")]` either does not appear in the
 `layout`, or appears at more than one position. Check it against the directory
 definition for that segment; this is the compile-time counterpart of the
 runtime `E033` / `E034` errors.
+
+If it appears more than once because the composite repeats it *by design*,
+declare the repeat with `ComponentRef::repeated` instead of one entry per
+occurrence — see [Where layouts come from](#where-layouts-come-from).
 
 ### "qualifier conflicts with qualifier_from"
 

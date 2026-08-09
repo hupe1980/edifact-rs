@@ -136,7 +136,7 @@ pub trait Validator: Send + Sync {
     /// trait is not a breaking change for external `Validator` implementors.
     fn validate_group_batch(
         &self,
-        _root: &crate::group::SegmentGroupIndexed,
+        _root: &crate::group::SegmentGroupIndexed<'_>,
         _all_segments: &[Segment<'_>],
         _report: &mut ValidationReport,
         _context: &ValidationRuleContext<'_>,
@@ -237,6 +237,146 @@ impl Validator for EnvelopeValidator {
 
     fn fork(&self) -> Option<Box<dyn Validator + Send + Sync>> {
         Some(Box::new(EnvelopeValidator))
+    }
+}
+
+// ── CharsetValidator ──────────────────────────────────────────────────────────
+
+/// Checks that every value in the message is expressible in the interchange's
+/// declared character repertoire (`UNB` S001 DE 0001).
+///
+/// This is the check partners actually enforce and that costs real money when it
+/// is missed: a `UNOA` interchange carrying a lower-case letter, or a `UNOC` one
+/// carrying `€`, is rejected at the far end — but only after it has been sent.
+///
+/// Values are checked as **decoded text**, so run this after
+/// [`decode_interchange`][crate::decode_interchange] (or on natively-ASCII
+/// input). It answers "can this text be written back out in the repertoire the
+/// header promises?", which is the question that matters.
+///
+/// Registered by
+/// [`ValidationContextBuilder::with_charset_validation`][crate::ValidationContextBuilder::with_charset_validation].
+///
+/// # Example
+///
+/// ```
+/// use edifact_rs::{from_bytes, ValidationContext};
+///
+/// // UNOA is upper-case only, but the party name is mixed case.
+/// let segments: Vec<_> = from_bytes(
+///     b"UNB+UNOA:3+S+R+200101:0900+1'NAD+BY+Acme Ltd'UNZ+0+1'",
+/// )
+/// .collect::<Result<_, _>>()?;
+///
+/// let report = ValidationContext::builder()
+///     .with_charset_validation()
+///     .build()
+///     .validate_lenient(&segments);
+///
+/// let issue = report.errors().iter().find(|i| i.error_code() == Some("E038")).unwrap();
+/// assert_eq!(issue.segment_tag.as_deref(), Some("NAD"));
+/// # Ok::<(), edifact_rs::EdifactError>(())
+/// ```
+pub struct CharsetValidator {
+    /// Repertoire to check against; `None` reads it from the interchange's `UNB`.
+    charset: Option<crate::Charset>,
+}
+
+impl CharsetValidator {
+    /// Read the repertoire from the interchange's own `UNB` S001 DE 0001.
+    ///
+    /// A slice with no `UNB` — a single message window, say — is not checked,
+    /// because nothing declares what it should be checked against.
+    #[must_use]
+    pub fn from_envelope() -> Self {
+        Self { charset: None }
+    }
+
+    /// Check against a fixed repertoire, whatever the `UNB` says.
+    ///
+    /// Use this for message-level slices that carry no `UNB`, or to hold a
+    /// partner to a stricter repertoire than the one they declare.
+    #[must_use]
+    pub fn with_charset(charset: crate::Charset) -> Self {
+        Self {
+            charset: Some(charset),
+        }
+    }
+
+    /// The repertoire in force for `segments`.
+    fn resolve(&self, segments: &[Segment<'_>]) -> Option<crate::Charset> {
+        if self.charset.is_some() {
+            return self.charset;
+        }
+        let identifier = segments
+            .iter()
+            .find(|s| s.tag == "UNB")
+            .and_then(|unb| unb.component_str(0, 0))?;
+        // An unrecognised or unsupported identifier is the envelope validator's
+        // finding to report, not this one's — silently declining to check is the
+        // right move rather than raising a second, confusing error for it.
+        crate::Charset::from_syntax_identifier(identifier).ok()
+    }
+}
+
+impl Validator for CharsetValidator {
+    fn validate_batch(
+        &self,
+        segments: &[Segment<'_>],
+        report: &mut ValidationReport,
+        _context: &ValidationRuleContext<'_>,
+    ) {
+        let Some(charset) = self.resolve(segments) else {
+            return;
+        };
+        if charset == crate::Charset::UnoY {
+            return; // Everything is permitted; nothing to check.
+        }
+        for segment in segments {
+            for (element_index, element) in segment.elements.iter().enumerate() {
+                for components in element.repetitions() {
+                    for (component_index, (value, span)) in components.iter().enumerate() {
+                        let Some((offset, character)) = charset.first_violation(value) else {
+                            continue;
+                        };
+                        let mut issue = ValidationIssue::new(
+                            ValidationSeverity::Error,
+                            format!(
+                                "character {character:?} is not in the {charset} character \
+                                 repertoire declared by UNB S001",
+                            ),
+                        )
+                        .with_error_code(
+                            EdifactError::CharacterNotInRepertoire {
+                                charset: charset.syntax_identifier(),
+                                character,
+                                offset,
+                            }
+                            .stable_code(),
+                        )
+                        .with_segment(segment.tag)
+                        .with_span(*span)
+                        .with_suggestion(
+                            "Transliterate the value, or declare a wider repertoire in UNB S001 \
+                             (UNOC for Latin-1, UNOY for UTF-8)",
+                        );
+                        if let Ok(index) = u8::try_from(element_index) {
+                            issue = issue.with_element_index(index);
+                        }
+                        if let Ok(index) = u8::try_from(component_index) {
+                            issue = issue.with_component_index(index);
+                        }
+                        report.add_error(issue);
+                    }
+                }
+            }
+        }
+    }
+
+    fn fork(&self) -> Option<Box<dyn Validator + Send + Sync>> {
+        Some(Box::new(Self {
+            charset: self.charset,
+        }))
     }
 }
 

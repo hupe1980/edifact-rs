@@ -120,6 +120,7 @@ of the places that usually goes wrong:
 | **Repetitions are parsed** | A declared repetition separator splits an element into real occurrences (ISO 9735-4 §3.1) instead of leaving `1*ON` in the value as literal text. |
 | **Limits report, never truncate** | Segment, message, and byte budgets raise an error. A budget that quietly ended iteration is indistinguishable from clean end-of-input, so a caller would accept a truncated interchange as a whole one. |
 | **Layered validation** | Envelope, structure, code-list, and profile checks write into one report carrying stable error codes, byte spans, and filterable rule identifiers. |
+| **Character sets are decoded, not assumed** | UTF-8 is not a superset of `UNOC`, so a conformant German interchange is unparseable as UTF-8. `decode_interchange` reads the repertoire from `UNB` S001 and transcodes — borrowing, not copying, when the payload is already ASCII. |
 | **No `unsafe`** | `#![deny(unsafe_code)]`, with property and fuzz tests over parse, write, and validate on every commit. |
 
 ### Addressing a field by identifier
@@ -163,6 +164,7 @@ none of it can drift from the crate.
 |---|---|
 | [Getting Started](https://hupe1980.github.io/edifact-rs/docs/getting-started/) | Install, first parse, feature flags |
 | [Core Concepts](https://hupe1980.github.io/edifact-rs/docs/core-concepts/) | Wire format, UNA, release characters, repetitions, Rust type mapping |
+| [Character Sets](https://hupe1980.github.io/edifact-rs/docs/character-sets/) | `UNOA`–`UNOK`/`UNOY` decoding, encoding, and repertoire validation |
 | [Parsing](https://hupe1980.github.io/edifact-rs/docs/parsing/) | Entry points, byte spans, and the `ReaderConfig` budgets |
 | [Writing](https://hupe1980.github.io/edifact-rs/docs/writing/) | `Writer`, escaping, custom UNA, repeating elements |
 | [Typed Derive](https://hupe1980.github.io/edifact-rs/docs/typed-derive/) | Every derive attribute, including identifier-addressed fields |
@@ -171,7 +173,7 @@ none of it can drift from the crate.
 | [Profile Packs](https://hupe1980.github.io/edifact-rs/docs/profile-packs/) | Authoring, composing, and filtering business rules |
 | [Diagnostics](https://hupe1980.github.io/edifact-rs/docs/diagnostics/) | `miette` integration |
 | [Async Integration](https://hupe1980.github.io/edifact-rs/docs/async-integration/) | Bridging to `tokio` |
-| [Error Reference](https://hupe1980.github.io/edifact-rs/docs/error-reference/) | Every stable code `E001`–`E037` |
+| [Error Reference](https://hupe1980.github.io/edifact-rs/docs/error-reference/) | Every stable code `E001`–`E041` |
 | [Performance](https://hupe1980.github.io/edifact-rs/docs/performance/) | Allocation budgets, benchmarks, tuning |
 
 Runnable cookbooks live in
@@ -180,11 +182,29 @@ Runnable cookbooks live in
 
 ## Scope
 
-`edifact-rs` is the **engine**, not a directory distribution. It ships the
-parser, writer, validation pipeline, and the table types for segment
-definitions — but no UN/EDIFACT directory data, which is versioned, large, and
-licensed separately. Supply your own definitions as `static` tables at compile
-time, or load them at startup with `DirectoryValidatorBuilder`.
+`edifact-rs` is the **engine**, not a directory distribution.
+
+It ships the parser, writer, validation pipeline, the table types for segment
+definitions, and the **ISO 9735 service segments** — `UNB`, `UNG`, `UNH`, `UNT`,
+`UNE`, `UNZ`, `UNS` — as ready-to-use layouts in `edifact_rs::service`. Those are
+fixed by the syntax standard rather than by a directory release, so there is one
+correct answer and no version to pick:
+
+```rust
+use edifact_rs::{from_bytes, service};
+
+let segments: Vec<_> = from_bytes(b"UNB+UNOC:3+SENDER+RECEIVER+260101:0900+IC4711'UNZ+0+IC4711'")
+    .collect::<Result<Vec<_>, _>>()?;
+
+// DE 0020 by name, not by counting to element 4.
+assert_eq!(segments[0].value_by_code(&service::UNB, "0020")?, Some("IC4711"));
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+It does **not** ship UN/EDIFACT *directory* data — `BGM`, `DTM`, `NAD`, `C507`
+and the rest — which is versioned per release, large, and licensed separately.
+Supply those as `static` tables at compile time, or load them at startup with
+`DirectoryValidatorBuilder`.
 
 ## Development
 

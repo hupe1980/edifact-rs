@@ -555,10 +555,12 @@ fn try_fast_segment<R: BufRead>(
     // Parse directly from the buffer slice — zero intermediate allocation.
     // Include the terminator byte so the parser sees a `SegmentTerminator`
     // token and records a span that is consistent with the `from_bytes` path.
-    // Use `with_limit(max_segment_bytes)` so the tokenizer respects the caller's
-    // configured limit; `Tokenizer::new` would impose a hard 64 KiB cap that
-    // could reject segments already allowed by a larger `max_segment_bytes`.
-    let tok = Tokenizer::with_limit(&buf[..pos + 1], ssa, max_segment_bytes);
+    // `for_segment` (not `with_limit`) because this slice is one bare segment:
+    // the whole-interchange constructors would mistake a segment tagged `UNA`
+    // for a service string advice and skip nine bytes of it.  The configured
+    // `max_segment_bytes` is passed through so the tokenizer never applies a
+    // tighter cap than the caller allowed.
+    let tok = Tokenizer::for_segment(&buf[..pos + 1], ssa, max_segment_bytes);
     let mut parser_iter = Parser::new(tok);
     match parser_iter.next() {
         None => FastSegment::Skip(pos + 1),
@@ -649,10 +651,10 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
             self.bytes_consumed = self.stream_offset;
 
             raw.bytes.push(self.ssa.segment_term);
-            // Use `with_limit` so the configured max_segment_bytes is honoured on the
-            // slow path as well; `Tokenizer::new` would impose a hard 64 KiB cap that
-            // could reject segments the caller explicitly permitted via ReaderConfig.
-            let tok = Tokenizer::with_limit(
+            // `for_segment`, and with the configured `max_segment_bytes`: this
+            // buffer holds one bare segment, so neither the UNA skip nor the
+            // 64 KiB default of `Tokenizer::new` applies.
+            let tok = Tokenizer::for_segment(
                 raw.bytes.as_slice(),
                 self.ssa,
                 self.config.max_segment_bytes,
@@ -987,6 +989,32 @@ mod tests {
         let err = from_reader(std::io::Cursor::new(input))
             .expect_err("expected dangling release from reader path");
         assert!(matches!(err, EdifactError::InvalidReleaseSequence { .. }));
+    }
+
+    #[test]
+    fn a_segment_tagged_una_parses_the_same_on_both_paths() {
+        // `UNA` is three ASCII uppercase letters, so it is a syntactically legal
+        // segment tag.  The reader re-tokenizes each segment from its own slice,
+        // where the whole-interchange "skip nine bytes of service string advice"
+        // heuristic is wrong: it ate the tag and everything after it, and the
+        // identical bytes that parsed cleanly through `from_bytes` came back as
+        // `InvalidSegmentTag` through a reader.
+        let input = b"BGM+220'UNA+XXXXXX'BGM+221'";
+
+        let from_slice: Vec<_> = crate::from_bytes(input)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("slice path");
+        let from_reader =
+            from_reader(std::io::Cursor::new(&input[..])).expect("reader path must agree");
+
+        assert_eq!(
+            from_slice.iter().map(|s| s.tag).collect::<Vec<_>>(),
+            from_reader
+                .iter()
+                .map(|s| s.tag.as_str())
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(from_reader[1].element_str(0), Some("XXXXXX"));
     }
 
     #[test]

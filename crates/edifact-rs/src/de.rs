@@ -405,19 +405,15 @@ pub fn qualifier_matches_pattern(value: &str, pattern: &str) -> bool {
         return value == pattern;
     }
 
-    // Fast path: single wildcard (dominant case — e.g. "M*" or "*:MS")
+    // Fast path: single wildcard (dominant case — e.g. "M*" or "*:MS").
+    // The length test is what stops the prefix and the suffix from overlapping:
+    // `value.len() >= prefix.len() + suffix.len()` is exactly the condition that
+    // leaves a (possibly empty) gap between them for `*` to cover.
     if let Some((prefix, suffix)) = pattern.split_once('*') {
-        // Only one wildcard — prefix and suffix cannot overlap in a second split.
-        if !pattern[prefix.len() + 1..].contains('*') {
+        if !suffix.contains('*') {
             return value.len() >= prefix.len() + suffix.len()
                 && value.starts_with(prefix)
-                && value.ends_with(suffix)
-                && {
-                    // Ensure prefix and suffix don't overlap.
-                    let mid_start = prefix.len();
-                    let mid_end = value.len().saturating_sub(suffix.len());
-                    mid_start <= mid_end
-                };
+                && value.ends_with(suffix);
         }
     }
 
@@ -822,6 +818,38 @@ pub struct MessageWindow<'a> {
 }
 
 impl<'a> MessageWindow<'a> {
+    /// The message **body**: everything between `UNH` and `UNT`, exclusive.
+    ///
+    /// [`segments`][Self::segments] deliberately includes the service segments so
+    /// that envelope-aware consumers can read them, but they are exactly what a
+    /// body-oriented pass does not want.  In particular
+    /// [`group_segments_indexed`][crate::group_segments_indexed] is driven by
+    /// trigger tags alone, so a trailing `UNT` lands inside whichever group ran
+    /// last — pass `body()` and it cannot.
+    ///
+    /// Missing service segments are tolerated: a window that somehow lacks its
+    /// `UNH` or `UNT` yields whatever it does have, rather than panicking.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::from_bytes_windows;
+    ///
+    /// let input = b"UNH+1+ORDERS:D:96A:UN'BGM+220+A+9'UNT+3+1'";
+    /// let windows: Vec<_> = from_bytes_windows(input).collect::<Result<Vec<_>, _>>()?;
+    ///
+    /// assert_eq!(windows[0].segments.len(), 3);      // UNH, BGM, UNT
+    /// assert_eq!(
+    ///     windows[0].body().iter().map(|s| s.tag).collect::<Vec<_>>(),
+    ///     ["BGM"],
+    /// );
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    #[must_use]
+    pub fn body(&self) -> &[crate::Segment<'a>] {
+        body_of(&self.segments, |segment| segment.tag)
+    }
+
     /// Build a `MessageWindow` from a completed segment buffer.
     ///
     /// Extracts `message_type` and `association_code` from the leading `UNH`
@@ -861,6 +889,18 @@ where
         .and_then(|(c, _)| if c.is_empty() { None } else { Some(c.clone()) })
 }
 
+/// Strip a leading `UNH` and a trailing `UNT` from a window's segments.
+///
+/// Shared by the borrowed and owned windows so the two cannot disagree about
+/// what "the body" means.
+fn body_of<S>(segments: &[S], tag: impl Fn(&S) -> &str) -> &[S] {
+    let start = usize::from(segments.first().is_some_and(|s| tag(s) == "UNH"));
+    let end = segments.len().saturating_sub(usize::from(
+        segments.last().is_some_and(|s| tag(s) == "UNT"),
+    ));
+    segments.get(start..end).unwrap_or(&[])
+}
+
 /// An owned, heap-allocated `UNH..UNT` message window.
 ///
 /// Produced by [`MessageWindowsIter`] / [`message_windows_from_reader`].
@@ -880,6 +920,14 @@ pub struct OwnedMessageWindow {
 }
 
 impl OwnedMessageWindow {
+    /// The message body: everything between `UNH` and `UNT`, exclusive.
+    ///
+    /// The owned counterpart of [`MessageWindow::body`].
+    #[must_use]
+    pub fn body(&self) -> &[crate::OwnedSegment] {
+        body_of(&self.segments, |segment| segment.tag.as_str())
+    }
+
     fn from_segments(segments: Vec<crate::OwnedSegment>) -> Self {
         let unh = segments.first().filter(|s| s.tag == "UNH");
         let message_type = unh

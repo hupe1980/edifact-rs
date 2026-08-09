@@ -177,6 +177,8 @@
 //! # }
 //! ```
 // ── core modules ──────────────────────────────────────────────────────────────
+/// EDIFACT character repertoires (`UNB` S001 DE 0001) and transcoding.
+pub mod charset;
 pub mod directory_validator;
 pub(crate) mod envelope;
 /// Error types and validation reporting primitives.
@@ -189,6 +191,8 @@ pub(crate) mod parser;
 ///
 /// These types are also re-exported from the crate root.
 pub mod report;
+/// ISO 9735 service-segment definitions (`UNB`, `UNH`, `UNT`, `UNZ`, `UNG`, `UNE`, `UNS`).
+pub mod service;
 pub(crate) mod tokenizer;
 pub(crate) mod validator;
 pub(crate) mod writer;
@@ -199,6 +203,7 @@ pub(crate) mod event;
 pub mod ser;
 
 // ── flat re-exports: core ─────────────────────────────────────────────────────
+pub use charset::{Charset, DecodingReader, decode_interchange, decode_reader, sniff_charset};
 pub use envelope::{
     FunctionalGroupEnvelope, GroupIdentifier, InterchangeEnvelope, LenientResult, MessageEnvelope,
     MessageIdentifier, ValidatedInterchange, parse_ung, parse_unh, validate_envelope,
@@ -219,8 +224,8 @@ pub use parser::{
 pub use report::{ValidationIssue, ValidationReport, ValidationSeverity};
 pub use tokenizer::{ServiceStringAdvice, Token, Tokenizer};
 pub use validator::{
-    EnvelopeValidator, ProfileRule, ProfileRulePack, ValidationContext, ValidationContextBuilder,
-    ValidationLayer, ValidationRuleContext, Validator, validate_each,
+    CharsetValidator, EnvelopeValidator, ProfileRule, ProfileRulePack, ValidationContext,
+    ValidationContextBuilder, ValidationLayer, ValidationRuleContext, Validator, validate_each,
 };
 pub use writer::{AsDataElement, DataElement, MessageWriter, Writer};
 
@@ -623,6 +628,10 @@ mod doc_guides {
         };
     }
 
+    guide!(
+        CharacterSets,
+        "../../../site/content/docs/character-sets.md"
+    );
     guide!(CoreConcepts, "../../../site/content/docs/core-concepts.md");
     guide!(Parsing, "../../../site/content/docs/parsing.md");
     guide!(ProfilePacks, "../../../site/content/docs/profile-packs.md");

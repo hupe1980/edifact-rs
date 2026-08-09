@@ -11,6 +11,182 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.15.0] — 2026-08-09
+
+A second audit pass over the same pipeline, plus the feature that made a whole
+class of real-world interchanges parseable at all. Three of the fixes below are
+cases where the crate produced or rejected data **incorrectly**; one of them —
+the derive dropping components on write — was silent data loss on the way out.
+
+### Added
+
+- **Character repertoire support (`UNB` S001 DE 0001).** UTF-8 is not a superset
+  of `UNOC`: `UNOC` is ISO 8859-1, where `ü` is the single byte `0xFC`, so a
+  conformant German interchange was rejected outright as
+  [`EdifactError::InvalidText`] (`E003`). The same held for every
+  `UNOD`…`UNOK` payload — a whole class of real, standards-compliant EDIFACT the
+  crate simply could not read.
+  New [`Charset`] covers `UNOA`, `UNOB`, `UNOC`–`UNOK`, and `UNOY`.
+  `decode_interchange` reads the repertoire out of the interchange's own `UNB`
+  and transcodes; it **borrows** — copying nothing — when the payload is already
+  ASCII or `UNOY`, so the zero-copy path is untouched for everyone it does not
+  affect. `Charset::decoding_reader` is the streaming counterpart, so the
+  constant-memory guarantee survives for `UNOC` input too. `sniff_charset` reads
+  the identifier byte-wise, without parsing a `UNB` whose sender name may itself
+  be Latin-1, and `decode_reader` combines the two: it buffers only enough of the
+  stream to find the `UNB`, then streams the rest through the right decoder — so
+  the repertoire never has to be known in advance.
+  `UNOX` and `KECA` report the new [`EdifactError::UnsupportedCharset`] (`E039`)
+  rather than being silently mis-decoded: both are stateful or multi-byte, which
+  would make byte-level delimiter scanning unsound.
+  The ISO 8859 tables are generated from the reference codecs, not hand-typed,
+  and a byte in a slot the standard leaves undefined is an error rather than a
+  substituted replacement character.
+- **`Writer::with_charset`.** Binds a writer to a repertoire so values are
+  encoded into it rather than emitted as UTF-8 — a `UNOC` header over a UTF-8
+  body arrives as mojibake with nothing in the file to explain why. A character
+  the repertoire cannot carry is refused with
+  [`EdifactError::CharacterNotInRepertoire`] (`E038`), and a `UNB` declaring a
+  repertoire the writer does not encode is refused with
+  [`EdifactError::CharacterRepertoireMismatch`] (`E041`).
+- **`CharsetValidator`**, wired up by
+  `ValidationContextBuilder::with_charset_validation` /
+  `with_charset_validation_for`. Reports payload that its own `UNB` says should
+  not be there — a `UNOA` interchange carrying a lower-case letter is the check
+  partners run *after* you have sent the file. Decoding stays permissive so an
+  encoding finding never hides the rest of the report.
+- **ISO 9735 service-segment layouts** in the new `edifact_rs::service` module:
+  `UNB`, `UNG`, `UNH`, `UNT`, `UNE`, `UNZ`, `UNS`, plus composites `S001`–`S018`.
+  Code-addressed access needs a [`SegmentDefinition`] to resolve against, and
+  requiring every consumer to hand-author `UNB` first put the crate's headline
+  safety feature out of reach for the segments *every* EDIFACT program touches.
+  These are fixed by the syntax standard rather than by a directory release, so
+  there is one correct answer and no version to choose; they are not the
+  separately-licensed directory data the crate still does not ship.
+  A test pins them against the indices `envelope.rs` reads by hand, so the two
+  cannot drift.
+- **`ComponentRef::repeated`** (and `OwnedComponentRef::repeated`), for the
+  composites that repeat a data element by design — `C080 PARTY NAME` is `3036`
+  five times, `C059 STREET` is `3042` four times. Declaring those faithfully as
+  five `ComponentRef::new` entries made `code_positions` count five positions, so
+  the component came back [`AmbiguousDataElement`] and could not be code-addressed
+  **at all**: a faithful declaration was punished, and the only way to use named
+  access was to declare the composite incompletely and disagree with the
+  directory it claims to model. One `repeated` entry is one addressable position
+  that still records how many slots belong to it.
+- **`OwnedElement::of` / `OwnedElement::and_repeat` / `OwnedSegment::new`**, plus
+  `with_span` / `with_spans`. Synthesising an `OwnedSegment` from a non-EDIFACT
+  source previously had no constructor and required a struct literal.
+- **`MessageWindow::body` / `OwnedMessageWindow::body`** — the segments between
+  `UNH` and `UNT`. `segments` deliberately includes the service segments, but
+  `group_segments_indexed` is driven by trigger tags alone, so a trailing `UNT`
+  landed inside whichever group ran last. `body()` is the one-call answer.
+
+### Breaking Changes
+
+- **`Segment`, `Element`, `OwnedSegment`, and `OwnedElement` are
+  `#[non_exhaustive]`.** Adding `repeats` in 0.14 broke every downstream struct
+  literal, and the next field would have done it again. Each now has a
+  constructor (`Segment::new`, `Element::of`, `OwnedSegment::new`,
+  `OwnedElement::of`) with builder-style setters for spans, so further fields are
+  additive. Fields stay public: reading and `..` destructuring are unaffected.
+  This is the pattern [`SegmentDefinition`] has always used.
+- **Group schemas are no longer forced to be `'static`.** `GroupDef` and
+  `SegmentGroupIndexed` gained a lifetime parameter, so a schema deserialized from
+  a MIG at startup works exactly like a `static` table. `GroupDef<'static>` is what
+  a `static` table already is, so existing schemas — and every `static SCHEMA:
+  &[GroupDef]` in the wild — compile unchanged; only explicit type annotations
+  naming the bare types need `<'_>`. This closes an inconsistency with the
+  directory side of the crate, where [`OwnedSegmentDef`] and
+  [`DirectoryValidatorBuilder`] have always supported runtime-loaded definitions.
+  `GroupDef::new(name, trigger)` and `GroupDef::with_children(name, trigger,
+  children)` are `const` constructors; the fields stay public.
+- **Serializing a non-finite float is an error** ([`EdifactError::NonFiniteNumber`],
+  `E040`) rather than the text `NaN` / `inf`, which is not an EDIFACT numeric data
+  element, which no receiver can parse, and which this crate's own reader hands
+  back as an ordinary string. An arithmetic bug now fails at the boundary instead
+  of days later.
+- A segment struct with no data elements now serializes as `UNS'` rather than
+  `UNS+'`, matching `Writer::write_elements(tag, elements![])`.
+
+### Fixed
+
+- **The derive dropped every component but the last when writing.**
+  `EdifactSerialize` laid fields out on a map keyed by the data element index
+  alone, so two fields sharing an element collapsed into one entry:
+  `#[edifact(component = N)]` was honoured on read and silently ignored on write.
+  A `DTM` mapped to three component fields round-tripped `137:20260101:102` out as
+  `DTM+102'`, and a `NAD` lost its party identifier. The layout is now a
+  two-dimensional (element × component) grid resolved at macro-expansion time, so
+  the generated code is still straight-line event emission with no runtime
+  allocation, and gaps in either dimension emit the empty slot they should.
+  Only the positional path was affected; the code-addressed path already went
+  through `emit_sparse_segment`.
+- **Repetition spans were not rebased onto the stream on the reader path.**
+  `OwnedSegment::offset` walked each element's `components` but silently skipped
+  its `repeats`, so under a syntax-version-4 `UNA` every occurrence after the
+  first carried a span relative to the *start of its own segment*. Diagnostics
+  pointed into unrelated bytes and any caller slicing the input by span read the
+  wrong value. `from_bytes` was unaffected; `from_reader` and every API built on
+  it were not. `OwnedElement::offset_in_place` is the shared implementation both
+  paths now use.
+- **A rejected repeating element left a half-written segment in the sink.**
+  `Writer::write_segment` emitted the tag and the first element separator before
+  discovering that the active service string advice declares no repetition
+  separator, so a caller that logged
+  [`EdifactError::RepetitionSeparatorNotDeclared`] and continued produced an
+  interchange with a dangling `RFF+` spliced in front of the next segment. The
+  check now runs before the first write: a rejected segment writes **nothing**
+  and the writer stays usable.
+- **A segment tagged `UNA` parsed differently through a reader than through a
+  slice.** `UNA` is three ASCII uppercase letters and therefore a legal segment
+  tag. The reader re-tokenizes each segment from its own slice, where the
+  whole-interchange rule "a leading `UNA` is a nine-byte service string advice"
+  is wrong — it ate the tag and its first element, and bytes that parsed cleanly
+  through `from_bytes` came back as `InvalidSegmentTag` (`E006`) through
+  `from_reader`. Both reader paths now use the new `Tokenizer::for_segment`,
+  which parses a bare segment with no header heuristic.
+- `InterchangeEnvelope::sender_routing_address` was documented as `UNB` S002
+  **DE 0014**. It is **DE 0008**; 0014 is the recipient-side component in S003.
+  The field and its behaviour are unchanged — only the documentation was wrong,
+  which is worse for a reference than an outright gap.
+- `DirectoryValidator` counted a composite's declared components by entry rather
+  than by slot, so a composite using `ComponentRef::repeated` would have capped
+  its arity far too low.
+
+### Changed
+
+- `SegmentDefinition::element_slot` / `component_slot` now report *which* problem
+  occurred — unknown identifier versus declared at several positions — instead of
+  one message covering both. A `const` panic message cannot be formatted, so
+  naming the identifier is impossible, but naming the problem decides what the
+  author has to change.
+- `ProfileRulePack` message-type and release scoping share one implementation
+  across the flat and the group pass instead of two copies, and the `UNH` lookup
+  now happens only for the scopes a pack actually configures — a pack bound with
+  `for_release` used to rescan for `UNH` even when the message type had already
+  been extracted.
+- `qualifier_matches_pattern` drops a redundant overlap check from its
+  single-wildcard fast path; the length test it duplicated already decides the
+  same question.
+
+### Documentation
+
+- New guide: [Character Sets](https://hupe1980.github.io/edifact-rs/docs/character-sets/).
+  *Core Concepts* no longer claims UTF-8 input as an unqualified requirement, and
+  the `E003` entry no longer describes `UNOA` as a "Latin-1 subset" (it is an
+  ASCII subset) or suggests transcoding as the only remedy.
+- The README's **Scope** section now distinguishes the service segments the crate
+  ships from the directory data it does not, with a worked example.
+- The group-validation sections of *Validation* and *Profile Packs* no longer
+  tell readers that a schema "must be a static", and *Validation* gains a
+  runtime-schema example plus a note on what a group actually spans — grouping is
+  driven by trigger tags alone, so nothing stops the final group at `UNT`.
+- *Writing* gains a character-repertoire section, and it and *Error Reference*
+  state the writer's no-partial-write guarantee for `E037`.
+
+---
+
 ## [0.14.0] — 2026-08-09
 
 A correctness audit of the parse → validate → write pipeline. Four of the changes
@@ -1015,7 +1191,9 @@ Initial public release.  See commit history for full details.
 
 ---
 
-[Unreleased]: https://github.com/hupe1980/edifact-rs/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/hupe1980/edifact-rs/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/hupe1980/edifact-rs/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/hupe1980/edifact-rs/compare/v0.10.0...v0.14.0
 [0.10.0]: https://github.com/hupe1980/edifact-rs/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/hupe1980/edifact-rs/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/hupe1980/edifact-rs/compare/v0.8.0...v0.9.0

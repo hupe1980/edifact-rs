@@ -437,8 +437,8 @@ for a complete example.
 
 Group-aware validation fires `ProfileRulePack` group rules once per segment-group
 occurrence (e.g. once per `SG5` instance) rather than once across the entire
-message. First define a `&'static [GroupDef]` schema, build a `SegmentGroupIndexed`
-tree with `group_segments_indexed`, then pass the tree to `validate_lenient_grouped`:
+message. First define a `[GroupDef]` schema, build a `SegmentGroupIndexed` tree
+with `group_segments_indexed`, then pass the tree to `validate_lenient_grouped`:
 
 ```rust
 use edifact_rs::{
@@ -448,16 +448,8 @@ use edifact_rs::{
 };
 
 // Schema: SG5 starts at LIN and contains an SG6 sub-group starting at QTY.
-// GroupDef is a plain struct with &'static [GroupDef] children — use a static.
-static SCHEMA: &[GroupDef] = &[GroupDef {
-    name: "SG5",
-    trigger: "LIN",
-    children: &[GroupDef {
-        name: "SG6",
-        trigger: "QTY",
-        children: &[],
-    }],
-}];
+static SG6: &[GroupDef] = &[GroupDef::new("SG6", "QTY")];
+static SCHEMA: &[GroupDef] = &[GroupDef::with_children("SG5", "LIN", SG6)];
 
 let segs: Vec<_> = from_bytes(
     b"UNH+1+ORDERS:D:96A:UN'\
@@ -493,6 +485,39 @@ variants:
 | `validate_strict_grouped(root, segs)` | `(&SegmentGroupIndexed, &[Segment])` | borrowed | `Err` on first error/critical |
 | `validate_lenient_grouped_owned(root, segs)` | `(&SegmentGroupIndexed, &[OwnedSegment])` | owned | Collect all issues |
 | `validate_strict_grouped_owned(root, segs)` | `(&SegmentGroupIndexed, &[OwnedSegment])` | owned | `Err` on first error/critical |
+
+### Schemas built at runtime
+
+`GroupDef<'a>` borrows its names and its child slice, so a `static` table is
+`GroupDef<'static>` and costs nothing, while a schema read out of a MIG at
+startup borrows from storage you own. Both go through the same function:
+
+```rust
+use edifact_rs::group::{GroupDef, group_segments_indexed};
+use edifact_rs::from_bytes;
+
+// Stand-in for names read out of a MIG file at startup.
+let names: Vec<String> = vec!["SG5".into(), "LIN".into()];
+let schema = vec![GroupDef::new(&names[0], &names[1])];
+
+let segs: Vec<_> = from_bytes(b"UNH+1+ORDERS:D:96A:UN'LIN+1'UNT+3+1'")
+    .collect::<Result<_, _>>()?;
+let tree = group_segments_indexed(&segs, &schema, "ROOT");
+
+assert_eq!(tree.children[0].definition, "SG5");
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+### What a group actually spans
+
+Grouping is driven purely by trigger tags: a group runs from its trigger up to
+the next trigger of a sibling or ancestor, or to the end of the slice. Nothing
+stops the last group of a message at `UNT`, so the trailer lands inside whichever
+group ran last.
+
+`MessageWindow::segments` deliberately includes `UNH` and `UNT` so that
+envelope-aware consumers can read them; pass `MessageWindow::body()` — which is
+exactly the segments between them — when the group boundaries matter.
 
 See [Profile Packs — Group-scoped rules](@/docs/profile-packs.md#group-scoped-rules) for
 how to build group rules.

@@ -80,7 +80,14 @@ impl std::fmt::Display for Span {
 }
 
 /// A single EDIFACT segment, borrowing its data from the source input.
+///
+/// `#[non_exhaustive]`: build one with [`Segment::new`] rather than a struct
+/// literal.  Adding `repeats` to [`Element`] in 0.14 broke every downstream
+/// literal, and the next field would do it again; a constructor plus builder
+/// setters keeps that additive.  The fields stay public, so reading and `..`
+/// destructuring are unaffected.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Segment<'a> {
     /// Segment tag, usually three uppercase letters.
     pub tag: &'a str,
@@ -258,6 +265,10 @@ pub type OwnedComponents = SmallVec<[(String, Span); 4]>;
 
 /// A data element, which may have one or more component values.
 ///
+/// `#[non_exhaustive]`: build one with [`Element::of`] (plus
+/// [`and_repeat`][Element::and_repeat] / [`with_span`][Element::with_span])
+/// rather than a struct literal.
+///
 /// Uses [`SmallVec`] with an inline capacity of 4 to avoid heap allocation
 /// for the common case (≤ 4 components).  Component values borrow from the
 /// original input; if the value contained a release-character sequence the
@@ -275,6 +286,7 @@ pub type OwnedComponents = SmallVec<[(String, Span); 4]>;
 /// [`repeats`][Self::repeats]; read them together with
 /// [`repetitions`][Self::repetitions].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Element<'a> {
     /// Span covering the whole element, including every repetition.
     pub span: Span,
@@ -361,6 +373,17 @@ impl<'a> Element<'a> {
         }
     }
 
+    /// Set the span covering this element.
+    ///
+    /// Parsed elements carry real spans; hand-built ones default to
+    /// [`Span::default`] and only need this when the caller is synthesising
+    /// input for diagnostics.
+    #[must_use]
+    pub fn with_span(mut self, span: Span) -> Self {
+        self.span = span;
+        self
+    }
+
     /// Append a further repetition of this data element (ISO 9735-4 §3.1).
     ///
     /// Useful when building segments for [`Writer::write_segment`][crate::Writer::write_segment];
@@ -382,7 +405,10 @@ impl<'a> Element<'a> {
 ///
 /// Each entry in `components` is a `(value, span)` pair, keeping the string
 /// and its byte span structurally in sync.
+///
+/// `#[non_exhaustive]`: build one with [`OwnedElement::of`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OwnedElement {
     /// Span covering the whole element, including every repetition.
     pub span: Span,
@@ -393,9 +419,73 @@ pub struct OwnedElement {
 }
 
 impl OwnedElement {
+    /// Build an owned data element from its component values.
+    ///
+    /// The owned counterpart of [`Element::of`].  Spans default to
+    /// [`Span::default`]; set the element span with
+    /// [`with_span`][Self::with_span] when synthesising input for diagnostics.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::{OwnedElement, OwnedSegment};
+    ///
+    /// let segment = OwnedSegment::new(
+    ///     "NAD",
+    ///     vec![
+    ///         OwnedElement::of(&["BY"]),
+    ///         OwnedElement::of(&["4000001000002", "", "9"]),
+    ///     ],
+    /// );
+    /// assert_eq!(segment.component_str(1, 2), Some("9"));
+    /// ```
+    #[must_use]
+    pub fn of<S: AsRef<str>>(components: &[S]) -> Self {
+        Self {
+            span: Span::default(),
+            components: components
+                .iter()
+                .map(|c| (c.as_ref().to_owned(), Span::default()))
+                .collect(),
+            repeats: Vec::new(),
+        }
+    }
+
+    /// Set the span covering this element.
+    #[must_use]
+    pub fn with_span(mut self, span: Span) -> Self {
+        self.span = span;
+        self
+    }
+
+    /// Append a further repetition of this data element (ISO 9735-4 §3.1).
+    ///
+    /// The owned counterpart of [`Element::and_repeat`].
+    #[must_use]
+    pub fn and_repeat<S: AsRef<str>>(mut self, components: &[S]) -> Self {
+        self.repeats.push(
+            components
+                .iter()
+                .map(|c| (c.as_ref().to_owned(), Span::default()))
+                .collect(),
+        );
+        self
+    }
+
     #[inline]
     /// Shift all stored spans by `delta` bytes.
     pub fn offset(mut self, delta: usize) -> Self {
+        self.offset_in_place(delta);
+        self
+    }
+
+    /// Shift all stored spans by `delta` bytes, in place.
+    ///
+    /// Every repetition is shifted, not just the first: the reader parses each
+    /// segment from a zero-based slice and then rebases it onto the stream, so
+    /// a repetition left unshifted points into a different segment entirely.
+    #[inline]
+    pub fn offset_in_place(&mut self, delta: usize) {
         self.span = self.span.offset(delta);
         for (_, span) in &mut self.components {
             *span = span.offset(delta);
@@ -405,7 +495,6 @@ impl OwnedElement {
                 *span = span.offset(delta);
             }
         }
-        self
     }
 
     /// Number of repetitions of this data element — always at least 1.
@@ -447,7 +536,10 @@ impl<'a> From<Element<'a>> for OwnedElement {
 }
 
 /// Owned segment used by reader-based parsing APIs.
+///
+/// `#[non_exhaustive]`: build one with [`OwnedSegment::new`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct OwnedSegment {
     /// Segment tag, usually three uppercase letters.
     pub tag: String,
@@ -563,12 +655,7 @@ impl<'a> BorrowedElement<'a> {
 /// ```rust
 /// use edifact_rs::{BorrowedSegment, OwnedSegment, Span};
 ///
-/// let seg = OwnedSegment {
-///     tag: "BGM".into(),
-///     span: Span::new(0, 3),
-///     tag_span: Span::new(0, 3),
-///     elements: vec![],
-/// };
+/// let seg = OwnedSegment::new("BGM", vec![]).with_spans(Span::new(0, 3), Span::new(0, 3));
 /// let borrowed = BorrowedSegment::from(&seg);
 /// assert_eq!(borrowed.tag(), "BGM");
 /// ```
@@ -719,6 +806,40 @@ impl<'a> BorrowedSegment<'a> {
 }
 
 impl OwnedSegment {
+    /// Build an owned segment from a tag and its data elements.
+    ///
+    /// The owned counterpart of [`Segment::new`].  Spans default to
+    /// [`Span::default`], which is what a segment synthesised from a non-EDIFACT
+    /// source should carry — there is no input to point at.  Use
+    /// [`with_spans`][Self::with_spans] when there is.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::{OwnedElement, OwnedSegment, segments_to_bytes_owned};
+    ///
+    /// let segment = OwnedSegment::new("BGM", vec![OwnedElement::of(&["220"])]);
+    /// assert_eq!(segments_to_bytes_owned(&[segment])?, b"BGM+220'".to_vec());
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    #[must_use]
+    pub fn new(tag: impl Into<String>, elements: Vec<OwnedElement>) -> Self {
+        Self {
+            tag: tag.into(),
+            span: Span::default(),
+            tag_span: Span::default(),
+            elements,
+        }
+    }
+
+    /// Set the segment and tag spans.
+    #[must_use]
+    pub fn with_spans(mut self, span: Span, tag_span: Span) -> Self {
+        self.span = span;
+        self.tag_span = tag_span;
+        self
+    }
+
     /// Get the first component of element `n`, or `None` if absent.
     ///
     /// This is the zero-allocation equivalent of `as_borrowed().element_str(n)`.
@@ -747,14 +868,16 @@ impl OwnedSegment {
 
     #[inline]
     /// Shift all stored spans by `delta` bytes.
+    ///
+    /// Delegates to [`OwnedElement::offset_in_place`] rather than walking the
+    /// components inline: an inline walk shifted `components` but silently left
+    /// `repeats` at their segment-relative offsets, so on the reader path every
+    /// repetition after the first pointed at the wrong bytes.
     pub fn offset(mut self, delta: usize) -> Self {
         self.span = self.span.offset(delta);
         self.tag_span = self.tag_span.offset(delta);
         for element in &mut self.elements {
-            element.span = element.span.offset(delta);
-            for (_, span) in &mut element.components {
-                *span = span.offset(delta);
-            }
+            element.offset_in_place(delta);
         }
         self
     }

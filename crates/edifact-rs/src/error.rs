@@ -521,6 +521,64 @@ pub enum EdifactError {
     )]
     RepetitionSeparatorNotDeclared,
 
+    /// A non-finite float was handed to a numeric serializer.
+    ///
+    /// EDIFACT numeric data elements are decimal digit strings with an optional
+    /// sign and decimal mark (ISO 9735-1 §7).  There is no representation for
+    /// `NaN` or infinity, and `Display` would emit `NaN` / `inf` — text that no
+    /// receiver can parse and that the crate's own reader would reject.
+    #[error("non-finite number {value} has no EDIFACT representation")]
+    NonFiniteNumber {
+        /// The offending value, formatted for the message.
+        value: String,
+    },
+
+    /// A character cannot be represented in the interchange's declared repertoire.
+    ///
+    /// The `UNB` S001 DE 0001 syntax identifier names the character repertoire the
+    /// payload is written in (`UNOA`, `UNOC`, …).  Writing a character outside it
+    /// produces bytes the receiver decodes as something else — or as nothing at
+    /// all — so the writer refuses instead.
+    ///
+    /// Also raised by [`Charset::encode`][crate::Charset::encode].
+    #[error(
+        "character {character:?} at offset {offset} is not in the {charset} character repertoire"
+    )]
+    CharacterNotInRepertoire {
+        /// The syntax identifier of the repertoire that rejected the character.
+        charset: &'static str,
+        /// The offending character.
+        character: char,
+        /// Byte offset of the character within the value it appeared in.
+        offset: usize,
+    },
+
+    /// A `UNB` was written declaring a repertoire other than the writer's own.
+    ///
+    /// A header that names `UNOA` while the body goes out as ISO 8859-1 is
+    /// unreadable at the far end in exactly the way that is hardest to diagnose,
+    /// so [`Writer::begin_interchange`][crate::Writer::begin_interchange] refuses
+    /// the combination rather than emitting it.
+    #[error("UNB declares repertoire {declared}, but the writer encodes {writer}")]
+    CharacterRepertoireMismatch {
+        /// Syntax identifier passed to `begin_interchange`.
+        declared: String,
+        /// Repertoire the writer was bound to with `Writer::with_charset`.
+        writer: &'static str,
+    },
+
+    /// The interchange declares a character repertoire this crate cannot decode.
+    ///
+    /// `UNOX` (ISO 2022 code extension) and `KECA` (Korean) are stateful or
+    /// multi-byte in ways that break the byte-level delimiter scanning every
+    /// other repertoire allows.  They are reported rather than silently
+    /// mis-decoded.
+    #[error("character repertoire '{syntax_identifier}' is not supported")]
+    UnsupportedCharset {
+        /// The `UNB` S001 DE 0001 value that could not be handled.
+        syntax_identifier: String,
+    },
+
     /// A [`SegmentLayout`][crate::SegmentLayout] was applied to a segment with a different tag.
     ///
     /// Passing the `NAD` definition to a `DTM` segment would resolve codes
@@ -584,6 +642,10 @@ impl EdifactError {
             Self::SegmentLayoutMismatch { .. } => "E035",
             Self::LimitExceeded { .. } => "E036",
             Self::RepetitionSeparatorNotDeclared => "E037",
+            Self::CharacterNotInRepertoire { .. } => "E038",
+            Self::UnsupportedCharset { .. } => "E039",
+            Self::NonFiniteNumber { .. } => "E040",
+            Self::CharacterRepertoireMismatch { .. } => "E041",
         }
     }
 
@@ -670,6 +732,18 @@ impl EdifactError {
             }
             Self::RepetitionSeparatorNotDeclared => Some(
                 "Build the writer with Writer::with_una and a ServiceStringAdvice whose repetition_sep is set",
+            ),
+            Self::CharacterNotInRepertoire { .. } => Some(
+                "Transliterate the value into the declared repertoire, or declare a wider one in UNB S001 (UNOC for Latin-1, UNOY for UTF-8)",
+            ),
+            Self::UnsupportedCharset { .. } => Some(
+                "UNOX and KECA are not supported; ask the partner for UNOC or UNOY, or transcode the interchange before parsing",
+            ),
+            Self::NonFiniteNumber { .. } => Some(
+                "EDIFACT has no representation for NaN or infinity; check the calculation, or omit the element",
+            ),
+            Self::CharacterRepertoireMismatch { .. } => Some(
+                "Pass the writer's own syntax identifier to begin_interchange, or bind the writer to the repertoire the header declares",
             ),
             Self::ValidationErrors { .. }
             | Self::MessageCountMismatch { .. }
@@ -877,6 +951,26 @@ impl miette::Diagnostic for EdifactError {
                 "UNA position 7 holds the space \"not used\" sentinel, so repeating data \
                  elements cannot be expressed. Use Writer::with_una with a repetition_sep",
             )),
+            Self::CharacterNotInRepertoire {
+                charset,
+                character,
+                offset,
+            } => Some(Box::new(format!(
+                "The character {character:?} at offset {offset} has no representation in {charset}. \
+                 Transliterate it, or declare a wider repertoire in UNB S001 DE 0001",
+            ))),
+            Self::UnsupportedCharset { syntax_identifier } => Some(Box::new(format!(
+                "'{syntax_identifier}' is stateful or multi-byte, so byte-level delimiter scanning \
+                 would be unsound. Transcode the interchange to UNOC or UNOY before parsing",
+            ))),
+            Self::CharacterRepertoireMismatch { declared, writer } => Some(Box::new(format!(
+                "The UNB declares {declared} but the writer encodes {writer}. \
+                 The receiver would decode the body with the wrong table",
+            ))),
+            Self::NonFiniteNumber { value } => Some(Box::new(format!(
+                "The value {value} is not finite. EDIFACT numeric data elements have no \
+                 representation for NaN or infinity",
+            ))),
             Self::LimitExceeded { limit, max } => Some(Box::new(format!(
                 "The input exceeds the configured {limit} limit of {max}. \
                  Raise it via ReaderConfig if the input is legitimate, or reject the input",

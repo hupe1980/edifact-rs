@@ -289,12 +289,43 @@ impl<'a> Tokenizer<'a> {
     /// If the input starts with the `UNA` service string advice (first 3
     /// bytes are `b"UNA"`), the UNA header is exactly 9 bytes long and the
     /// first segment tag starts at offset 9.  Otherwise parsing starts at 0.
+    ///
+    /// Only correct for a slice that starts at the head of an interchange.
+    /// A slice holding a single already-delimited segment must use
+    /// [`Tokenizer::for_segment`], because `UNA` is also a syntactically valid
+    /// segment tag and skipping nine bytes of it corrupts the parse.
     #[inline]
     fn una_start_pos(input: &[u8]) -> usize {
         if input.len() >= 9 && &input[..3] == b"UNA" {
             9
         } else {
             0
+        }
+    }
+
+    /// Construct a tokenizer over a slice that holds **one already-delimited
+    /// segment**, with no interchange header to skip.
+    ///
+    /// The whole-interchange constructors treat a leading `b"UNA"` as the
+    /// service string advice and jump nine bytes past it.  The reader paths
+    /// re-tokenize each segment from its own slice, where that heuristic is
+    /// wrong: `UNA` is three ASCII uppercase letters and therefore a legal
+    /// segment tag, so `UNA+XXXXXX'` parsed cleanly from a byte slice but was
+    /// rejected as `InvalidSegmentTag` when the identical bytes arrived through
+    /// a reader.
+    #[must_use]
+    pub fn for_segment(
+        input: &'a [u8],
+        ssa: ServiceStringAdvice,
+        max_segment_bytes: usize,
+    ) -> Self {
+        Self {
+            input,
+            pos: 0,
+            ssa,
+            state: TokState::ExpectTag,
+            max_segment_bytes,
+            segment_start: 0,
         }
     }
 

@@ -20,15 +20,10 @@
 //! ```rust,ignore
 //! use edifact_rs::group::{GroupDef, group_segments_indexed};
 //!
+//! static SG32: &[GroupDef] = &[GroupDef::new("SG32", "PRI")];
 //! static ORDERS_GROUPS: &[GroupDef] = &[
-//!     GroupDef { name: "SG2", trigger: "NAD", children: &[] },
-//!     GroupDef {
-//!         name: "SG7",
-//!         trigger: "LIN",
-//!         children: &[
-//!             GroupDef { name: "SG32", trigger: "PRI", children: &[] },
-//!         ],
-//!     },
+//!     GroupDef::new("SG2", "NAD"),
+//!     GroupDef::with_children("SG7", "LIN", SG32),
 //! ];
 //!
 //! let root = group_segments_indexed(&segments, ORDERS_GROUPS, "ROOT");
@@ -44,23 +39,54 @@ use std::ops::Range;
 
 // ── GroupDef ──────────────────────────────────────────────────────────────────
 
-/// Static schema describing one segment group within an EDIFACT message.
+/// Schema describing one segment group within an EDIFACT message.
 ///
-/// `GroupDef` is designed to be declared as a `static` or `const` value, so
-/// both the struct itself and all nested `children` references are
-/// `'static`-lifetime slices with no heap allocation.
+/// The lifetime `'a` is what the schema's strings and nested slices borrow
+/// from.  A `const`/`static` table is `GroupDef<'static>` and costs no
+/// allocation; a schema deserialized from a MIG at startup borrows from an
+/// arena the caller owns.  Earlier releases hard-coded `&'static str`, which
+/// made runtime-loaded schemas impossible even though the directory side of the
+/// crate ([`OwnedSegmentDef`][crate::OwnedSegmentDef],
+/// [`DirectoryValidatorBuilder`][crate::DirectoryValidatorBuilder]) has always
+/// supported them.
 #[derive(Debug, Clone, Copy)]
-pub struct GroupDef {
+pub struct GroupDef<'a> {
     /// Human-readable group name, e.g. `"SG2"`.
-    pub name: &'static str,
+    pub name: &'a str,
     /// The segment tag whose appearance starts a new instance of this group.
-    pub trigger: &'static str,
+    pub trigger: &'a str,
     /// Nested child groups within this group.
     ///
     /// The first trigger encountered among `children` ends the current child
     /// and starts a new one; a trigger that matches a sibling or ancestor group
     /// ends this group entirely.
-    pub children: &'static [GroupDef],
+    pub children: &'a [GroupDef<'a>],
+}
+
+impl<'a> GroupDef<'a> {
+    /// A leaf group: `name` is opened by `trigger` and has no nested groups.
+    #[must_use]
+    pub const fn new(name: &'a str, trigger: &'a str) -> Self {
+        Self {
+            name,
+            trigger,
+            children: &[],
+        }
+    }
+
+    /// A group with nested child groups.
+    #[must_use]
+    pub const fn with_children(
+        name: &'a str,
+        trigger: &'a str,
+        children: &'a [GroupDef<'a>],
+    ) -> Self {
+        Self {
+            name,
+            trigger,
+            children,
+        }
+    }
 }
 
 // ── SegmentGroupIndexed ───────────────────────────────────────────────────────
@@ -80,9 +106,11 @@ pub struct GroupDef {
 ///
 /// [`total_span`]: SegmentGroupIndexed::total_span
 #[derive(Debug)]
-pub struct SegmentGroupIndexed {
+pub struct SegmentGroupIndexed<'a> {
     /// Group name from the schema, e.g. `"SG2"`, or the root name.
-    pub definition: &'static str,
+    ///
+    /// Borrows from the schema, so it lives exactly as long as the schema does.
+    pub definition: &'a str,
     /// Contiguous span `[start, end)` of absolute indices into the original flat
     /// segment slice covering **all** segments in this group instance — trigger
     /// segment, direct segments, and all descendant groups combined.
@@ -100,7 +128,7 @@ pub struct SegmentGroupIndexed {
     /// [`direct_segment_indices`]: SegmentGroupIndexed::direct_segment_indices
     pub total_span: Range<usize>,
     /// Child group instances, in message order.
-    pub children: Vec<SegmentGroupIndexed>,
+    pub children: Vec<SegmentGroupIndexed<'a>>,
     /// Zero-based occurrence index of this group instance among all siblings
     /// with the same `definition` at this level.
     ///
@@ -113,7 +141,7 @@ pub struct SegmentGroupIndexed {
     pub occurrence_index: usize,
 }
 
-impl SegmentGroupIndexed {
+impl SegmentGroupIndexed<'_> {
     /// Iterate over the absolute indices of segments that belong *directly* to
     /// this group — i.e. those within [`total_span`] that are **not** covered
     /// by any child group's [`total_span`].
@@ -147,15 +175,10 @@ impl SegmentGroupIndexed {
 /// use edifact_rs::from_bytes;
 ///
 /// // Schema: ROOT → SG1 (trigger: RFF) → SG5 (trigger: LOC) → SG6 (trigger: QTY)
+/// static SG6: &[GroupDef] = &[GroupDef::new("SG6", "QTY")];
 /// static SCHEMA: &[GroupDef] = &[
-///     GroupDef { name: "SG1", trigger: "RFF", children: &[] },
-///     GroupDef {
-///         name: "SG5",
-///         trigger: "LOC",
-///         children: &[
-///             GroupDef { name: "SG6", trigger: "QTY", children: &[] },
-///         ],
-///     },
+///     GroupDef::new("SG1", "RFF"),
+///     GroupDef::with_children("SG5", "LOC", SG6),
 /// ];
 ///
 /// // A small multi-level message fragment (no envelope for clarity).
@@ -210,14 +233,22 @@ impl SegmentGroupIndexed {
 /// let report = ctx.validate_lenient_grouped(&tree, &segments);
 /// ```
 ///
+/// # What a group spans
+///
+/// Grouping is driven purely by trigger tags: a group runs from its trigger to
+/// the next trigger belonging to a sibling or ancestor, or to the end of the
+/// slice.  Nothing stops the final group at `UNT`, because the trailer is not a
+/// trigger of anything — pass the message *body* when the group boundaries
+/// matter, or accept that the trailer lands inside the last group.
+///
 /// # Complexity
 ///
 /// `O(n × schema_depth)` time, `O(tree_nodes)` space.  No `Segment` clones.
-pub fn group_segments_indexed(
+pub fn group_segments_indexed<'g>(
     segments: &[Segment<'_>],
-    schema: &'static [GroupDef],
-    root_name: &'static str,
-) -> SegmentGroupIndexed {
+    schema: &'g [GroupDef<'g>],
+    root_name: &'g str,
+) -> SegmentGroupIndexed<'g> {
     let mut root = SegmentGroupIndexed {
         definition: root_name,
         total_span: 0..0,
@@ -231,25 +262,25 @@ pub fn group_segments_indexed(
 /// Partition an owned-segment slice into a [`SegmentGroupIndexed`] tree according to `schema`.
 ///
 /// Equivalent to [`group_segments_indexed`] but accepts `&[OwnedSegment]`.
-pub fn group_owned_segments_indexed(
+pub fn group_owned_segments_indexed<'g>(
     segments: &[OwnedSegment],
-    schema: &'static [GroupDef],
-    root_name: &'static str,
-) -> SegmentGroupIndexed {
+    schema: &'g [GroupDef<'g>],
+    root_name: &'g str,
+) -> SegmentGroupIndexed<'g> {
     let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
     group_segments_indexed(&borrowed, schema, root_name)
 }
 
 /// Internal recursive indexed grouping.  Returns the number of segments consumed.
-fn group_recursive_indexed(
+fn group_recursive_indexed<'g>(
     segments: &[Segment<'_>],
-    parent: &mut SegmentGroupIndexed,
-    schema: &'static [GroupDef],
-    stop_triggers: &[&'static str],
+    parent: &mut SegmentGroupIndexed<'g>,
+    schema: &'g [GroupDef<'g>],
+    stop_triggers: &[&'g str],
     offset: usize,
 ) -> usize {
-    let combined_stop: SmallVec<[&'static str; 16]> = {
-        let mut v: SmallVec<[&'static str; 16]> = SmallVec::from_slice(stop_triggers);
+    let combined_stop: SmallVec<[&'g str; 16]> = {
+        let mut v: SmallVec<[&'g str; 16]> = SmallVec::from_slice(stop_triggers);
         for d in schema {
             if !v.contains(&d.trigger) {
                 v.push(d.trigger);
@@ -271,7 +302,7 @@ fn group_recursive_indexed(
     let mut i = 0;
     // Track how many children of each definition have been pushed at this level,
     // so we can stamp `occurrence_index` on each new child.
-    let mut occ_counts: std::collections::HashMap<&'static str, usize> =
+    let mut occ_counts: std::collections::HashMap<&'g str, usize> =
         std::collections::HashMap::new();
     while i < segments.len() {
         let tag = segments[i].tag;

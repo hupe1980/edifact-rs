@@ -200,9 +200,27 @@ fn serialize_with_decimal_mark<E: EventEmitter>(
     }
 }
 
+/// Reject `NaN` and infinity before they reach the wire.
+///
+/// `Display` renders them as `NaN`, `inf`, and `-inf` — text that is not an
+/// EDIFACT numeric data element (ISO 9735-1 §7 allows digits, an optional sign,
+/// and the decimal mark), that no receiver can parse, and that this crate's own
+/// reader would hand back as a string rather than a number. Emitting it would
+/// turn a calculation bug into a wire-format bug discovered days later.
+#[inline]
+fn reject_non_finite(value: f64) -> Result<(), EdifactError> {
+    if value.is_finite() {
+        return Ok(());
+    }
+    Err(EdifactError::NonFiniteNumber {
+        value: value.to_string(),
+    })
+}
+
 impl EdifactSerialize for DecimalFloat<f32> {
     #[inline]
     fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
+        reject_non_finite(f64::from(self.0))?;
         serialize_with_decimal_mark(&self.0, emitter)
     }
 }
@@ -210,6 +228,7 @@ impl EdifactSerialize for DecimalFloat<f32> {
 impl EdifactSerialize for DecimalFloat<f64> {
     #[inline]
     fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
+        reject_non_finite(self.0)?;
         serialize_with_decimal_mark(&self.0, emitter)
     }
 }

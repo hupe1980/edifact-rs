@@ -406,3 +406,46 @@ fn bail_on_first_error_does_not_skip_sibling_groups_due_to_earlier_flat_errors()
         "group error SG5-DTM-M must not be skipped by pre-existing flat errors: {report}"
     );
 }
+
+// ── Runtime-loaded schemas ────────────────────────────────────────────────────
+
+/// A MIG loaded at startup cannot produce `&'static str`.  `GroupDef` used to
+/// hard-code `'static`, which made every runtime-loaded group schema impossible
+/// even though the directory side of the crate (`OwnedSegmentDef`,
+/// `DirectoryValidatorBuilder`) has always supported them.
+#[test]
+fn a_schema_built_at_runtime_groups_identically_to_a_static_one() {
+    // Stand-in for names parsed out of a MIG file at startup.
+    let names: Vec<String> = vec![
+        "SG1".to_owned(),
+        "RFF".to_owned(),
+        "SG5".to_owned(),
+        "LOC".to_owned(),
+        "SG6".to_owned(),
+        "QTY".to_owned(),
+    ];
+    let sg6 = vec![GroupDef::new(&names[4], &names[5])];
+    let runtime_schema = vec![
+        GroupDef::new(&names[0], &names[1]),
+        GroupDef::with_children(&names[2], &names[3], &sg6),
+    ];
+
+    let input =
+        b"UNH+1+ORDERS:D:96A:UN'RFF+ON:1'LOC+172+DE1'DTM+163:20260101:102'QTY+220:5'UNT+6+1'";
+    let segs: Vec<_> = edifact_rs::from_bytes(input)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parse");
+
+    let from_static = group_segments_indexed(&segs, SCHEMA, "ROOT");
+    let from_runtime = group_segments_indexed(&segs, &runtime_schema, "ROOT");
+
+    fn shape(g: &edifact_rs::SegmentGroupIndexed<'_>) -> Vec<(String, std::ops::Range<usize>)> {
+        let mut out = vec![(g.definition.to_owned(), g.total_span.clone())];
+        for child in &g.children {
+            out.extend(shape(child));
+        }
+        out
+    }
+    assert_eq!(shape(&from_static), shape(&from_runtime));
+    assert!(shape(&from_runtime).iter().any(|(n, _)| n == "SG6"));
+}

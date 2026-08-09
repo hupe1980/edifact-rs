@@ -1,6 +1,8 @@
 //! EDIFACT writer — serializes [`Segment`]s to wire format.
 
-use crate::{error::EdifactError, model::Segment, tokenizer::ServiceStringAdvice};
+use crate::{
+    charset::Charset, error::EdifactError, model::Segment, tokenizer::ServiceStringAdvice,
+};
 use std::borrow::Cow;
 use std::io::Write;
 
@@ -237,6 +239,11 @@ pub struct Writer<W: Write> {
     /// event-emitter path) is a `UNH`.  The whole-segment methods pass the tag
     /// to `end_segment` directly; the emitter only sees it at `StartSegment`.
     open_segment_is_unh: bool,
+    /// Repertoire every value is encoded into, when the writer is bound to one.
+    ///
+    /// `None` emits UTF-8 unchecked, which is correct for `UNOY` and for any
+    /// payload that happens to be ASCII.
+    charset: Option<Charset>,
 }
 
 /// Return the offset of the first byte in `hay` that must be release-escaped.
@@ -269,7 +276,54 @@ impl<W: Write> Writer<W> {
             segment_count: 0,
             message_start_count: 0,
             open_segment_is_unh: false,
+            charset: None,
         }
+    }
+
+    /// Bind this writer to a character repertoire.
+    ///
+    /// Every value is then encoded into `charset` rather than emitted as UTF-8,
+    /// and a character the repertoire cannot carry is rejected with
+    /// [`EdifactError::CharacterNotInRepertoire`] instead of being written as
+    /// bytes the receiver decodes as something else.
+    ///
+    /// This is the write-side counterpart of
+    /// [`decode_interchange`][crate::decode_interchange]: a `UNOC` interchange
+    /// must go out as ISO 8859-1, not UTF-8, or `ü` arrives as two mojibake
+    /// characters.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::{Charset, Writer};
+    ///
+    /// let mut writer = Writer::new(Vec::new()).with_charset(Charset::UnoC);
+    /// writer.write_composites("NAD", &[&["BY"], &["Müller"]])?;
+    /// // `ü` goes out as the single Latin-1 byte 0xFC.
+    /// assert_eq!(writer.finish()?, b"NAD+BY+M\xFCller'".to_vec());
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    ///
+    /// A value outside the repertoire is refused:
+    ///
+    /// ```
+    /// use edifact_rs::{Charset, EdifactError, Writer};
+    ///
+    /// let mut writer = Writer::new(Vec::new()).with_charset(Charset::UnoA);
+    /// // Level A is upper-case only.
+    /// let err = writer.write_composites("NAD", &[&["BY"], &["Müller"]]).unwrap_err();
+    /// assert!(matches!(err, EdifactError::CharacterNotInRepertoire { .. }));
+    /// ```
+    #[must_use]
+    pub fn with_charset(mut self, charset: Charset) -> Self {
+        self.charset = Some(charset);
+        self
+    }
+
+    /// The repertoire this writer encodes into, if it is bound to one.
+    #[must_use]
+    pub fn charset(&self) -> Option<Charset> {
+        self.charset
     }
 
     /// Create a writer with custom delimiters and write a UNA segment first.
@@ -298,6 +352,7 @@ impl<W: Write> Writer<W> {
             segment_count: 0,
             message_start_count: 0,
             open_segment_is_unh: false,
+            charset: None,
         })
     }
 
@@ -318,18 +373,29 @@ impl<W: Write> Writer<W> {
     }
 
     /// Write a single segment, including any ISO 9735-4 repetitions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError::RepetitionSeparatorNotDeclared`] when the segment
+    /// carries a repeating data element but the active service string advice
+    /// declares no repetition separator.  The check runs **before** any byte is
+    /// written, so a rejected segment leaves nothing behind in the sink — a
+    /// half-written `RFF+` would otherwise corrupt the interchange for every
+    /// caller that recovers from the error and carries on.
     pub fn write_segment(&mut self, seg: &Segment<'_>) -> Result<(), EdifactError> {
+        // The sentinel at UNA position 7 is a space.  Emitting it as a separator
+        // would produce output that reads back as a single occurrence whose
+        // value contains a space — corrupt, and quietly so.  Refusing is the
+        // only honest option, and refusing before the first write is the only
+        // one that keeps the sink consistent.
+        if !self.ssa.is_repetition_active() && seg.elements.iter().any(|e| !e.repeats.is_empty()) {
+            return Err(EdifactError::RepetitionSeparatorNotDeclared);
+        }
+
         self.inner.write_all(seg.tag.as_bytes())?;
 
         for element in &seg.elements {
             self.inner.write_all(&[self.ssa.element_sep])?;
-            if !element.repeats.is_empty() && !self.ssa.is_repetition_active() {
-                // The sentinel at UNA position 7 is a space.  Emitting it as a
-                // separator would produce output that reads back as a single
-                // occurrence whose value contains a space — corrupt, and quietly
-                // so.  Refusing is the only honest option.
-                return Err(EdifactError::RepetitionSeparatorNotDeclared);
-            }
             for (repetition, components) in element.repetitions().enumerate() {
                 if repetition > 0 {
                     self.inner.write_all(&[self.ssa.repetition_sep])?;
@@ -623,6 +689,21 @@ impl<W: Write> Writer<W> {
         self.end_segment(tag)
     }
 
+    /// Write text, encoding it into the bound repertoire when there is one.
+    ///
+    /// Callers must only pass slices that start and end on a character boundary.
+    /// Every delimiter is single-byte ASCII (enforced by
+    /// [`ServiceStringAdvice::is_valid`]), so splitting a value at a delimiter
+    /// always satisfies that.
+    #[inline]
+    fn write_text(&mut self, text: &str) -> Result<(), EdifactError> {
+        match self.charset {
+            None => self.inner.write_all(text.as_bytes())?,
+            Some(charset) => self.inner.write_all(&charset.encode(text)?)?,
+        }
+        Ok(())
+    }
+
     /// Write a value, escaping any delimiter characters.
     pub(crate) fn write_escaped(&mut self, value: &str) -> Result<(), EdifactError> {
         let release = self.ssa.release_char;
@@ -635,14 +716,15 @@ impl<W: Write> Writer<W> {
             };
             let abs = pos + hit;
             if abs > last {
-                self.inner.write_all(&bytes[last..abs])?;
+                self.write_text(&value[last..abs])?;
             }
+            // The escaped byte is a service character, hence ASCII in every
+            // repertoire — it needs no encoding pass.
             self.inner.write_all(&[release, bytes[abs]])?;
             last = abs + 1;
             pos = abs + 1;
         }
-        self.inner.write_all(&bytes[last..])?;
-        Ok(())
+        self.write_text(&value[last..])
     }
 
     // ── Interchange envelope helpers ──────────────────────────────────────────
@@ -690,6 +772,17 @@ impl<W: Write> Writer<W> {
         time: &str,
         control_ref: &str,
     ) -> Result<(), EdifactError> {
+        // A header that names one repertoire while the body is encoded in another
+        // is the exact silent-corruption failure `with_charset` exists to stop, so
+        // a mismatch is refused rather than written.
+        if let Some(charset) = self.charset {
+            if charset.syntax_identifier() != syntax_id {
+                return Err(EdifactError::CharacterRepertoireMismatch {
+                    declared: syntax_id.to_owned(),
+                    writer: charset.syntax_identifier(),
+                });
+            }
+        }
         self.write_composites(
             "UNB",
             &[

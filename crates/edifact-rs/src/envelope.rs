@@ -94,8 +94,8 @@ impl SegmentReader for OwnedSegment {
 ///
 /// ```text
 /// [0] S001  syntax identifier + version
-/// [1] S002  sender id + qualifier + routing
-/// [2] S003  recipient id + qualifier + routing
+/// [1] S002  sender id (0004) + qualifier (0007) + internal id (0008)
+/// [2] S003  recipient id (0010) + qualifier (0007) + internal id (0014)
 /// [3] S004  date + time
 /// [4] 0020  interchange control reference
 /// [5] S005  recipient password (DE 0022 comp 0)
@@ -122,10 +122,14 @@ pub struct InterchangeEnvelope {
     /// Common values: `"14"` (EAN/GLN), `"ZZZ"` (mutually defined).
     /// Empty string when no qualifier is present.
     pub sender_qualifier: String,
-    /// Interchange sender routing address (UNB S002 DE 0014), if present.
+    /// Interchange sender internal identification (UNB S002 **DE 0008**), if present.
     ///
-    /// An optional routing address used by some EDI networks to identify
-    /// the sub-entity (division, application) within the sender organisation.
+    /// An optional address used by some EDI networks to identify the sub-entity
+    /// (division, application) within the sender organisation; ISO 9735 version 3
+    /// calls it the address for reverse routing.
+    ///
+    /// This is **DE 0008**, not DE 0014 — 0014 is the recipient-side component in
+    /// S003.  See [`service::S002`][crate::service::S002].
     pub sender_routing_address: Option<String>,
     /// Interchange recipient identification (UNB S003 DE 0010).
     pub recipient_id: String,
@@ -133,9 +137,10 @@ pub struct InterchangeEnvelope {
     ///
     /// Same values as `sender_qualifier`.  Empty string when absent.
     pub recipient_qualifier: String,
-    /// Interchange recipient routing address (UNB S003 DE 0014), if present.
+    /// Interchange recipient internal identification (UNB S003 DE 0014), if present.
     ///
-    /// Analogous to `sender_routing_address` but for the recipient side.
+    /// The recipient-side counterpart of `sender_routing_address`, which is
+    /// DE 0008.  See [`service::S003`][crate::service::S003].
     pub recipient_routing_address: Option<String>,
     /// Interchange date (UNB S004 DE 0017), e.g. `"230401"` (YYMMDD format).
     pub date: String,
@@ -892,7 +897,7 @@ fn extract_interchange<S: SegmentReader>(
 
     let sender_id = sink.required(unb, 1, 0);
     let sender_qualifier = unb.component(1, 1).unwrap_or("").to_owned();
-    // UNB S002 comp[2]: DE 0014 — sender routing address
+    // UNB S002 comp[2]: DE 0008 — sender internal identification
     let sender_routing_address = unb
         .component(1, 2)
         .filter(|s| !s.is_empty())
@@ -900,7 +905,7 @@ fn extract_interchange<S: SegmentReader>(
 
     let recipient_id = sink.required(unb, 2, 0);
     let recipient_qualifier = unb.component(2, 1).unwrap_or("").to_owned();
-    // UNB S003 comp[2]: DE 0014 — recipient routing address
+    // UNB S003 comp[2]: DE 0014 — recipient internal identification
     let recipient_routing_address = unb
         .component(2, 2)
         .filter(|s| !s.is_empty())

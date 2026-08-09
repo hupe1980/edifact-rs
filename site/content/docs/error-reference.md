@@ -65,6 +65,10 @@ needed.
 | E035 | `SegmentLayoutMismatch` | Code-addressed access | — |
 | E036 | `LimitExceeded` | Parser (`ReaderConfig` budgets) | — |
 | E037 | `RepetitionSeparatorNotDeclared` | Writer | — |
+| E038 | `CharacterNotInRepertoire` | Writer / `Charset::encode` | — |
+| E039 | `UnsupportedCharset` | `Charset::from_syntax_identifier` | — |
+| E040 | `NonFiniteNumber` | `DecimalFloat` serialization | — |
+| E041 | `CharacterRepertoireMismatch` | `Writer::begin_interchange` | — |
 
 ---
 
@@ -111,8 +115,13 @@ invalid EDIFACT text at byte offset {offset}
 
 **Fields**: `offset: usize`.
 
-**Fix**: Re-encode the input as UTF-8. EDIFACT character set `UNOA` (Latin-1 subset)
-must be transcoded before passing to `edifact-rs`.
+**Fix**: Decode the interchange first. `UNOC`–`UNOK` are single-byte ISO 8859
+repertoires whose high bytes are not valid UTF-8; `decode_interchange` reads the
+repertoire from `UNB` S001 and converts, copying nothing when the payload is
+already ASCII or `UNOY`. See [Character Sets](@/docs/character-sets.md).
+
+Also raised by `Charset::decode` for a byte that falls in a slot the repertoire
+leaves undefined.
 
 ---
 
@@ -711,6 +720,90 @@ contains a space — silent data corruption from a call that reported success.
 
 **Fix**: Build the writer with `Writer::with_una` and a `ServiceStringAdvice`
 whose `repetition_sep` is set, or flatten the repetitions before writing.
+
+**Recovery**: The check runs before any byte is written, so the sink is untouched
+and the writer can be reused for the next segment.
+
+### E038 — `CharacterNotInRepertoire`
+
+```text
+character 'ü' at offset 1 is not in the UNOA character repertoire
+```
+
+**When**: A writer bound with [`Writer::with_charset`](@/docs/writing.md#character-repertoires)
+was handed a value containing a character the declared repertoire cannot carry —
+or [`Charset::encode`] was called directly with one.
+
+**Why**: `UNB` S001 DE 0001 tells the receiver which table to decode the payload
+with. A character outside that table has no byte to be written as; emitting one
+anyway produces a value the receiver reads as a different character, or as an
+undefined slot.
+
+**Fix**: Transliterate the value (`ü` → `ue`), or declare a wider repertoire —
+`UNOC` for Latin-1, `UNOY` for full UTF-8.
+
+**Recovery**: The check happens during value encoding, so a partially written
+segment is possible. Prefer validating with
+[`Charset::first_violation`] before writing when you need to skip bad records
+and continue.
+
+---
+
+### E039 — `UnsupportedCharset`
+
+```text
+character repertoire 'UNOX' is not supported
+```
+
+**When**: An interchange declares `UNOX` (ISO 2022 code extension) or `KECA`
+(Korean) in `UNB` S001 DE 0001.
+
+**Why**: Every repertoire this crate supports is single-byte and
+ASCII-transparent, which is what makes byte-level delimiter scanning sound.
+`UNOX` is stateful and `KECA` is multi-byte, so a `+` byte inside a multi-byte
+sequence would be mistaken for an element separator. Mis-decoding silently is
+worse than refusing.
+
+**Fix**: Ask the partner for `UNOC` or `UNOY`, or transcode the interchange with
+a dedicated codec before handing it to `edifact-rs`.
+
+---
+
+### E040 — `NonFiniteNumber`
+
+```text
+non-finite number NaN has no EDIFACT representation
+```
+
+**When**: `DecimalFloat(f64::NAN)` or `DecimalFloat(f32::INFINITY)` was
+serialized.
+
+**Why**: An EDIFACT numeric data element is digits with an optional sign and
+decimal mark (ISO 9735-1 §7). Rust's `Display` renders these values as `NaN`,
+`inf`, and `-inf` — text no receiver can parse, and which this crate's own reader
+returns as an ordinary string rather than a number. Writing it turns an
+arithmetic bug into a wire-format bug found days later.
+
+**Fix**: Check the calculation, or omit the element rather than emitting a
+placeholder.
+
+---
+
+### E041 — `CharacterRepertoireMismatch`
+
+```text
+UNB declares repertoire UNOA, but the writer encodes UNOC
+```
+
+**When**: `Writer::begin_interchange` was called with a syntax identifier that
+differs from the repertoire the writer was bound to with `Writer::with_charset`.
+
+**Why**: The header would tell the receiver to decode the body with the wrong
+table. Every non-ASCII value then arrives as mojibake, and nothing in the
+interchange reveals why.
+
+**Fix**: Pass the writer's own identifier — `writer.charset().unwrap().syntax_identifier()`
+— or bind the writer to the repertoire the header declares.
 
 ---
 

@@ -1,7 +1,9 @@
 //! Validation context: `ValidationContext`, `ValidationContextBuilder`, `LayeredValidator`.
 
 use super::pack::ProfileRulePack;
-use super::{EnvelopeValidator, ValidationLayer, ValidationRuleContext, Validator};
+use super::{
+    CharsetValidator, EnvelopeValidator, ValidationLayer, ValidationRuleContext, Validator,
+};
 use crate::{OwnedSegment, Segment, ValidationReport, ValidationSeverity};
 use std::any::Any;
 use std::sync::Arc;
@@ -212,6 +214,34 @@ impl ValidationContextBuilder {
         self
     }
 
+    /// Check every value against the repertoire the interchange declares, and
+    /// enable the envelope layer.
+    ///
+    /// Adds a [`CharsetValidator`] reading `UNB` S001 DE 0001. See
+    /// [`with_charset_validation_for`][Self::with_charset_validation_for] to pin
+    /// a repertoire instead of reading it from the envelope.
+    pub fn with_charset_validation(mut self) -> Self {
+        self.inner.envelope_enabled = true;
+        self.inner.validators.push(LayeredValidator {
+            layer: ValidationLayer::Envelope,
+            validator: Box::new(CharsetValidator::from_envelope()),
+        });
+        self
+    }
+
+    /// Check every value against a fixed repertoire, and enable the envelope layer.
+    ///
+    /// Use for message-level slices that carry no `UNB`, or to hold a partner to
+    /// a stricter repertoire than the one they declare.
+    pub fn with_charset_validation_for(mut self, charset: crate::Charset) -> Self {
+        self.inner.envelope_enabled = true;
+        self.inner.validators.push(LayeredValidator {
+            layer: ValidationLayer::Envelope,
+            validator: Box::new(CharsetValidator::with_charset(charset)),
+        });
+        self
+    }
+
     /// Add a validator assigned to `layer`.
     pub fn with_validator<V>(mut self, layer: ValidationLayer, mut validator: V) -> Self
     where
@@ -326,9 +356,7 @@ impl ValidationContext {
     /// use edifact_rs::{group_segments_indexed, ValidationContext};
     /// use edifact_rs::group::GroupDef;
     ///
-    /// static SCHEMA: &[GroupDef] = &[
-    ///     GroupDef { name: "SG5", trigger: "LOC", children: &[] },
-    /// ];
+    /// static SCHEMA: &[GroupDef] = &[GroupDef::new("SG5", "LOC")];
     ///
     /// let tree = group_segments_indexed(&segments, SCHEMA, "ROOT");
     /// let pack = ProfileRulePack::new("PROFILE")
@@ -339,7 +367,7 @@ impl ValidationContext {
     /// ```
     pub fn validate_lenient_grouped(
         &self,
-        root: &crate::group::SegmentGroupIndexed,
+        root: &crate::group::SegmentGroupIndexed<'_>,
         segments: &[Segment<'_>],
     ) -> ValidationReport {
         let base_ctx = self.build_rule_context();
@@ -369,7 +397,7 @@ impl ValidationContext {
     /// Execute flat + group-aware validators in strict mode.
     pub fn validate_strict_grouped(
         &self,
-        root: &crate::group::SegmentGroupIndexed,
+        root: &crate::group::SegmentGroupIndexed<'_>,
         segments: &[Segment<'_>],
     ) -> Result<ValidationReport, ValidationReport> {
         self.validate_lenient_grouped(root, segments).result()
@@ -378,7 +406,7 @@ impl ValidationContext {
     /// Execute flat + group-aware validators against owned segments in lenient mode.
     pub fn validate_lenient_grouped_owned(
         &self,
-        root: &crate::group::SegmentGroupIndexed,
+        root: &crate::group::SegmentGroupIndexed<'_>,
         segments: &[crate::OwnedSegment],
     ) -> ValidationReport {
         let base_ctx = self.build_rule_context();
@@ -417,7 +445,7 @@ impl ValidationContext {
     /// Execute flat + group-aware validators against owned segments in strict mode.
     pub fn validate_strict_grouped_owned(
         &self,
-        root: &crate::group::SegmentGroupIndexed,
+        root: &crate::group::SegmentGroupIndexed<'_>,
         segments: &[crate::OwnedSegment],
     ) -> Result<ValidationReport, ValidationReport> {
         self.validate_lenient_grouped_owned(root, segments).result()
@@ -426,7 +454,7 @@ impl ValidationContext {
     /// Phase-2 group pass: call `validate_group_batch` on each enabled validator.
     fn run_group_pass(
         &self,
-        root: &crate::group::SegmentGroupIndexed,
+        root: &crate::group::SegmentGroupIndexed<'_>,
         segments: &[Segment<'_>],
         report: &mut ValidationReport,
         context: &ValidationRuleContext<'_>,
