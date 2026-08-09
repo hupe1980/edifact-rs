@@ -5,7 +5,7 @@
 #
 #   just              list every recipe
 #   just check        fast inner-loop gate (fmt + clippy + tests)
-#   just ci           everything CI runs, on this toolchain
+#   just ci           everything CI runs (needs nightly for the docs.rs job)
 #   just ci-full      `just ci` plus the MSRV job and the benchmarks
 #
 # `just VAR=value recipe` overrides a variable, e.g. `just locked= test` to drop
@@ -89,6 +89,9 @@ doc-open:
     RUSTDOCFLAGS="-D warnings" cargo doc -p edifact-rs --all-features --no-deps --open {{ locked }}
 
 # The `docsrs-check` CI job: nightly, with the docsrs cfg docs.rs itself sets.
+# The `docsrs-check` CI job.  Nightly, because docs.rs builds on nightly and
+# lints there that stable does not have — `redundant_explicit_links`, for one —
+# are what actually gate the published documentation.
 doc-docsrs:
     RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc -p edifact-rs --all-features --no-deps {{ locked }}
 
@@ -140,6 +143,10 @@ feature-matrix: check test test-no-default test-all-features ui test-examples bu
 # Install the MSRV toolchain if it is missing.
 msrv-install:
     rustup toolchain install {{ msrv }} --profile minimal
+
+# Install the nightly toolchain the `docsrs-check` job needs.
+nightly-install:
+    rustup toolchain install nightly --profile minimal
 
 # Run the full workspace suite on the MSRV toolchain.
 msrv:
@@ -223,7 +230,7 @@ bench-compare FROM="main" TO="pr":
 # Benchmarks and the MSRV job are not included — see `ci-full`.
 
 [doc("Everything CI runs, on this toolchain.")]
-ci: fmt-check clippy feature-matrix doc deny release-check fuzz
+ci: fmt-check clippy feature-matrix doc doc-docsrs deny release-check fuzz
 
 # `ci` plus the MSRV job and the benchmark smoke run: the full pre-release gate.
 ci-full: ci msrv bench-smoke
@@ -242,4 +249,4 @@ clean:
 toolchains:
     @echo "default: $(rustc --version)"
     @echo "msrv:    $(rustc +{{ msrv }} --version 2>/dev/null || echo 'not installed — run: just msrv-install')"
-    @echo "nightly: $(rustc +nightly --version 2>/dev/null || echo 'not installed — run: rustup toolchain install nightly')"
+    @echo "nightly: $(rustc +nightly --version 2>/dev/null || echo 'not installed — run: just nightly-install')"

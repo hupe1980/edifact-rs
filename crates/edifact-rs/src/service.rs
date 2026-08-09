@@ -35,7 +35,7 @@
 //! release**: their content differs between releases, and the directories are
 //! large and separately licensed. Supply those yourself as `static` tables, or
 //! load them at run time with
-//! [`DirectoryValidatorBuilder`][crate::DirectoryValidatorBuilder].
+//! [`DirectoryValidatorBuilder`].
 //!
 //! `UCI`/`UCM`/`UCS`/`UCD` are not here either: they belong to the `CONTRL`
 //! *message*, not to the interchange envelope.
@@ -51,7 +51,7 @@
 //! | `UNH` | `0051` | S009, S016, S017, and S018 |
 //!
 //! Resolving one of those returns
-//! [`EdifactError::AmbiguousDataElement`][crate::EdifactError::AmbiguousDataElement].
+//! [`EdifactError::AmbiguousDataElement`].
 //! Address the unambiguous neighbour instead — `0004` for the sender, `0010` for
 //! the recipient — or read the slot positionally.
 //!
