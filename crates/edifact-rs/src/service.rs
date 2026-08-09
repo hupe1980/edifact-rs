@@ -9,7 +9,7 @@
 //!
 //! # Why this exists
 //!
-//! Code-addressed access ([`Segment::value_by_code`][crate::Segment::value_by_code],
+//! Code-addressed access ([`Segment::value_by_code`],
 //! `#[edifact(element = "0020")]`) needs a [`SegmentDefinition`] to resolve
 //! against. Requiring every consumer to hand-author `UNB` before they can read
 //! an interchange control reference by name made the crate's headline safety
@@ -37,14 +37,15 @@
 //! Directory content — which is what transcribing it into `const` tables and
 //! publishing it would be. Supply those yourself as `static` tables, or load
 //! them at run time with [`DirectoryValidatorBuilder`], and check the result
-//! with [`SegmentLayout::audit`][crate::SegmentLayout::audit].
+//! with [`SegmentLayout::audit`].
 //!
 //! The `CONTRL` reporting segments — `UCI`, `UCF`, `UCM`, `UCS`, `UCD` — ship
 //! too. They belong to a *message* rather than to the envelope, but that message
 //! is defined by ISO 9735-4, not by a directory release, so the same argument
 //! applies: one correct answer, no version to pick. Together with `UNH` and
 //! `UNT` they are everything a `CONTRL` is built from, which means
-//! [`lookup`](crate::service::lookup) alone validates one. See [`contrl`][crate::contrl] for generating them.
+//! [`lookup`](crate::service::lookup) alone validates one. See [`contrl`] for
+//! generating them.
 //!
 //! Not here: the interactive-EDI segments `UIB`/`UIH`/`UIR`/`UIT`/`UIZ`
 //! (ISO 9735-3) and the security segments
@@ -76,7 +77,7 @@
 //! # Representations
 //!
 //! Each position carries the representation ISO 9735-1 Annex C states for it, so
-//! [`DirectoryValidator`][crate::DirectoryValidator] checks length and character
+//! [`DirectoryValidator`] checks length and character
 //! class as well as presence — `UNZ+abc+IC1'` is rejected because DE 0036 is
 //! `n..6`, with no directory involved.
 //!

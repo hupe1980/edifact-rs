@@ -117,6 +117,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- **Three redundant intra-doc link targets removed** from the `service` module
+  docs. They failed the `docsrs-check` CI job, which builds on nightly where
+  `rustdoc::redundant_explicit_links` exists — stable does not carry it, so a
+  green `cargo doc` said nothing about whether docs.rs would build. Module
+  documentation resolves links in the **crate-root** scope, so a label like
+  `Segment::value_by_code` already resolves through the root re-export and an
+  explicit `[…][crate::Segment::value_by_code]` target duplicates it. `lookup`
+  is not re-exported at the root and still needs its path.
+
 - **Why directory composites are not shipped, stated rather than implied.** The
   [UN UNTDID licence](https://service.unece.org/trade/untdid/license.htm) grants
   use of the Directory only in the country where it was acquired, requires the

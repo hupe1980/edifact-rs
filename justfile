@@ -88,10 +88,11 @@ doc:
 doc-open:
     RUSTDOCFLAGS="-D warnings" cargo doc -p edifact-rs --all-features --no-deps --open {{ locked }}
 
-# The `docsrs-check` CI job: nightly, with the docsrs cfg docs.rs itself sets.
-# The `docsrs-check` CI job.  Nightly, because docs.rs builds on nightly and
-# lints there that stable does not have — `redundant_explicit_links`, for one —
-# are what actually gate the published documentation.
+# The `docsrs-check` CI job.  Nightly, with the `docsrs` cfg docs.rs itself sets.
+#
+# Run this, not just `doc`: nightly carries rustdoc lints stable does not —
+# `redundant_explicit_links` among them — and those are what gate the published
+# documentation.  A green `just doc` says nothing about docs.rs.
 doc-docsrs:
     RUSTDOCFLAGS="--cfg docsrs -D warnings" cargo +nightly doc -p edifact-rs --all-features --no-deps {{ locked }}
 
