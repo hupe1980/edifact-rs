@@ -49,6 +49,33 @@ use std::ops::Range;
 /// crate ([`OwnedSegmentDef`][crate::OwnedSegmentDef],
 /// [`DirectoryValidatorBuilder`][crate::DirectoryValidatorBuilder]) has always
 /// supported them.
+///
+/// # Returning a schema from a trait method
+///
+/// `static SCHEMA: &[GroupDef] = …` still compiles unchanged: in a `static`, the
+/// elided lifetime resolves to `'static`. In **return position on a method**, it
+/// does not — it binds to `&self`, so a trait method declared
+/// `fn schema(&self) -> &'static [GroupDef]` fails to compile. Name the inner
+/// lifetime explicitly there:
+///
+/// ```
+/// use edifact_rs::group::GroupDef;
+///
+/// static SCHEMA: &[GroupDef] = &[GroupDef::new("SG1", "RFF")]; // unchanged
+///
+/// trait MessageSchema {
+///     //                          ↓ both lifetimes named
+///     fn groups(&self) -> &'static [GroupDef<'static>];
+/// }
+///
+/// struct Orders;
+/// impl MessageSchema for Orders {
+///     fn groups(&self) -> &'static [GroupDef<'static>] {
+///         SCHEMA
+///     }
+/// }
+/// assert_eq!(Orders.groups()[0].name, "SG1");
+/// ```
 #[derive(Debug, Clone, Copy)]
 pub struct GroupDef<'a> {
     /// Human-readable group name, e.g. `"SG2"`.

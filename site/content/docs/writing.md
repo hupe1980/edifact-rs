@@ -296,8 +296,8 @@ assert_eq!(text, "UNA;|.? !BGM|220|PO-4711|9!");
 
 ## Repeating data elements
 
-ISO 9735-4 §3.1 repetitions are written with the repetition separator from UNA
-position 7, so the writer needs a `ServiceStringAdvice` that declares one:
+ISO 9735-1 §8.6 repetitions are written with the repetition separator from UNA
+position 050, so the writer needs a `ServiceStringAdvice` that declares one:
 
 ```rust
 use edifact_rs::{Element, Segment, ServiceStringAdvice, Writer};
@@ -325,6 +325,58 @@ The refusal is checked before the first byte leaves the writer, so a rejected
 segment writes **nothing**. The writer stays usable: log the error, skip the
 segment, and keep going — the next segment starts at a clean boundary rather
 than after a dangling `RFF+`.
+
+### Through the event layer
+
+`EdifactEvent::RepeatElement` is the write-side mirror of the parser's
+repetition split, so a value that arrives as several occurrences can leave as
+several occurrences:
+
+```rust
+use edifact_rs::{EdifactEvent, EventEmitter, ServiceStringAdvice, WriterEmitter};
+
+let ssa = ServiceStringAdvice::from_bytes(b"UNA:+.?*'")?;
+let mut emitter = WriterEmitter::with_una(Vec::new(), ssa)?;
+emitter.emit(EdifactEvent::StartSegment { tag: "RFF" })?;
+emitter.emit(EdifactEvent::Element { value: "ON" })?;
+emitter.emit(EdifactEvent::ComponentElement { value: "1" })?;
+emitter.emit(EdifactEvent::RepeatElement { value: "ON" })?;  // second occurrence
+emitter.emit(EdifactEvent::ComponentElement { value: "2" })?;
+emitter.emit(EdifactEvent::EndSegment)?;
+
+assert_eq!(emitter.finish()?, b"UNA:+.?*'RFF+ON:1*ON:2'".to_vec());
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+The same `E037` refusal applies: a `RepeatElement` under a writer with no
+declared separator is rejected before the separator byte is written.
+
+---
+
+## Writing in a non-UTF-8 repertoire
+
+`Writer::with_charset` binds the writer to the repertoire named in `UNB` S001, so
+a `UNOC` interchange goes out as ISO 8859-1 rather than as UTF-8 — and a
+character the repertoire cannot carry is refused instead of being written as
+bytes the receiver decodes as something else.
+
+The typed path reaches it through `WriterEmitter::with_charset`, so a
+`#[derive(EdifactSerialize)]` struct is bound the same way:
+
+```rust
+use edifact_rs::{Charset, EdifactEvent, EventEmitter, WriterEmitter};
+
+let mut emitter = WriterEmitter::new(Vec::new()).with_charset(Charset::UnoC);
+emitter.emit(EdifactEvent::StartSegment { tag: "NAD" })?;
+emitter.emit(EdifactEvent::Element { value: "Müller" })?;
+emitter.emit(EdifactEvent::EndSegment)?;
+
+// `ü` goes out as the single Latin-1 byte 0xFC, not as two UTF-8 bytes.
+assert_eq!(emitter.finish()?, b"NAD+M\xFCller'".to_vec());
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+See [Character Sets](@/docs/character-sets.md) for the full repertoire table.
 
 ---
 

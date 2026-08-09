@@ -539,6 +539,61 @@ pub fn get_components_iter<'a>(seg: &'a Segment<'_>, idx: usize) -> impl Iterato
         .flat_map(|elem| elem.components.iter().map(|(c, _)| c.as_ref()))
 }
 
+/// Iterate one component across **every repetition** of a data element
+/// (ISO 9735-1 §8.6).
+///
+/// This is the read side of a repeating data element: `RFF+ON:1*ON:2` has one
+/// element with two occurrences, and asking for component 1 yields `"1"` then
+/// `"2"`. [`get_components_iter`] answers the different question — the
+/// components *within* one occurrence.
+///
+/// Every occurrence produces exactly one item, using `""` where that occurrence
+/// omits the component. §8.7.3 makes the position of an occurrence significant —
+/// `DE*DE***DE` deliberately transfers two empty ones — so dropping them would
+/// shift every later value into the wrong slot.
+///
+/// Yields nothing when the element is absent.
+///
+/// # Example
+///
+/// ```
+/// use edifact_rs::{from_bytes, repeated_components};
+///
+/// // `UNA` position 050 declares `*` as the repetition separator.
+/// let segments: Vec<_> = from_bytes(b"UNA:+.?*'RFF+ON:1*ON:2*ON:3'")
+///     .collect::<Result<Vec<_>, _>>()?;
+///
+/// let references: Vec<&str> = repeated_components(&segments[0], 0, 1).collect();
+/// assert_eq!(references, ["1", "2", "3"]);
+///
+/// // Component 0 is the qualifier, repeated in every occurrence.
+/// let qualifiers: Vec<&str> = repeated_components(&segments[0], 0, 0).collect();
+/// assert_eq!(qualifiers, ["ON", "ON", "ON"]);
+/// # Ok::<(), edifact_rs::EdifactError>(())
+/// ```
+pub fn repeated_components<'a>(
+    seg: &'a Segment<'_>,
+    element: usize,
+    component: usize,
+) -> impl Iterator<Item = &'a str> {
+    seg.elements.get(element).into_iter().flat_map(move |elem| {
+        elem.repetitions()
+            .map(move |occurrence| occurrence.get(component).map_or("", |(c, _)| c.as_ref()))
+    })
+}
+
+/// Owned-segment counterpart of [`repeated_components`].
+pub fn repeated_components_owned(
+    seg: &crate::OwnedSegment,
+    element: usize,
+    component: usize,
+) -> impl Iterator<Item = &str> {
+    seg.elements.get(element).into_iter().flat_map(move |elem| {
+        elem.repetitions()
+            .map(move |occurrence| occurrence.get(component).map_or("", |(c, _)| c.as_str()))
+    })
+}
+
 /// A composite data element wrapper for clearer ergonomics.
 ///
 /// Holds borrowed `&'a str` references to the underlying data — no string

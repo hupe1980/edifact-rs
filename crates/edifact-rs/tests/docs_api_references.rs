@@ -32,6 +32,7 @@ fn docs_dir() -> PathBuf {
 /// truth; this mirrors it.
 const PUBLIC_API: &[&str] = &[
     // modules
+    "contrl",
     "de",
     "directory_validator",
     "group",
@@ -53,11 +54,32 @@ const PUBLIC_API: &[&str] = &[
     // character repertoires
     "Charset",
     "CharsetValidator",
+    "SyntaxValidator",
+    "severity_for_error",
+    // layout auditing
+    "LayoutAudit",
+    "LayoutFinding",
+    "LayoutSlot",
+    "audit_directory",
+    "Insignificant",
+    // data element representations
+    "Repr",
+    "ReprKind",
     "DecodingReader",
     "charset",
     "decode_interchange",
     "decode_reader",
     "sniff_charset",
+    "DecodingSegmentStream",
+    "from_bytes_decoded",
+    "from_bytes_decoded_with_config",
+    "from_reader_decoded",
+    "from_reader_decoded_with_config",
+    // CONTRL acknowledgements (ISO 9735-4)
+    "Action",
+    "Contrl",
+    "ReportingLevel",
+    "SyntaxError",
     // ISO 9735 service-segment layouts
     "service",
     // envelope
@@ -275,6 +297,11 @@ fn public_api_list_is_accurate() {
     // representative sample really is importable at the crate root.
     #[allow(unused_imports)]
     use edifact_rs::{
+        Action, Contrl, LayoutAudit, LayoutFinding, LayoutSlot, ReportingLevel, SyntaxError,
+        SyntaxValidator, from_bytes_decoded, from_reader_decoded,
+    };
+    #[allow(unused_imports)]
+    use edifact_rs::{
         AsDataElement, ComponentRef, DataElement, DirectoryValidator, EdifactError, Element,
         ElementPath, EventEmitter, LenientResult, OwnedComponentRef, OwnedSegment,
         OwnedSegmentStream, ProfileRulePack, ReaderConfig, Segment, SegmentLayout,
@@ -282,6 +309,8 @@ fn public_api_list_is_accurate() {
         ValidationReport, Writer, WriterEmitter, emit_sparse_segment, from_bytes,
         to_edifact_string, validate_envelope, validate_envelope_lenient,
     };
+    #[allow(unused_imports)]
+    use edifact_rs::{Insignificant, Repr, ReprKind, audit_directory};
 }
 
 /// Every `EdifactError` variant must have an entry in the error reference guide.

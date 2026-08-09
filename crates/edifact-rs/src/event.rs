@@ -28,6 +28,23 @@ pub enum EdifactEvent<'a> {
         /// Component text value.
         value: &'a str,
     },
+    /// The first component of a further occurrence of the current data element.
+    ///
+    /// The write-side mirror of [`Token::RepeatElement`][crate::Token::RepeatElement]:
+    /// the parser splits repeating data elements, so the serializer has to be
+    /// able to produce them, or a value that round-trips through a typed struct
+    /// comes back collapsed into one occurrence.
+    ///
+    /// Requires an active repetition separator — see
+    /// [`ServiceStringAdvice::is_repetition_active`][crate::ServiceStringAdvice::is_repetition_active].
+    /// Without one there is no byte to separate occurrences with, so
+    /// [`WriterEmitter`] returns
+    /// [`EdifactError::RepetitionSeparatorNotDeclared`] rather than emitting
+    /// output that reads back as a single occurrence.
+    RepeatElement {
+        /// First component of the new occurrence.
+        value: &'a str,
+    },
     /// End of the current segment.
     EndSegment,
 }
@@ -51,6 +68,11 @@ pub enum OwnedEdifactEvent {
         /// Component text value.
         value: String,
     },
+    /// Owned repetition event.
+    RepeatElement {
+        /// First component of the new occurrence.
+        value: String,
+    },
     /// Owned segment-end event.
     EndSegment,
 }
@@ -66,6 +88,9 @@ impl EdifactEvent<'_> {
                 value: value.to_owned(),
             },
             Self::ComponentElement { value } => OwnedEdifactEvent::ComponentElement {
+                value: value.to_owned(),
+            },
+            Self::RepeatElement { value } => OwnedEdifactEvent::RepeatElement {
                 value: value.to_owned(),
             },
             Self::EndSegment => OwnedEdifactEvent::EndSegment,
@@ -170,6 +195,32 @@ impl<W: Write> WriterEmitter<W> {
         })
     }
 
+    /// Bind this emitter's writer to a character repertoire.
+    ///
+    /// The typed serialization path had no way to reach
+    /// [`Writer::with_charset`][crate::Writer::with_charset], so a `#[derive(EdifactSerialize)]`
+    /// struct could only ever go out as UTF-8 — which is wrong for every
+    /// `UNOC`…`UNOK` partner, and wrong in the silent way: `ü` arrives as two
+    /// mojibake characters rather than as an error.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::{Charset, EdifactEvent, EventEmitter, WriterEmitter};
+    ///
+    /// let mut emitter = WriterEmitter::new(Vec::new()).with_charset(Charset::UnoC);
+    /// emitter.emit(EdifactEvent::StartSegment { tag: "NAD" })?;
+    /// emitter.emit(EdifactEvent::Element { value: "Müller" })?;
+    /// emitter.emit(EdifactEvent::EndSegment)?;
+    /// assert_eq!(emitter.finish()?, b"NAD+M\xFCller'".to_vec());
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    #[must_use]
+    pub fn with_charset(mut self, charset: crate::Charset) -> Self {
+        self.writer = self.writer.with_charset(charset);
+        self
+    }
+
     /// Flush and consume the emitter, returning the underlying writer.
     pub fn finish(self) -> Result<W, EdifactError> {
         self.writer.finish()
@@ -223,6 +274,17 @@ impl<W: Write> EventEmitter for WriterEmitter<W> {
                     });
                 }
                 self.writer.write_component_sep()?;
+                self.writer.write_escaped(value)?;
+            }
+            EdifactEvent::RepeatElement { value } => {
+                if self.state != EmitterState::InElement {
+                    return Err(EdifactError::InvalidEventSequence {
+                        message: "RepeatElement emitted without a preceding Element in the same segment",
+                    });
+                }
+                // Checked before the separator is written, so a rejected
+                // repetition leaves nothing half-emitted behind it.
+                self.writer.write_repetition_sep()?;
                 self.writer.write_escaped(value)?;
             }
             EdifactEvent::EndSegment => {
@@ -297,6 +359,66 @@ mod tests {
         }
         let s = std::str::from_utf8(&buf).unwrap();
         assert_eq!(s, "NAD+MS+9900112233445::293'");
+    }
+
+    #[test]
+    fn repetitions_round_trip_through_the_event_layer() {
+        // The parser splits repeating data elements, so the serializer has to be
+        // able to produce them — otherwise a value that goes out through a typed
+        // struct comes back collapsed into one occurrence.
+        let ssa = crate::ServiceStringAdvice::from_bytes(b"UNA:+.?*'").unwrap();
+        let mut buf = Vec::new();
+        {
+            let mut e = WriterEmitter::with_una(&mut buf, ssa).unwrap();
+            e.emit(EdifactEvent::StartSegment { tag: "RFF" }).unwrap();
+            e.emit(EdifactEvent::Element { value: "ON" }).unwrap();
+            e.emit(EdifactEvent::ComponentElement { value: "1" })
+                .unwrap();
+            e.emit(EdifactEvent::RepeatElement { value: "ON" }).unwrap();
+            e.emit(EdifactEvent::ComponentElement { value: "2" })
+                .unwrap();
+            e.emit(EdifactEvent::EndSegment).unwrap();
+            e.finish().unwrap();
+        }
+        assert_eq!(
+            std::str::from_utf8(&buf).unwrap(),
+            "UNA:+.?*'RFF+ON:1*ON:2'"
+        );
+
+        let segments: Vec<_> = crate::from_bytes(&buf)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let element = segments[0].get_element(0).unwrap();
+        assert_eq!(element.repeat_count(), 2);
+        assert_eq!(element.repetition(1).unwrap()[1].0, "2");
+    }
+
+    #[test]
+    fn a_repetition_without_a_declared_separator_is_refused() {
+        let mut e = WriterEmitter::new(Vec::<u8>::new());
+        e.emit(EdifactEvent::StartSegment { tag: "RFF" }).unwrap();
+        e.emit(EdifactEvent::Element { value: "ON" }).unwrap();
+        let err = e
+            .emit(EdifactEvent::RepeatElement { value: "ON" })
+            .unwrap_err();
+        assert!(
+            matches!(err, EdifactError::RepetitionSeparatorNotDeclared),
+            "expected RepetitionSeparatorNotDeclared, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_repetition_before_any_element_is_refused() {
+        let ssa = crate::ServiceStringAdvice::from_bytes(b"UNA:+.?*'").unwrap();
+        let mut e = WriterEmitter::with_una(Vec::<u8>::new(), ssa).unwrap();
+        e.emit(EdifactEvent::StartSegment { tag: "RFF" }).unwrap();
+        let err = e
+            .emit(EdifactEvent::RepeatElement { value: "ON" })
+            .unwrap_err();
+        assert!(
+            matches!(err, EdifactError::InvalidEventSequence { .. }),
+            "expected InvalidEventSequence, got {err:?}"
+        );
     }
 
     // ── protocol-violation tests (BUG 2.1) ───────────────────────────────────

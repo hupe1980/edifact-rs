@@ -248,6 +248,38 @@ is never handed out at all.
 
 ---
 
+## Parsing a fragment: `service_string_advice`
+
+`ReaderConfig` carries one non-budget field. By default `edifact-rs` discovers the
+service characters the way a receiver should — from a leading `UNA` if there is
+one, otherwise the ISO 9735-1 §5.1 defaults with the repetition separator
+resolved from the syntax version in `UNB` S001 DE 0002.
+
+A **fragment** has neither. A single message lifted out of an interchange carries
+no `UNA` and no `UNB`, so nothing in it records the delimiters its interchange
+declared — and parsing it with the defaults silently mis-splits every value.
+Supply them:
+
+```rust
+use edifact_rs::{ReaderConfig, ServiceStringAdvice, from_bytes_with_config};
+
+// The interchange this message came from declared `;` and `~`.
+let ssa = ServiceStringAdvice::from_bytes(b"UNA:;.? ~")?;
+let config = ReaderConfig::default().with_service_string_advice(ssa);
+
+let segments: Vec<_> = from_bytes_with_config(b"BGM;220;PO-4711~", config)
+    .collect::<Result<Vec<_>, _>>()?;
+assert_eq!(segments[0].element_str(1), Some("PO-4711"));
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+An explicit advice outranks a `UNA` in the input, so it doubles as the escape
+hatch when a partner's header disagrees with what they actually send. A malformed
+`UNA` is still rejected either way — the input is broken regardless of which
+delimiters you then use.
+
+---
+
 ## Envelope helpers
 
 Use `find_segment` and `find_qualified_segment` to locate specific segments without

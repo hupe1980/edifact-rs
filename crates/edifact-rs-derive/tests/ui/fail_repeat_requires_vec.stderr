@@ -1,0 +1,5 @@
+error: field `number`: #[edifact(repeat)] requires Vec<T> — a repeating data element has one occurrence per item
+  --> tests/ui/fail_repeat_requires_vec.rs:16:28
+   |
+16 |     #[edifact(element = 0, repeat)]
+   |                            ^^^^^^

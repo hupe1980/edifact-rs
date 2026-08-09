@@ -7,6 +7,37 @@ use std::sync::Arc;
 
 use crate::model::Span;
 
+/// The severity `edifact-rs` assigns to an [`EdifactError`][crate::EdifactError].
+///
+/// This is the **single** definition of that mapping. It backs
+/// [`ValidationReport`] entries and, with the `diagnostics` feature, the
+/// `miette::Diagnostic` impl on the error itself — two renderings of one
+/// interchange must not disagree about whether it is broken.
+///
+/// | Variant | Severity | Why |
+/// |---|---|---|
+/// | [`InvalidCodeValue`][crate::EdifactError::InvalidCodeValue] | `Warning` | Non-standard extension codes are common and often intentional. |
+/// | [`BlankDataElementValue`][crate::EdifactError::BlankDataElementValue] | `Warning` | Violates §9.3, but the value is still readable. |
+/// | [`TrailingSeparator`][crate::EdifactError::TrailingSeparator] | `Warning` | Violates §8.7.1/§8.7.2; a correct parser reads it anyway. |
+/// | [`InsignificantCharacters`][crate::EdifactError::InsignificantCharacters] | `Warning` | Violates §9.1; the value is still readable. |
+/// | everything else | `Error` | Structural violations, control-reference mismatches, parse faults. |
+///
+/// [`QualifierMismatch`][crate::EdifactError::QualifierMismatch] is deliberately
+/// *not* a warning: it is only ever raised for `UNZ`/`UNE`/`UNT` control-reference
+/// mismatches, which are hard ISO 9735-1 violations. Downgrading it let a spliced
+/// or truncated interchange pass `validate_strict`.
+#[must_use]
+pub fn severity_for_error(error: &crate::EdifactError) -> ValidationSeverity {
+    use crate::EdifactError as E;
+    match error {
+        E::InvalidCodeValue { .. }
+        | E::BlankDataElementValue { .. }
+        | E::TrailingSeparator { .. }
+        | E::InsignificantCharacters { .. } => ValidationSeverity::Warning,
+        _ => ValidationSeverity::Error,
+    }
+}
+
 // ── ValidationSeverity ────────────────────────────────────────────────────────
 
 /// Priority level for a validation error or warning.

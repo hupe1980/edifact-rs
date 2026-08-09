@@ -316,3 +316,60 @@ for result in from_reader(input) {
 - [Validation](@/docs/validation.md) — validate windows and messages
 - [Async Integration](@/docs/async-integration.md) — bridging to tokio
 - [Performance](@/docs/performance.md) — allocation analysis and benchmarks
+
+---
+
+## Decoding a stream without making it eager
+
+A `UNOC`…`UNOK` interchange has to be transcoded before it can be parsed, and the
+repertoire is declared inside the stream itself — so something has to read as far
+as the `UNB` before the first segment can come out.
+
+`decode_reader` does that read up front and therefore returns a `Result`. That is
+honest, but a `?` on it turns a lazy pipeline eager: a function returning
+`impl Iterator<Item = Result<T, E>>` suddenly has to return
+`Result<impl Iterator<…>>`, and callers end up boxing the iterator or wrapping the
+decode error in a one-item chain.
+
+`from_reader_decoded` keeps the signature a plain `Iterator` by deferring the
+sniff to the first `next()`:
+
+```rust
+use edifact_rs::from_reader_decoded;
+
+let mut raw = b"UNB+UNOC:3+S+R+260101:0900+IC1'NAD+BY+M".to_vec();
+raw.push(0xFC); // `ü` in ISO 8859-1
+raw.extend_from_slice(b"ller'UNZ+0+IC1'");
+
+// No `?` before the pipeline — construction cannot fail.
+let segments: Vec<_> = from_reader_decoded(std::io::Cursor::new(raw))
+    .collect::<Result<Vec<_>, _>>()?;
+assert_eq!(segments[1].element_str(1), Some("Müller"));
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+A repertoire this crate cannot decode — `UNOX`, `KECA` — arrives as the first
+item of the iterator, in the same shape as a parse error, and the iterator then
+ends:
+
+```rust
+# use edifact_rs::{EdifactError, from_reader_decoded};
+let raw = b"UNB+UNOX:3+S+R+260101:0900+IC1'UNZ+0+IC1'";
+let mut stream = from_reader_decoded(std::io::Cursor::new(&raw[..]));
+
+assert!(matches!(
+    stream.next().unwrap(),
+    Err(EdifactError::UnsupportedCharset { .. })
+));
+assert!(stream.next().is_none());
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+`from_bytes_decoded` is the slice counterpart. It returns owned segments and a
+`Result`, because an ISO 8859-1 payload has to be transcoded to exist as UTF-8 at
+all and the decoded buffer belongs to the call. When you want to keep the
+zero-copy path, hold the buffer yourself: `decode_interchange` then `from_bytes`.
+
+Reach for the decoding entry points by default. A `UNOC` corpus that happens to
+be stored as UTF-8 parses fine without them — so the tests pass, and the first
+*conformant* counterparty message is the one that fails.

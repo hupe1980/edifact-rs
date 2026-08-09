@@ -23,7 +23,7 @@ fn check_layout_tag<L: SegmentLayout + ?Sized>(
 }
 
 /// A half-open byte span within an EDIFACT payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Span {
     /// Start byte offset (inclusive).
@@ -278,7 +278,7 @@ pub type OwnedComponents = SmallVec<[(String, Span); 4]>;
 /// Each entry is a `(value, span)` pair, guaranteeing that the component
 /// string and its byte span are always in sync.
 ///
-/// # Repetition (ISO 9735-4 §3.1)
+/// # Repetition (ISO 9735-1 §8.6)
 ///
 /// [`components`][Self::components] holds the **first** repetition, which is the
 /// only one for every interchange that does not declare a repetition separator
@@ -384,7 +384,7 @@ impl<'a> Element<'a> {
         self
     }
 
-    /// Append a further repetition of this data element (ISO 9735-4 §3.1).
+    /// Append a further repetition of this data element (ISO 9735-1 §8.6).
     ///
     /// Useful when building segments for [`Writer::write_segment`][crate::Writer::write_segment];
     /// the writer joins repetitions with the active repetition separator.
@@ -414,7 +414,7 @@ pub struct OwnedElement {
     pub span: Span,
     /// Components of the first repetition, in positional order.
     pub components: OwnedComponents,
-    /// Second and subsequent repetitions (ISO 9735-4 §3.1); usually empty.
+    /// Second and subsequent repetitions (ISO 9735-1 §8.6); usually empty.
     pub repeats: Vec<OwnedComponents>,
 }
 
@@ -458,7 +458,7 @@ impl OwnedElement {
         self
     }
 
-    /// Append a further repetition of this data element (ISO 9735-4 §3.1).
+    /// Append a further repetition of this data element (ISO 9735-1 §8.6).
     ///
     /// The owned counterpart of [`Element::and_repeat`].
     #[must_use]

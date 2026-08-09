@@ -1,6 +1,6 @@
 +++
 title = "Documentation"
-description = "Guides for edifact-rs: parsing, writing, typed derive macros, streaming, validation, profile packs, diagnostics, and performance tuning for EDIFACT in Rust."
+description = "Guides for edifact-rs: parsing, writing, typed derive macros, streaming, validation, profile packs, CONTRL acknowledgements, diagnostics, and performance tuning for EDIFACT in Rust."
 sort_by = "weight"
 template = "docs-section.html"
 page_template = "docs-page.html"

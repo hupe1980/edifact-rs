@@ -59,6 +59,43 @@
 //! requirement.  When you need contiguity enforced, use
 //! [`contiguous_groups_by_qualifier`] directly on the parsed segments.
 //!
+//! # `#[edifact(repeat)]` — a repeating *data element*
+//!
+//! `group` repeats the **segment**; `repeat` repeats the **data element inside
+//! one segment** (ISO 9735-1 §8.6). Both are `Vec<T>` in Rust and nothing but
+//! the attribute can tell them apart:
+//!
+//! ```text
+//! RFF+ON:1'RFF+ON:2'      two RFF segments        → #[edifact(group)]
+//! RFF+ON:1*ON:2           one RFF, two occurrences → #[edifact(repeat)]
+//! ```
+//!
+//! A repetition separator divides whole occurrences, so every component of the
+//! element is transferred in each one — which is why the qualifier `ON` above
+//! appears twice. The derive handles that: a non-repeating field in the same
+//! element is emitted once per occurrence, and a repeating one contributes its
+//! *k*-th item.
+//!
+//! ```ignore
+//! #[derive(EdifactDeserialize, EdifactSerialize)]
+//! #[edifact(segment = "RFF")]
+//! struct OrderReferences {
+//!     #[edifact(element = 0, component = 0)]
+//!     qualifier: String,                     // "ON", in every occurrence
+//!     #[edifact(element = 0, component = 1, repeat)]
+//!     numbers: Vec<String>,                  // ["1", "2"]
+//! }
+//! ```
+//!
+//! An occurrence that omits the component yields `""` rather than being dropped:
+//! §8.7.3 makes the position of an occurrence significant, so `DE*DE***DE`
+//! deliberately transfers two empty ones. An empty `Vec` emits the element as
+//! absent, which keeps the elements after it in position (§8.7.1).
+//!
+//! Writing a repetition needs an active repetition separator; without one the
+//! writer returns `RepetitionSeparatorNotDeclared` (`E037`) rather than emitting
+//! output that reads back as a single occurrence.
+//!
 //! [`contiguous_groups_by_qualifier`]: https://docs.rs/edifact-rs/latest/edifact_rs/fn.contiguous_groups_by_qualifier.html
 //!
 //! # `#[edifact(required)]` on `Option<T>` fields
@@ -234,6 +271,15 @@ struct FieldAttrs {
     /// mandatory but which your domain model represents as optional for other reasons.
     required: bool,
     required_span: Option<proc_macro2::Span>,
+    /// `#[edifact(repeat)]` — `Vec<T>`: the *data element* repeats within one
+    /// segment (ISO 9735-1 §8.6), rather than the segment repeating.
+    ///
+    /// Distinct from `group`, which is about repeated segments. `RFF+ON:1*ON:2`
+    /// is one `RFF` whose element 0 occurs twice; `RFF+ON:1'RFF+ON:2'` is two
+    /// `RFF` segments. Both are `Vec<T>` in Rust and nothing but the attribute
+    /// can tell them apart.
+    repeat: bool,
+    repeat_span: Option<proc_macro2::Span>,
 }
 
 // ── attribute parsing ──────────────────────────────────────────────────────────
@@ -405,8 +451,11 @@ fn parse_field_attrs(field: &Field) -> syn::Result<FieldAttrs> {
             } else if meta.path.is_ident("required") {
                 out.required = true;
                 out.required_span = Some(meta.path.span());
+            } else if meta.path.is_ident("repeat") {
+                out.repeat = true;
+                out.repeat_span = Some(meta.path.span());
             } else {
-                return Err(meta.error("unknown field-level `edifact` key; expected `element`, `component`, `composite`, `group`, `qualifier`, or `required`"));
+                return Err(meta.error("unknown field-level `edifact` key; expected `element`, `component`, `composite`, `group`, `qualifier`, `repeat`, or `required`"));
             }
             Ok(())
         })?;
@@ -954,6 +1003,42 @@ fn validate_field_attrs(
             ),
         ));
     }
+    if attrs.repeat && !is_vec_type(ty) {
+        return Err(syn::Error::new(
+            attrs.repeat_span.unwrap_or_else(|| ident.span()),
+            format!(
+                "field `{ident}`: #[edifact(repeat)] requires Vec<T> — a repeating data element \
+                 has one occurrence per item"
+            ),
+        ));
+    }
+    if attrs.repeat && !is_segment_struct {
+        return Err(syn::Error::new(
+            attrs.repeat_span.unwrap_or_else(|| ident.span()),
+            format!(
+                "field `{ident}`: #[edifact(repeat)] is only valid on segment structs; a message \
+                 struct repeats whole segments, which is #[edifact(group)]"
+            ),
+        ));
+    }
+    if attrs.repeat && attrs.group {
+        return Err(syn::Error::new(
+            attrs.repeat_span.unwrap_or_else(|| ident.span()),
+            format!(
+                "field `{ident}`: #[edifact(repeat)] repeats a data element inside one segment; \
+                 #[edifact(group)] repeats the segment itself — they are different structures"
+            ),
+        ));
+    }
+    if attrs.repeat && attrs.composite {
+        return Err(syn::Error::new(
+            attrs.repeat_span.unwrap_or_else(|| ident.span()),
+            format!(
+                "field `{ident}`: #[edifact(repeat)] cannot be combined with \
+                 #[edifact(composite)]; map one component across the occurrences instead"
+            ),
+        ));
+    }
     if attrs.composite && attrs.component.is_some() {
         return Err(syn::Error::new(
             attrs.component_span.unwrap_or_else(|| ident.span()),
@@ -1230,14 +1315,6 @@ fn impl_serialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
         // `DTM+137:20260101:102'`, and the loss was invisible until a partner
         // rejected the file.
 
-        /// What occupies one `(element, component)` cell of the layout.
-        enum Cell {
-            /// The struct-level `#[edifact(qualifier = "…")]`, which owns (0, 0).
-            Qualifier,
-            /// An index into `field_data`.
-            Field(usize),
-        }
-
         let mut grid: std::collections::BTreeMap<u32, std::collections::BTreeMap<u32, Cell>> =
             std::collections::BTreeMap::new();
 
@@ -1291,6 +1368,66 @@ fn impl_serialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     continue;
                 };
                 let max_component = components.keys().max().copied().unwrap_or(0);
+
+                // A repetition separator divides whole occurrences, so an
+                // element with any repeating field is emitted as a unit: every
+                // component is re-stated for each occurrence.
+                let repeating: Vec<u32> = components
+                    .iter()
+                    .filter_map(|(component, cell)| match cell {
+                        Cell::Field(index) if field_data[*index].2.repeat => Some(*component),
+                        _ => None,
+                    })
+                    .collect();
+                if !repeating.is_empty() {
+                    if let Some(&component) = components.iter().find_map(|(c, cell)| match cell {
+                        Cell::Field(index) if field_data[*index].2.composite => Some(c),
+                        _ => None,
+                    }) {
+                        let (ident, _, _) = &field_data[match components[&component] {
+                            Cell::Field(index) => index,
+                            Cell::Qualifier => unreachable!("a qualifier is not composite"),
+                        }];
+                        return Err(syn::Error::new(
+                            ident.span(),
+                            format!(
+                                "field `{ident}`: a data element cannot hold both a \
+                                 #[edifact(composite)] field and a #[edifact(repeat)] one — the \
+                                 composite already spans the whole element"
+                            ),
+                        ));
+                    }
+                    let cells: Vec<Option<(&syn::Ident, &Type, bool)>> = (0..=max_component)
+                        .map(|component| match components.get(&component) {
+                            Some(Cell::Field(index)) => {
+                                let (ident, ty, attrs) = &field_data[*index];
+                                Some((*ident, *ty, attrs.repeat))
+                            }
+                            // The struct-level qualifier is a literal, not a
+                            // field, and it is always at component 0 — where a
+                            // repeating element's qualifier belongs anyway.
+                            Some(Cell::Qualifier) | None => None,
+                        })
+                        .collect();
+                    let mut cells = cells;
+                    if matches!(components.get(&0), Some(Cell::Qualifier)) {
+                        let qual = struct_attrs.qualifier.clone().unwrap_or_default();
+                        let literal = syn::LitStr::new(&qual, proc_macro2::Span::call_site());
+                        elem_stmts.push(emit_repeating_element_with_qualifier(
+                            &literal,
+                            &cells[1..],
+                            &repeat_lengths(&field_data, components),
+                        ));
+                        continue;
+                    }
+                    cells.truncate(usize::try_from(max_component).unwrap_or(0) + 1);
+                    elem_stmts.push(emit_repeating_element(
+                        &cells,
+                        &repeat_lengths(&field_data, components),
+                    ));
+                    continue;
+                }
+
                 for component in 0..=max_component {
                     match components.get(&component) {
                         Some(Cell::Qualifier) => {
@@ -1355,6 +1492,203 @@ fn impl_serialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
             }
         }
     })
+}
+
+/// Generate the `let` binding that reads a `#[edifact(repeat)]` field.
+///
+/// One item per occurrence of the data element, taken from the same component
+/// position in each — `RFF+ON:1*ON:2` at component 1 is `["1", "2"]`.
+///
+/// A missing element yields an empty `Vec` rather than an error: the field is a
+/// collection, and "no occurrences" is what an absent repeating element means.
+fn repeating_field_init(
+    ident: &syn::Ident,
+    ty: &Type,
+    element: &TokenStream2,
+    component: &TokenStream2,
+    owned: bool,
+) -> syn::Result<TokenStream2> {
+    let inner = vec_inner_type(ty).ok_or_else(|| {
+        syn::Error::new(
+            ident.span(),
+            format!("field `{ident}`: #[edifact(repeat)] requires Vec<T>"),
+        )
+    })?;
+    let reader = if owned {
+        quote! { ::edifact_rs::repeated_components_owned }
+    } else {
+        quote! { ::edifact_rs::repeated_components }
+    };
+    // `&str` items would borrow from the segment, which the owned path cannot
+    // offer and the borrowed path only can with a lifetime the derive does not
+    // thread; `String` and parsed scalars cover the real cases.
+    let convert = if is_string_type(inner) {
+        quote! { ::core::result::Result::Ok(::std::string::ToString::to_string(__value)) }
+    } else {
+        let message = format!(
+            "field `{ident}`: repeating value is not a valid {}",
+            quote!(#inner)
+        );
+        quote! {
+            __value.parse::<#inner>().map_err(|_| ::edifact_rs::EdifactError::InvalidFieldValue {
+                tag: __seg.tag.to_string(),
+                element_index: #element,
+                value: ::std::format!("{}: {}", #message, __value),
+            })
+        }
+    };
+    Ok(quote! {
+        let #ident = #reader(__seg, #element, #component)
+            .map(|__value| #convert)
+            .collect::<::core::result::Result<::std::vec::Vec<#inner>, ::edifact_rs::EdifactError>>()?;
+    })
+}
+
+/// What occupies one `(element, component)` cell of a segment's layout.
+enum Cell {
+    /// The struct-level `#[edifact(qualifier = "…")]`, which owns (0, 0).
+    Qualifier,
+    /// An index into `field_data`.
+    Field(usize),
+}
+
+/// `Vec::len()` expressions for every repeating field of one element.
+fn repeat_lengths(
+    field_data: &[(&syn::Ident, &Type, FieldAttrs)],
+    components: &std::collections::BTreeMap<u32, Cell>,
+) -> Vec<TokenStream2> {
+    components
+        .values()
+        .filter_map(|cell| match cell {
+            Cell::Field(index) if field_data[*index].2.repeat => {
+                let ident = field_data[*index].0;
+                Some(quote! { self.#ident.len() })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// [`emit_repeating_element`] for an element whose component 0 is the
+/// struct-level qualifier literal rather than a field.
+fn emit_repeating_element_with_qualifier(
+    qualifier: &syn::LitStr,
+    rest: &[Option<(&syn::Ident, &Type, bool)>],
+    lengths: &[TokenStream2],
+) -> TokenStream2 {
+    let values: Vec<TokenStream2> = rest
+        .iter()
+        .map(|cell| match cell {
+            Some((ident, ty, repeat)) => occurrence_value(ident, ty, *repeat),
+            None => quote! { ::std::borrow::Cow::Borrowed("") },
+        })
+        .collect();
+    quote! {
+        {
+            let __n = ::core::cmp::max(1usize, [#(#lengths),*].into_iter().max().unwrap_or(0));
+            for __k in 0..__n {
+                let __event = if __k == 0 {
+                    ::edifact_rs::EdifactEvent::Element { value: #qualifier }
+                } else {
+                    ::edifact_rs::EdifactEvent::RepeatElement { value: #qualifier }
+                };
+                emitter.emit(__event)?;
+                #(
+                    let __v = #values;
+                    emitter.emit(::edifact_rs::EdifactEvent::ComponentElement {
+                        value: __v.as_ref(),
+                    })?;
+                )*
+            }
+        }
+    }
+}
+
+/// One component's value at occurrence `__k`, as a `Cow<str>` expression.
+///
+/// A repeating field takes its `__k`-th item; a non-repeating one is constant
+/// across occurrences, which is exactly right for `RFF+ON:1*ON:2` — the
+/// qualifier `ON` belongs to every occurrence, and the standard requires it to
+/// be transferred in each.
+fn occurrence_value(ident: &syn::Ident, ty: &Type, repeat: bool) -> TokenStream2 {
+    let empty = quote! { ::std::borrow::Cow::Borrowed("") };
+    if repeat {
+        let inner_is_str = vec_inner_type(ty).is_some_and(is_str_like);
+        let map = if inner_is_str {
+            quote! { |__v| ::std::borrow::Cow::Borrowed(__v.as_ref()) }
+        } else {
+            quote! { |__v| ::std::borrow::Cow::Owned(::std::string::ToString::to_string(__v)) }
+        };
+        return quote! { self.#ident.get(__k).map(#map).unwrap_or(#empty) };
+    }
+    if is_option_type(ty) {
+        return if option_inner_type(ty).is_some_and(is_str_like) {
+            quote! {
+                self.#ident
+                    .as_deref()
+                    .map(::std::borrow::Cow::Borrowed)
+                    .unwrap_or(#empty)
+            }
+        } else {
+            quote! {
+                self.#ident
+                    .as_ref()
+                    .map(|__v| ::std::borrow::Cow::Owned(::std::string::ToString::to_string(__v)))
+                    .unwrap_or(#empty)
+            }
+        };
+    }
+    if is_string_type(ty) {
+        quote! { ::std::borrow::Cow::Borrowed(self.#ident.as_str()) }
+    } else if is_str_ref_type(ty) {
+        quote! { ::std::borrow::Cow::Borrowed(self.#ident) }
+    } else {
+        quote! { ::std::borrow::Cow::Owned(::std::string::ToString::to_string(&self.#ident)) }
+    }
+}
+
+/// Emit a data element that repeats (ISO 9735-1 §8.6).
+///
+/// The repetition separator divides whole **occurrences**, not components, so
+/// every component of the element is re-emitted for each one — `RFF+ON:1*ON:2`
+/// carries its `ON` qualifier twice. `components` is the element's full
+/// component list in order; `None` is a gap that stays empty.
+///
+/// The occurrence count is the longest repeating field in the element, and at
+/// least one: an element with no occurrences is still transferred, as absent,
+/// which is what keeps the elements after it in position (§8.7.1).
+fn emit_repeating_element(
+    components: &[Option<(&syn::Ident, &Type, bool)>],
+    lengths: &[TokenStream2],
+) -> TokenStream2 {
+    let values: Vec<TokenStream2> = components
+        .iter()
+        .map(|cell| match cell {
+            Some((ident, ty, repeat)) => occurrence_value(ident, ty, *repeat),
+            None => quote! { ::std::borrow::Cow::Borrowed("") },
+        })
+        .collect();
+    let (first, rest) = values.split_first().expect("an element has ≥1 component");
+    quote! {
+        {
+            let __n = ::core::cmp::max(1usize, [#(#lengths),*].into_iter().max().unwrap_or(0));
+            for __k in 0..__n {
+                let __v = #first;
+                let __event = if __k == 0 {
+                    ::edifact_rs::EdifactEvent::Element { value: __v.as_ref() }
+                } else {
+                    ::edifact_rs::EdifactEvent::RepeatElement { value: __v.as_ref() }
+                };
+                emitter.emit(__event)?;
+                #(
+                    let __v = #rest;
+                    emitter.emit(::edifact_rs::EdifactEvent::ComponentElement {
+                        value: __v.as_ref(),
+                    })?;
+                )*
+            }
+        }
+    }
 }
 
 /// Generate the token stream that emits field `ident` (of type `ty`) as one element.
@@ -1554,6 +1888,9 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .zip(slots.iter())
             .map(|((ident, ty, attrs), slot)| -> syn::Result<TokenStream2> {
                 let idx = &slot.element;
+                if attrs.repeat {
+                    return repeating_field_init(ident, ty, &slot.element, &slot.component, false);
+                }
                 if attrs.composite {
                     if is_option_type(ty) {
                         let inner_ty = option_inner_type(ty)
@@ -1748,6 +2085,9 @@ fn impl_deserialize(input: &DeriveInput) -> syn::Result<TokenStream2> {
             .zip(slots.iter())
             .map(|((ident, ty, attrs), slot)| -> syn::Result<TokenStream2> {
                 let idx = &slot.element;
+                if attrs.repeat {
+                    return repeating_field_init(ident, ty, &slot.element, &slot.component, true);
+                }
                 if attrs.composite {
                     if is_option_type(ty) {
                         let inner_ty = option_inner_type(ty)

@@ -1,4 +1,4 @@
-//! ISO 9735-4 §3.1 repeating data elements.
+//! ISO 9735-1 §8.6 repeating data elements.
 //!
 //! Syntax version 4 lets a `UNA` declare a repetition separator at position 7,
 //! turning `RFF+ON:1*ON:2` into one data element with two occurrences. Before
@@ -277,4 +277,122 @@ fn a_rejected_repetition_writes_no_bytes_at_all() {
             .expect("write after a rejected segment");
     }
     assert_eq!(buf, b"BGM+220'");
+}
+
+// ── typed mapping (#[edifact(repeat)]) ────────────────────────────────────────
+//
+// Gated: the derive macros come from the default `derive` feature, and the rest
+// of this file must still build without it.
+#[cfg(feature = "derive")]
+mod typed {
+    use edifact_rs::{EdifactDeserialize, EdifactSerialize};
+
+    /// `RFF+ON:1*ON:2*ON:3'` — one data element, three occurrences.
+    ///
+    /// Without `repeat`, a `Vec<T>` on a segment struct means *repeated segments*.
+    /// The two shapes are indistinguishable in Rust, so the attribute is what says
+    /// which one the wire carries.
+    #[derive(Debug, PartialEq, edifact_rs::EdifactDeserialize, edifact_rs::EdifactSerialize)]
+    #[edifact(segment = "RFF")]
+    struct OrderReferences {
+        #[edifact(element = 0, component = 0)]
+        qualifier: String,
+        #[edifact(element = 0, component = 1, repeat)]
+        numbers: Vec<String>,
+    }
+
+    fn v4_advice() -> edifact_rs::ServiceStringAdvice {
+        edifact_rs::ServiceStringAdvice::from_bytes(b"UNA:+.?*'").expect("UNA")
+    }
+
+    #[test]
+    fn a_repeating_element_deserializes_into_a_vec() {
+        let segments: Vec<_> = edifact_rs::from_bytes(b"UNA:+.?*'RFF+ON:1*ON:2*ON:3'")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
+        let rff = OrderReferences::edifact_deserialize(&segments).expect("deserialize");
+
+        assert_eq!(rff.qualifier, "ON");
+        assert_eq!(rff.numbers, ["1", "2", "3"]);
+    }
+
+    #[test]
+    fn the_owned_path_agrees_with_the_borrowed_one() {
+        let owned: Vec<_> = edifact_rs::from_bytes_owned(b"UNA:+.?*'RFF+ON:1*ON:2*ON:3'")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
+        let from_owned = OrderReferences::edifact_deserialize_owned(&owned).expect("deserialize");
+
+        let borrowed: Vec<_> = owned
+            .iter()
+            .map(edifact_rs::OwnedSegment::as_borrowed)
+            .collect();
+        let from_borrowed = OrderReferences::edifact_deserialize(&borrowed).expect("deserialize");
+
+        assert_eq!(from_owned, from_borrowed);
+    }
+
+    #[test]
+    fn a_repeating_element_round_trips_through_the_typed_layer() {
+        // The point of the attribute: what the parser split, the serializer rejoins.
+        let input = b"UNA:+.?*'RFF+ON:1*ON:2*ON:3'";
+        let segments: Vec<_> = edifact_rs::from_bytes(input)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
+        let rff = OrderReferences::edifact_deserialize(&segments).expect("deserialize");
+
+        let mut buf = Vec::new();
+        {
+            let mut emitter =
+                edifact_rs::WriterEmitter::with_una(&mut buf, v4_advice()).expect("UNA");
+            rff.edifact_serialize(&mut emitter).expect("serialize");
+            emitter.finish().expect("finish");
+        }
+        assert_eq!(buf, input.to_vec());
+    }
+
+    #[test]
+    fn an_omitted_occurrence_keeps_its_position() {
+        // ISO 9735-1 §8.7.3: the position of an occurrence is significant, so an
+        // omitted one keeps its separator and must not shift the others left.
+        let segments: Vec<_> = edifact_rs::from_bytes(b"UNA:+.?*'RFF+ON:1*ON:*ON:3'")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
+        let rff = OrderReferences::edifact_deserialize(&segments).expect("deserialize");
+        assert_eq!(rff.numbers, ["1", "", "3"]);
+    }
+
+    #[test]
+    fn an_empty_vec_emits_the_element_as_absent() {
+        let rff = OrderReferences {
+            qualifier: "ON".to_owned(),
+            numbers: vec![],
+        };
+        let mut buf = Vec::new();
+        {
+            let mut emitter =
+                edifact_rs::WriterEmitter::with_una(&mut buf, v4_advice()).expect("UNA");
+            rff.edifact_serialize(&mut emitter).expect("serialize");
+            emitter.finish().expect("finish");
+        }
+        assert_eq!(String::from_utf8(buf).unwrap(), "UNA:+.?*'RFF+ON:'");
+    }
+
+    #[test]
+    fn writing_a_repetition_without_a_separator_is_refused() {
+        // The default advice has no repetition separator, so there is no byte to
+        // put between occurrences — joining them anyway would read back as one.
+        let rff = OrderReferences {
+            qualifier: "ON".to_owned(),
+            numbers: vec!["1".to_owned(), "2".to_owned()],
+        };
+        let err = edifact_rs::to_bytes(&rff).expect_err("must refuse");
+        assert!(
+            matches!(
+                err,
+                edifact_rs::EdifactError::RepetitionSeparatorNotDeclared
+            ),
+            "expected RepetitionSeparatorNotDeclared, got {err:?}"
+        );
+    }
 }

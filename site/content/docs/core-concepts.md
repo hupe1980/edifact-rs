@@ -27,13 +27,13 @@ separated by `:`.
 
 ```text
 UNA:+.? '
-UNB+UNOA:1+SENDER:14+RECEIVER:14+200101:0900+1'
-UNH+1+ORDERS:D:96A:UN+MYREF'
+UNB+UNOA:3+SENDER:14+RECEIVER:14+260101:0900+IC4711'
+UNH+MSG1+ORDERS:D:96A:UN+MYREF'
 BGM+220+PO-4711+9'
 NAD+BY+4000001000002::9'
 NAD+SU+4000001000001::9'
-UNT+6+1'
-UNZ+1+1'
+UNT+5+MSG1'
+UNZ+1+IC4711'
 ```
 
 | Part | Purpose |
@@ -57,34 +57,63 @@ service characters in fixed positions:
 ```text
 U N A : + . ?   '
       │ │ │ │ │ └── Segment terminator   (default: ' )
-      │ │ │ │ └──── Repetition separator (default: space = "not used")
+      │ │ │ │ └──── Repetition separator (`*`, or space = "not used")
       │ │ │ └────── Release character    (default: ? )
-      │ │ └──────── Decimal mark         (default: . )
+      │ │ └──────── Decimal mark         (ignored on receipt)
       │ └────────── Element separator    (default: + )
       └──────────── Component separator  (default: : )
 ```
 
-| UNA byte | Purpose | Default | Splits input? |
-|---|---|---|---|
-| 3 | Component data element separator | `:` | yes |
-| 4 | Data element separator | `+` | yes |
-| 5 | Decimal mark | `.` | no — read by `DecimalFloat` when writing |
-| 6 | Release (escape) character | `?` | escapes the next byte |
-| 7 | Repetition separator (ISO 9735-4 §3.1) | space | yes, **when not a space** |
-| 8 | Segment terminator | `'` | yes |
+ISO 9735-1 numbers these positions `010`–`060`; the byte offsets below are the
+same six characters counted from the start of the input.
+
+| UNA byte | Position | Purpose | Default | Splits input? |
+|---|---|---|---|---|
+| 3 | 010 | Component data element separator | `:` | yes |
+| 4 | 020 | Data element separator | `+` | yes |
+| 5 | 030 | Decimal mark | `.` | no — see below |
+| 6 | 040 | Release (escape) character | `?` | escapes the next byte |
+| 7 | 050 | Repetition separator | `*` | yes, **when not a space** |
+| 8 | 060 | Segment terminator | `'` | yes |
 
 `edifact-rs` reads the UNA on the first call to `from_bytes` / `from_reader` and
-applies the custom delimiters for all subsequent parsing. If UNA is absent, the six
-EDIFACT defaults shown above are used.
+applies those delimiters to everything that follows.
 
-A space at position 7 is the conventional "not used" sentinel, and virtually every
-real-world interchange carries it. When a UNA declares a real separator there —
-syntax version 4 does — the tokenizer splits on it; see
-[Repeating data elements](#repeating-data-elements) below.
+**The decimal mark is ignored.** ISO 9735-1 Annex B keeps position 030 only for
+upward compatibility with earlier syntax versions and says the character
+transferred there "shall be ignored by the recipient" — §10 instead allows the
+full stop *or* the comma per individual numeric value. It is therefore the one
+position where a space is legal, the one that need not be distinct from the
+others, and the only one `edifact-rs` does not validate. The value is still kept,
+so a writer can round-trip the UNA it was handed and `DecimalFloat` has a house
+style to format with.
 
-> **Security note**: `edifact-rs` fails hard on a malformed UNA (wrong byte count,
-> duplicate delimiter bytes, alphanumeric delimiters) and never silently falls back
-> to defaults. This prevents delimiter injection attacks.
+**The repetition separator depends on the syntax version.** Version 4 introduced
+it and §5.1 makes `*` its default; versions 1–3 have no such service character at
+all, and their UNA carries a space in that position. With no UNA to say
+otherwise, `edifact-rs` reads the version from `UNB` S001 DE 0002 and activates
+`*` only for version 4 — splitting on `*` in a version 3 interchange would
+corrupt every value containing one, because there `*` is an ordinary level A
+character. See [Repeating data elements](#repeating-data-elements) below.
+
+For a fragment that carries neither a UNA nor a UNB — a single message lifted out
+of an interchange — nothing records the delimiters, so supply them:
+
+```rust
+use edifact_rs::{ReaderConfig, ServiceStringAdvice, from_bytes_with_config};
+
+let ssa = ServiceStringAdvice::from_bytes(b"UNA:;.? ~")?;
+let config = ReaderConfig::default().with_service_string_advice(ssa);
+
+let segments: Vec<_> = from_bytes_with_config(b"BGM;220;PO-4711~", config)
+    .collect::<Result<Vec<_>, _>>()?;
+assert_eq!(segments[0].element_str(1), Some("PO-4711"));
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+> **Security note**: `edifact-rs` fails hard on a malformed UNA — wrong byte
+> count, a duplicated *active* delimiter, an alphanumeric delimiter — and never
+> silently falls back to defaults. This prevents delimiter injection attacks.
 
 ---
 
@@ -104,12 +133,17 @@ BGM  +  220  +  PO-4711  +  9  '
  │       │         │        │
  tag   elem 0   elem 1   elem 2 (all single-component)
 
-NAD + BY + 4000001000002 :: 9 '
- │     │         │          │
- tag  elem 0   elem 1        └── component 1 of elem 1
-              │
-              component 0 of elem 1
+NAD+BY+4000001000002::9'
+ │   │        │         │
+ │   │        │         └── component 2 of element 1
+ │   │        └──────────── component 0 of element 1
+ │   └───────────────────── element 0 (one component)
+ └───────────────────────── tag
 ```
+
+The `::` is not a typo. Component 1 is *omitted*, and its position is held by the
+separator that would have followed it (ISO 9735-1 §8.7.2) — so the agency
+qualifier stays at component 2 rather than sliding into component 1.
 
 Element 0 of `NAD` is `BY` — this is the **qualifier**. `edifact-rs` derive macros
 use `qualifier_from = 0` to dispatch different Rust structs for `NAD+BY` vs `NAD+SU`.
@@ -159,7 +193,7 @@ the `SmallVec<[(Cow<'a, str>, Span); 4]>` per element are allocated.
 pub struct Element<'a> {
     pub span: Span,
     pub components: Components<'a>,       // (value, span) — inline for ≤4 components
-    pub repeats: Vec<Components<'a>>,     // ISO 9735-4 repetitions; usually empty
+    pub repeats: Vec<Components<'a>>,     // further occurrences; usually empty
 }
 ```
 
@@ -169,8 +203,9 @@ from the raw bytes).
 
 ### Repeating data elements
 
-ISO 9735-4 §3.1 lets one data element occur several times in a single slot,
-separated by the repetition separator from UNA position 7:
+ISO 9735-1 §8.6 lets one data element occur several times in a single slot,
+separated by the repetition separator — UNA position 050, or `*` by default in a
+syntax version 4 interchange:
 
 ```text
 RFF+ON:1*ON:2*ON:3'
@@ -198,8 +233,8 @@ assert_eq!(all, ["1", "2"]);
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-Without a declared separator the byte is ordinary data: `RFF+ON:1*ON:2'` parsed
-with default delimiters yields the single component `1*ON`. A value that legitimately
+Without an active separator the byte is ordinary data: `RFF+ON:1*ON:2'` in a
+syntax version 3 interchange yields the single component `1*ON`. A value that legitimately
 contains the separator is release-escaped by the writer and unescaped on the way
 back in, so `a?*b` round-trips as `a*b`.
 

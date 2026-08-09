@@ -6,40 +6,59 @@
 use crate::{error::EdifactError, model::Span};
 use memchr::{memchr, memchr2, memchr3};
 
-/// EDIFACT service string advice (UNA segment).
+/// EDIFACT service string advice — the six characters of the `UNA`
+/// (ISO 9735-1 Annex B).
 ///
-/// Defaults: `+` (element), `:` (component), `?` (release), `.` (decimal mark),
-/// `*` (repetition separator), `'` (segment terminator).
+/// The five *active* service characters — component separator, element
+/// separator, release character, repetition separator, and segment terminator —
+/// are what [`is_valid`][Self::is_valid] enforces: printable non-alphanumeric
+/// ASCII, mutually distinct, so a collision between the repetition separator and
+/// any other delimiter, or a delimiter that would clash with segment-tag
+/// characters, is caught at UNA parse time.
 ///
-/// All six service characters are first-class fields.  [`is_valid`][Self::is_valid]
-/// checks all six for mutual distinctness and for being printable, non-alphanumeric
-/// ASCII, so a collision between the repetition separator and any other delimiter —
-/// or a delimiter that would clash with segment-tag characters — is caught at UNA
-/// parse time.
+/// The decimal mark is deliberately **not** in that set; see
+/// [`decimal_mark`][Self::decimal_mark].
+///
+/// # Defaults
+///
+/// ISO 9735-1 §5.1 fixes the defaults as `:` (component), `+` (element), `?`
+/// (release), `*` (repetition), `'` (terminator). Syntax version 4 is the
+/// version that defines the repetition separator at all: in versions 1–3 that
+/// UNA position is reserved and carries a space. [`Default`] is therefore the
+/// version-agnostic reading — everything per §5.1 **except** repetition, which
+/// stays inactive until something says the interchange is version 4. See
+/// [`for_syntax_version`][Self::for_syntax_version].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ServiceStringAdvice {
-    /// Data element separator (default `+`)
+    /// Data element separator (default `+`; `UNA` position 020)
     pub element_sep: u8,
-    /// Component data element separator (default `:`)
+    /// Component data element separator (default `:`; `UNA` position 010)
     pub component_sep: u8,
-    /// Release character (default `?`)
+    /// Release character (default `?`; `UNA` position 040)
     pub release_char: u8,
-    /// Decimal notation mark (default `.`; UNA byte 5, ISO 9735-1 §7.1).
-    /// Not used by the tokenizer for splitting, but preserved for downstream use.
+    /// Decimal mark (`UNA` position 030), default `.`.
+    ///
+    /// **Ignored on receipt.** ISO 9735-1 Annex B keeps this position only for
+    /// upward compatibility with earlier syntax versions and states that the
+    /// character transferred here "shall be ignored by the recipient"; §10
+    /// instead allows the full stop *or* the comma per individual numeric value.
+    /// It is therefore neither validated nor used for splitting — it is
+    /// preserved so a writer can round-trip the `UNA` it was given, and so
+    /// [`DecimalFloat`][crate::ser::DecimalFloat] has a house style to format
+    /// with.
     pub decimal_mark: u8,
-    /// Repetition separator (UNA byte 7, ISO 9735-4 §3.1).
+    /// Repetition separator (`UNA` position 050), introduced by syntax version 4.
     ///
-    /// Defaults to space (`0x20`), the conventional "not used" sentinel, when no
-    /// UNA is present.  Syntax version 4 interchanges — and some industry profiles —
-    /// declare a real repetition separator here.
+    /// A space (`0x20`) means **not used**: that is what versions 1–3 put in this
+    /// reserved position, and version 4 forbids a space here precisely because
+    /// the position now carries a real separator.
     ///
-    /// When the separator is **active** (any value other than space) the
-    /// tokenizer splits on it: a data element carrying `ON:1*ON:2` becomes one
-    /// element with two repetitions rather than one repetition whose second
-    /// component is the literal text `1*ON`.  Use
+    /// When the separator is active the tokenizer splits on it: a data element
+    /// carrying `ON:1*ON:2` becomes one element with two repetitions rather than
+    /// one repetition whose second component is the literal text `1*ON`.  Use
     /// [`is_repetition_active`][Self::is_repetition_active] to test for this.
     pub repetition_sep: u8,
-    /// Segment terminator (default `'`)
+    /// Segment terminator (default `'`; `UNA` position 060)
     pub segment_term: u8,
 }
 
@@ -50,10 +69,10 @@ impl Default for ServiceStringAdvice {
             component_sep: b':',
             release_char: b'?',
             decimal_mark: b'.',
-            // Space (0x20) is the conventional "not used" sentinel found at
-            // position 7 in the vast majority of real-world EDIFACT interchanges
-            // that do not employ ISO 9735-4 repetition elements.  `is_valid()`
-            // accepts space here without a printability or uniqueness check.
+            // Inactive until the interchange is known to be syntax version 4 —
+            // see `for_syntax_version`.  Defaulting to the §5.1 asterisk would
+            // split every unescaped `*` in a version 3 interchange, where `*` is
+            // an ordinary level A character and not a service character at all.
             repetition_sep: b' ',
             segment_term: b'\'',
         }
@@ -61,14 +80,20 @@ impl Default for ServiceStringAdvice {
 }
 
 impl ServiceStringAdvice {
-    /// Parse a UNA header and validate that all six service characters
-    /// (`element_sep`, `component_sep`, `decimal_mark`, `release_char`,
-    /// `repetition_sep`, and `segment_term`) are mutually distinct and are
-    /// printable, non-alphanumeric ASCII.  See [`is_valid`][Self::is_valid] for
-    /// the exact rule.
+    /// Read the service characters an interchange actually uses.
     ///
-    /// Returns [`EdifactError::InvalidUna`] if the invariant is violated.
-    /// Falls back to [`ServiceStringAdvice::default`] when no UNA is present.
+    /// Two sources, in priority order:
+    ///
+    /// 1. A leading `UNA`, which states all six characters explicitly.
+    /// 2. Otherwise the ISO 9735-1 §5.1 defaults, with the repetition separator
+    ///    resolved from the syntax version in `UNB` S001 DE 0002 — see
+    ///    [`for_syntax_version`][Self::for_syntax_version].
+    ///
+    /// # Errors
+    ///
+    /// [`EdifactError::InvalidUna`] when a `UNA` is present but its active
+    /// service characters are not mutually distinct printable non-alphanumeric
+    /// ASCII.  See [`is_valid`][Self::is_valid] for the exact rule.
     ///
     /// This is the **safe, default constructor** — always use this for input from
     /// an external source.  For trusted or internal use where delimiter uniqueness
@@ -84,10 +109,8 @@ impl ServiceStringAdvice {
     /// Parse a UNA header from the beginning of an EDIFACT interchange **without**
     /// validating delimiter uniqueness or printability.
     ///
-    /// If no UNA is present, returns [`ServiceStringAdvice::default`].
-    ///
-    /// The `repetition_sep` field is populated from UNA byte 7 (ISO 9735-4 §3.1)
-    /// or defaults to space (`0x20`, the "not used" sentinel) when no UNA is present.
+    /// When no `UNA` is present the §5.1 defaults apply, with the repetition
+    /// separator taken from the syntax version declared in `UNB` S001 DE 0002.
     ///
     /// # When to use
     ///
@@ -109,82 +132,104 @@ impl ServiceStringAdvice {
                 segment_term: input[8],
             }
         } else {
-            Self::default()
+            Self::for_syntax_version(sniff_syntax_version(input))
         }
     }
 
-    /// Return `true` if all active service characters are mutually distinct
-    /// and printable ASCII.
+    /// The ISO 9735-1 §5.1 defaults for a given syntax version.
     ///
-    /// The five *mandatory* characters (`element_sep`, `component_sep`,
-    /// `decimal_mark`, `release_char`, `segment_term`) must all be printable,
-    /// **non-alphanumeric** ASCII (`0x21–0x7E`, excluding `0-9A-Za-z`) and
-    /// mutually distinct (10 pairwise checks).  Alphanumerics are rejected
-    /// because segment tags are written verbatim and cannot be escaped, so a
-    /// letter delimiter would make tags containing it unrepresentable.
+    /// The repetition separator is the only character the version decides:
+    /// version 4 introduced it as `*`, and versions 1–3 have no such service
+    /// character at all — that `UNA` position is reserved and carries a space.
+    /// Splitting on `*` in a version 3 interchange would corrupt every value
+    /// containing one, since `*` is an ordinary level A character there.
     ///
-    /// The `repetition_sep` field is also validated when it is **not a space**
-    /// (`0x20`).  A space at position 7 of the UNA is the conventional
-    /// "absent" sentinel used by interchanges that do not employ repetition
-    /// elements (ISO 9735-1 / ISO 9735-4 §3.1), and it is accepted without
-    /// a printability or uniqueness check.  Any other value must be printable
-    /// non-alphanumeric ASCII and distinct from all five mandatory characters.
+    /// `None` means the version could not be determined (no `UNB`, or an
+    /// unreadable one) and is treated as "not version 4".
     ///
-    /// High bytes (`>= 0x80`) are rejected because they would incorrectly bisect
-    /// multi-byte UTF-8 sequences, and DEL (`0x7F`) is a non-printable control
-    /// character.
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::ServiceStringAdvice;
+    ///
+    /// assert!(ServiceStringAdvice::for_syntax_version(Some(4)).is_repetition_active());
+    /// assert!(!ServiceStringAdvice::for_syntax_version(Some(3)).is_repetition_active());
+    /// assert!(!ServiceStringAdvice::for_syntax_version(None).is_repetition_active());
+    /// ```
+    #[must_use]
+    pub const fn for_syntax_version(version: Option<u8>) -> Self {
+        Self {
+            element_sep: b'+',
+            component_sep: b':',
+            release_char: b'?',
+            decimal_mark: b'.',
+            repetition_sep: match version {
+                Some(4) => b'*',
+                _ => b' ',
+            },
+            segment_term: b'\'',
+        }
+    }
+
+    /// Return `true` if all **active** service characters are mutually distinct
+    /// and printable, non-alphanumeric ASCII.
+    ///
+    /// The active set is the component separator, element separator, release
+    /// character, segment terminator, and — when it is not the space "not used"
+    /// sentinel — the repetition separator.  Each must be in `0x21..=0x7E`
+    /// excluding `0-9A-Za-z`, and all must differ pairwise.
+    ///
+    /// Alphanumerics are excluded because segment tags are always three ASCII
+    /// uppercase letters written verbatim (a tag cannot be escaped).  A delimiter
+    /// such as `N` would make `NAD` unrepresentable — the writer would emit a
+    /// premature terminator and the result would not reparse.  High bytes
+    /// (`>= 0x80`) are rejected because they would bisect multi-byte UTF-8
+    /// sequences, and DEL (`0x7F`) is a control character.
+    ///
+    /// The **decimal mark is not checked at all**: ISO 9735-1 Annex B states that
+    /// the character in that position "shall be ignored by the recipient", and is
+    /// the one position where the standard permits a space.  Rejecting a `UNA`
+    /// over a character the standard tells receivers to ignore would fail
+    /// conformant interchanges for nothing.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::ServiceStringAdvice;
+    ///
+    /// // A duplicated *active* character is fatal …
+    /// assert!(ServiceStringAdvice::from_bytes(b"UNA::.? '").is_err());
+    /// // … but the ignored decimal-mark slot may hold anything, even a space.
+    /// assert!(ServiceStringAdvice::from_bytes(b"UNA:+ ? '")?.is_repetition_active() == false);
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
     pub fn is_valid(&self) -> bool {
-        let [e, c, d, r, t] = [
-            self.element_sep,
-            self.component_sep,
-            self.decimal_mark,
-            self.release_char,
-            self.segment_term,
-        ];
-        // All five mandatory chars must be printable, non-alphanumeric ASCII and
-        // mutually distinct (10 pairwise checks).
-        //
-        // Alphanumerics are excluded because segment tags are always three ASCII
-        // uppercase letters and are written verbatim (a tag cannot be escaped).
-        // A delimiter such as `N` would therefore make `NAD` unrepresentable —
-        // the writer would emit a premature terminator and the result would not
-        // reparse.  Real-world UNA strings use punctuation exclusively, so this
-        // rejects only degenerate configurations.
         let printable_ascii = |b: u8| (0x21..=0x7E).contains(&b) && !b.is_ascii_alphanumeric();
-        let basic_valid = printable_ascii(e)
-            && printable_ascii(c)
-            && printable_ascii(d)
-            && printable_ascii(r)
-            && printable_ascii(t)
-            && e != c
-            && e != d
-            && e != r
-            && e != t
-            && c != d
-            && c != r
-            && c != t
-            && d != r
-            && d != t
-            && r != t;
-        if !basic_valid {
+        // The decimal mark is ignored on receipt, so the only requirement is
+        // that it stay a single graphic ASCII byte — Annex B types it `an1`, and
+        // space is explicitly permitted in this one position.
+        if !(0x20..=0x7E).contains(&self.decimal_mark) {
             return false;
         }
-        // repetition_sep: space (0x20) means "not used" — accepted as-is.
-        // Any other value must be printable ASCII and distinct from all five
-        // mandatory service characters.
-        let rep = self.repetition_sep;
-        if rep == b' ' {
-            true
-        } else {
-            printable_ascii(rep) && rep != e && rep != c && rep != d && rep != r && rep != t
-        }
+        let active: [u8; 5] = [
+            self.component_sep,
+            self.element_sep,
+            self.release_char,
+            self.segment_term,
+            self.repetition_sep,
+        ];
+        // The repetition separator occupies the last slot and drops out of both
+        // checks when it holds the "not used" space.
+        let active = &active[..if self.is_repetition_active() { 5 } else { 4 }];
+        active.iter().all(|&b| printable_ascii(b))
+            && (0..active.len()).all(|i| active[i + 1..].iter().all(|&other| active[i] != other))
     }
 
     /// Returns `true` when this interchange declares a usable repetition
-    /// separator (ISO 9735-4 §3.1).
+    /// separator (`UNA` position 050, syntax version 4).
     ///
-    /// A space at UNA position 7 is the conventional "not used" sentinel, so it
-    /// reports `false` and the tokenizer never splits on it.
+    /// A space there means "not used" — the reserved value carried by syntax
+    /// versions 1–3 — so it reports `false` and the tokenizer never splits on it.
     ///
     /// # Example
     ///
@@ -199,6 +244,39 @@ impl ServiceStringAdvice {
     #[must_use]
     pub const fn is_repetition_active(&self) -> bool {
         self.repetition_sep != b' '
+    }
+}
+
+/// Read the syntax version number (`UNB` S001 DE 0002) out of raw bytes.
+///
+/// Deliberately byte-level and deliberately tiny: this runs *before* the
+/// delimiters are settled, so it can only assume what ISO 9735-1 §6 guarantees —
+/// that everything up to and including S001 is ISO/IEC 646 — and the §5.1
+/// default separators, which are the only ones in play when no `UNA` said
+/// otherwise.
+///
+/// Returns `None` for input with no readable `UNB` S001.
+fn sniff_syntax_version(input: &[u8]) -> Option<u8> {
+    let mut pos = 0;
+    while pos < input.len() && matches!(input[pos], b' ' | b'\t' | b'\r' | b'\n') {
+        pos += 1;
+    }
+    // `UNB+` — the element separator is the §5.1 default, because a UNA that
+    // changed it would have been used instead of this function.
+    if input.len() < pos + 4 || &input[pos..pos + 3] != b"UNB" || input[pos + 3] != b'+' {
+        return None;
+    }
+    // S001 = `<identifier>:<version>[:…]`; the version is component 2.
+    let s001 = &input[pos + 4..];
+    let end = s001
+        .iter()
+        .position(|&b| b == b'+' || b == b'\'')
+        .unwrap_or(s001.len());
+    let mut components = s001[..end].split(|&b| b == b':');
+    let _identifier = components.next()?;
+    match components.next()? {
+        [digit @ b'1'..=b'9'] => Some(digit - b'0'),
+        _ => None,
     }
 }
 
@@ -227,7 +305,7 @@ pub enum Token<'a> {
         span: Span,
     },
     /// First component of a further repetition of the current data element
-    /// (ISO 9735-4 §3.1).
+    /// (ISO 9735-1 §8.6).
     ///
     /// Only produced when the active [`ServiceStringAdvice`] declares a
     /// repetition separator — see
@@ -662,6 +740,69 @@ mod tests {
         Tokenizer::new(input, ssa)
             .collect::<Result<Vec<_>, _>>()
             .expect("tokenize failed")
+    }
+
+    #[test]
+    fn syntax_version_4_activates_the_default_repetition_separator() {
+        // ISO 9735-1 §5.1: `*` is the default repetition separator, and version
+        // 4 is the version that has one.  Without a UNA, the only thing that can
+        // say so is UNB S001 DE 0002.
+        let v4 = ServiceStringAdvice::from_bytes(b"UNB+UNOC:4+S+R+260101:0900+IC1'").unwrap();
+        assert!(v4.is_repetition_active());
+        assert_eq!(v4.repetition_sep, b'*');
+
+        let v3 = ServiceStringAdvice::from_bytes(b"UNB+UNOC:3+S+R+260101:0900+IC1'").unwrap();
+        assert!(!v3.is_repetition_active());
+
+        // No UNB at all — a bare message — stays conservative.
+        let fragment = ServiceStringAdvice::from_bytes(b"BGM+220'").unwrap();
+        assert!(!fragment.is_repetition_active());
+    }
+
+    #[test]
+    fn a_una_overrides_the_syntax_version_default() {
+        // The UNA states all six characters explicitly, so a version 4
+        // interchange that declares the "not used" space really means it.
+        let input = b"UNA:+.? 'UNB+UNOC:4+S+R+260101:0900+IC1'";
+        let ssa = ServiceStringAdvice::from_bytes(input).unwrap();
+        assert!(!ssa.is_repetition_active());
+    }
+
+    #[test]
+    fn version_4_repetitions_parse_without_a_una() {
+        let input = b"UNB+UNOC:4+S+R+260101:0900+IC1'RFF+ON:1*ON:2'UNZ+0+IC1'";
+        let segments: Vec<_> = crate::from_bytes(input)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let rff = segments[1].get_element(0).unwrap();
+        assert_eq!(rff.repeat_count(), 2);
+        assert_eq!(rff.repetition(1).unwrap()[1].0, "2");
+    }
+
+    #[test]
+    fn a_version_3_asterisk_stays_data() {
+        // `*` is an ordinary level A character in syntax version 3; splitting on
+        // it would corrupt the value.
+        let input = b"UNB+UNOC:3+S+R+260101:0900+IC1'FTX+AAA+2*3'UNZ+0+IC1'";
+        let segments: Vec<_> = crate::from_bytes(input)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(segments[1].element_str(1), Some("2*3"));
+    }
+
+    #[test]
+    fn the_ignored_decimal_mark_slot_never_invalidates_a_una() {
+        // Annex B: the character in position 030 "shall be ignored by the
+        // recipient", and it is the one position where a space is allowed.
+        for una in [&b"UNA:+ ? '"[..], &b"UNA:+,? '"[..], &b"UNA:+:? '"[..]] {
+            assert!(
+                ServiceStringAdvice::from_bytes(una).is_ok(),
+                "{:?} must parse",
+                std::str::from_utf8(una).unwrap()
+            );
+        }
+        // An *active* character duplicated is still fatal.
+        assert!(ServiceStringAdvice::from_bytes(b"UNA:+.: '").is_err());
     }
 
     #[test]

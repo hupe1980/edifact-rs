@@ -44,6 +44,29 @@ impl From<std::io::Error> for IoError {
     }
 }
 
+/// Which rule of ISO 9735-1 §9.1 a value violates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Insignificant {
+    /// A variable-length numeric value carries leading zeroes.
+    ///
+    /// "Nevertheless, a single zero before a decimal mark is allowed", so `0.5`
+    /// is correct and `00.5` is not.
+    LeadingZeroes,
+    /// A variable-length alphabetic or alphanumeric value carries trailing
+    /// spaces.
+    TrailingSpaces,
+}
+
+impl std::fmt::Display for Insignificant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::LeadingZeroes => "leading zeroes are not suppressed",
+            Self::TrailingSpaces => "trailing spaces are not suppressed",
+        })
+    }
+}
+
 /// All errors produced by `edifact-rs`.
 ///
 /// # Positional data
@@ -135,6 +158,13 @@ pub enum EdifactError {
         actual: u32,
         /// Message reference from the UNH segment.
         message_ref: String,
+        /// Byte range of the offending `UNT`.
+        ///
+        /// This is what places the finding on the *message* rather than on the
+        /// interchange — a `CONTRL` built from the report reports it on that
+        /// message's `UCM`, and a rendered diagnostic underlines the trailer
+        /// that got the count wrong.
+        span: Span,
     },
 
     /// Invalid or malformed segment tag.
@@ -146,11 +176,14 @@ pub enum EdifactError {
     /// Invalid UNA service string advice.
     ///
     /// If present, the UNA segment must be exactly 9 bytes: `"UNA"` followed by
-    /// 6 service characters.  The five active characters (`element_sep`,
-    /// `component_sep`, `decimal_mark`, `release_char`, and `segment_term`) must
-    /// all be mutually distinct and printable, non-alphanumeric ASCII.  The
-    /// **repetition separator** (UNA byte 7) is validated on the same terms
-    /// unless it is a space, the conventional "not used" sentinel.
+    /// 6 service characters.  The **active** ones — component separator, element
+    /// separator, release character, segment terminator, and the repetition
+    /// separator when it is not the "not used" space — must all be mutually
+    /// distinct and printable, non-alphanumeric ASCII.
+    ///
+    /// The **decimal mark is not checked**: ISO 9735-1 Annex B says the character
+    /// in that position "shall be ignored by the recipient", and it is the one
+    /// position where the standard permits a space.
     #[error("invalid UNA service string advice")]
     InvalidUna,
 
@@ -431,14 +464,18 @@ pub enum EdifactError {
         offset: usize,
     },
 
-    /// The interchange syntax identifier (UNB DE 0001) is not a recognised ISO 9735-1 value.
+    /// The interchange syntax identifier (`UNB` S001 DE 0001) names no defined
+    /// character repertoire.
     ///
-    /// Valid syntax identifiers are: `UNOA`, `UNOB`, `UNOC`, `UNOD`, `UNOE`, `UNOF`, and
-    /// `KECA` (Korean EDI Centre A).  Any other value indicates a non-standard generator
-    /// or a corrupted UNB header.
-    #[error(
-        "unrecognised syntax identifier '{0}': expected UNOA/UNOB/UNOC/UNOD/UNOE/UNOF (or KECA)"
-    )]
+    /// DE 0001 is `UN` followed by a two-character repertoire code, so the
+    /// defined values are `UNOA` through `UNOK`, `UNOX`, `UNOY`, and `KECA`
+    /// (Korean EDI Centre A).  Anything else is a non-standard generator or a
+    /// corrupted `UNB`.
+    ///
+    /// A value that *is* defined but that this crate cannot decode is
+    /// [`UnsupportedCharset`][Self::UnsupportedCharset] instead — the two say
+    /// different things about whose problem it is.
+    #[error("unrecognised syntax identifier '{0}': expected UNOA-UNOK, UNOX, UNOY, or KECA")]
     UnrecognisedSyntaxIdentifier(String),
 
     /// A control reference was reused within the scope that requires it to be unique.
@@ -510,7 +547,7 @@ pub enum EdifactError {
     /// A repeating data element was written under a service string advice that
     /// declares no repetition separator.
     ///
-    /// ISO 9735-4 §3.1 repetitions can only be expressed when `UNA` position 7
+    /// ISO 9735-1 §8.6 repetitions can only be expressed when `UNA` position 7
     /// carries a real separator.  With the space "not used" sentinel there is no
     /// byte to write between occurrences, and joining them anyway would emit
     /// output that reads back as a single occurrence — silent data corruption.
@@ -523,10 +560,11 @@ pub enum EdifactError {
 
     /// A non-finite float was handed to a numeric serializer.
     ///
-    /// EDIFACT numeric data elements are decimal digit strings with an optional
-    /// sign and decimal mark (ISO 9735-1 §7).  There is no representation for
-    /// `NaN` or infinity, and `Display` would emit `NaN` / `inf` — text that no
-    /// receiver can parse and that the crate's own reader would reject.
+    /// ISO 9735-1 §10 admits the ISO 6093 numeric representations — digits, an
+    /// optional minus sign, a decimal mark, an exponent — and nothing else.
+    /// There is no representation for `NaN` or infinity, and `Display` would
+    /// emit `NaN` / `inf`, text no receiver can parse and that the crate's own
+    /// reader would hand back as a string.
     #[error("non-finite number {value} has no EDIFACT representation")]
     NonFiniteNumber {
         /// The offending value, formatted for the message.
@@ -577,6 +615,232 @@ pub enum EdifactError {
     UnsupportedCharset {
         /// The `UNB` S001 DE 0001 value that could not be handled.
         syntax_identifier: String,
+    },
+
+    /// An interchange carries neither a message nor a group.
+    ///
+    /// ISO 9735-1 §7.1: an interchange "shall contain at least one group, or one
+    /// message or one package".  A bare `UNB`/`UNZ` pair is a delivery that says
+    /// nothing, and because `UNZ+0` makes the control count agree with the
+    /// (absent) content, no count check can catch it.
+    #[error("interchange {control_ref} contains no message or group")]
+    EmptyInterchange {
+        /// Interchange control reference (`UNB` DE 0020) of the empty interchange.
+        control_ref: String,
+    },
+
+    /// A message carries no segment between its header and trailer.
+    ///
+    /// ISO 9735-1 §7.3: a message "shall be started and identified by a message
+    /// header, shall be terminated by a message trailer, and shall contain at
+    /// least one additional segment".
+    #[error("message {message_ref} has no segments between UNH and UNT")]
+    EmptyMessage {
+        /// Message reference number (`UNH` DE 0062) of the empty message.
+        message_ref: String,
+        /// Byte range of the offending `UNH`.
+        span: Span,
+    },
+
+    /// The interchange carries a package (`UNO`…`UNP`), which this crate does not
+    /// tokenize.
+    ///
+    /// A package wraps an arbitrary object — ISO 9735-1 §7.9, elaborated by
+    /// ISO 9735-8 — whose bytes are not EDIFACT-encoded and whose length is
+    /// declared in `UNO` S022 DE 0810.  Feeding those bytes to a tokenizer that
+    /// scans for delimiters produces nonsense, so the package is reported instead.
+    /// Split the object out of the byte stream using the declared length before
+    /// parsing the remainder.
+    #[error("segment {tag} opens or closes a package, which this crate does not parse")]
+    PackageNotSupported {
+        /// The package segment encountered: `UNO` or `UNP`.
+        tag: String,
+        /// Byte range of the offending segment.
+        span: Span,
+    },
+
+    /// A data element value consists only of spaces.
+    ///
+    /// ISO 9735-1 §9.3: "A data element value containing only space(s) shall not
+    /// be allowed."  Trailing spaces are insignificant and must be suppressed
+    /// (§9.1), so a value that is nothing but spaces is an element that should
+    /// have been omitted — and a receiver comparing it against a code list, a
+    /// reference, or a previous message will not treat it as absent.
+    #[error(
+        "segment {tag} element {element_index} component {component_index}: value is only spaces"
+    )]
+    BlankDataElementValue {
+        /// Segment tag containing the blank value.
+        tag: String,
+        /// Zero-based element index.
+        element_index: usize,
+        /// Zero-based component index.
+        component_index: usize,
+        /// Byte range of the offending value.
+        span: Span,
+    },
+
+    /// A segment carries nothing but its tag.
+    ///
+    /// ISO 9735-1 §7.5: "A segment shall contain at least one data element in
+    /// addition to the segment tag."  §8.5 adds that a conditional segment whose
+    /// only content is the tag "shall be omitted in its entirety" — so `ABC'` is
+    /// either a mandatory segment that lost its data or a conditional one that
+    /// should not have been sent.
+    #[error("segment {tag} contains no data element")]
+    SegmentWithoutDataElements {
+        /// The offending segment tag.
+        tag: String,
+        /// Byte range of the offending segment.
+        span: Span,
+    },
+
+    /// A data element occurred more times than its definition allows.
+    ///
+    /// ISO 9735-1 §7.5: "Each stand-alone or composite data element's position,
+    /// status and maximum number of occurrences within the segment structure
+    /// shall be stated in the segment specification." Exceeding the stated
+    /// maximum is a structural violation, reported by `CONTRL` as code 35.
+    #[error("segment {tag} element {element_index} occurs {actual} times, at most {max} allowed")]
+    TooManyRepetitions {
+        /// Segment tag carrying the over-repeated element.
+        tag: String,
+        /// Zero-based element index.
+        element_index: usize,
+        /// Maximum occurrences the definition allows.
+        max: u8,
+        /// Occurrences actually present.
+        actual: usize,
+        /// Byte range of the offending element.
+        span: Span,
+    },
+
+    /// A value's characters do not match its declared representation class.
+    ///
+    /// A directory types every data element `a` (alphabetic), `n` (numeric), or
+    /// `an` (alphanumeric). ISO 9735-1 §10 fixes what "numeric" admits: digits,
+    /// an optional minus, a decimal mark, and an exponent — and explicitly not
+    /// the space character or a plus sign. Reported by `CONTRL` as code 37.
+    #[error(
+        "segment {tag} element {element_index} component {component_index}: {value:?} is not {repr}"
+    )]
+    InvalidCharacterType {
+        /// Segment tag containing the value.
+        tag: String,
+        /// Zero-based element index.
+        element_index: usize,
+        /// Zero-based component index.
+        component_index: usize,
+        /// The declared representation, e.g. `n..6`.
+        repr: String,
+        /// The offending value.
+        value: String,
+        /// Byte range of the offending value.
+        span: Span,
+    },
+
+    /// A value is longer than its declared representation allows.
+    ///
+    /// Length is counted in **characters**, not bytes (ISO 9735-1 §6), and for a
+    /// numeric value excludes the sign, the decimal mark, and the exponent
+    /// (§10). Reported by `CONTRL` as code 39.
+    #[error(
+        "segment {tag} element {element_index} component {component_index}: {actual} characters exceeds {repr}"
+    )]
+    DataElementTooLong {
+        /// Segment tag containing the value.
+        tag: String,
+        /// Zero-based element index.
+        element_index: usize,
+        /// Zero-based component index.
+        component_index: usize,
+        /// The declared representation, e.g. `an..35`.
+        repr: String,
+        /// The measured character count.
+        actual: usize,
+        /// Byte range of the offending value.
+        span: Span,
+    },
+
+    /// A value is shorter than its declared fixed-length representation.
+    ///
+    /// Only a fixed-length representation (`n8`, `a1`) has a minimum above one;
+    /// a variable one (`an..35`) is satisfied by any non-empty value. Reported
+    /// by `CONTRL` as code 40.
+    #[error(
+        "segment {tag} element {element_index} component {component_index}: {actual} characters is short of {repr}"
+    )]
+    DataElementTooShort {
+        /// Segment tag containing the value.
+        tag: String,
+        /// Zero-based element index.
+        element_index: usize,
+        /// Zero-based component index.
+        component_index: usize,
+        /// The declared representation, e.g. `n8`.
+        repr: String,
+        /// The measured character count.
+        actual: usize,
+        /// Byte range of the offending value.
+        span: Span,
+    },
+
+    /// A segment or composite ends in separators that carry no value.
+    ///
+    /// ISO 9735-1 §8.7.1: "If one or more non-repeating composite data elements
+    /// or stand-alone data elements at the end of a segment are omitted, the
+    /// data element separators which would normally follow them shall also be
+    /// omitted." §8.7.2 says the same for components at the end of a composite.
+    ///
+    /// `BGM+220+'` and `DTM+137:20260101:'` are therefore both malformed, and a
+    /// receiver that trims them is being generous rather than correct. Reported
+    /// by `CONTRL` as code 45.
+    #[error("segment {tag} ends in a separator that carries no value")]
+    TrailingSeparator {
+        /// Segment tag carrying the trailing separator.
+        tag: String,
+        /// `Some(index)` when the trailing separators close that element's
+        /// composite; `None` when they close the segment itself.
+        element_index: Option<usize>,
+        /// Byte range of the offending segment or element.
+        span: Span,
+    },
+
+    /// An interchange mixes groups with ungrouped messages.
+    ///
+    /// ISO 9735-1 §7.1 lists what an interchange may contain, and every entry is
+    /// exclusive: messages, or packages, or groups containing them — never a
+    /// group alongside a bare message. A message outside every group has no
+    /// group to be counted in, so `UNZ` DE 0036 cannot describe the interchange
+    /// at all. Reported by `CONTRL` as code 30.
+    #[error("interchange mixes groups with ungrouped messages")]
+    GroupsAndMessagesMixed {
+        /// Byte range of the segment that revealed the mix.
+        span: Span,
+    },
+
+    /// A value carries characters ISO 9735-1 §9.1 requires to be suppressed.
+    ///
+    /// §9.1: "In variable length numeric data elements, leading zeroes shall be
+    /// suppressed... In variable length alphabetic and alphanumeric data
+    /// elements, trailing spaces shall be suppressed."
+    ///
+    /// Both are artefacts of a fixed-width source record copied into a
+    /// variable-length field. The value is still readable, so this is a warning
+    /// — but a receiver comparing `007` against the code `7`, or `"ACME "`
+    /// against `"ACME"`, will not match them.
+    #[error("segment {tag} element {element_index} component {component_index}: {kind}")]
+    InsignificantCharacters {
+        /// Segment tag containing the value.
+        tag: String,
+        /// Zero-based element index.
+        element_index: usize,
+        /// Zero-based component index.
+        component_index: usize,
+        /// Which rule of §9.1 was violated.
+        kind: Insignificant,
+        /// Byte range of the offending value.
+        span: Span,
     },
 
     /// A [`SegmentLayout`][crate::SegmentLayout] was applied to a segment with a different tag.
@@ -646,6 +910,18 @@ impl EdifactError {
             Self::UnsupportedCharset { .. } => "E039",
             Self::NonFiniteNumber { .. } => "E040",
             Self::CharacterRepertoireMismatch { .. } => "E041",
+            Self::EmptyInterchange { .. } => "E042",
+            Self::EmptyMessage { .. } => "E043",
+            Self::PackageNotSupported { .. } => "E044",
+            Self::BlankDataElementValue { .. } => "E045",
+            Self::SegmentWithoutDataElements { .. } => "E046",
+            Self::TooManyRepetitions { .. } => "E047",
+            Self::InvalidCharacterType { .. } => "E048",
+            Self::DataElementTooLong { .. } => "E049",
+            Self::DataElementTooShort { .. } => "E050",
+            Self::TrailingSeparator { .. } => "E051",
+            Self::GroupsAndMessagesMixed { .. } => "E052",
+            Self::InsignificantCharacters { .. } => "E053",
         }
     }
 
@@ -667,7 +943,7 @@ impl EdifactError {
             }
             Self::InvalidSegmentTag(_) => Some("Segment tags must be 3 ASCII uppercase letters"),
             Self::InvalidUna => Some(
-                "UNA must be exactly 9 bytes: 'UNA' followed by 6 distinct, non-whitespace service characters",
+                "UNA must be exactly 9 bytes: 'UNA' followed by 6 service characters, of which the active five must be distinct and non-whitespace",
             ),
             Self::MissingRequiredElement { .. } => {
                 Some("Provide all mandatory elements for the segment per directory rules")
@@ -745,12 +1021,50 @@ impl EdifactError {
             Self::CharacterRepertoireMismatch { .. } => Some(
                 "Pass the writer's own syntax identifier to begin_interchange, or bind the writer to the repertoire the header declares",
             ),
+            Self::EmptyInterchange { .. } => Some(
+                "An interchange must carry at least one message or group; send nothing rather than an empty envelope",
+            ),
+            Self::EmptyMessage { .. } => Some(
+                "A message needs at least one segment between UNH and UNT; omit the message entirely if it has no content",
+            ),
+            Self::PackageNotSupported { .. } => Some(
+                "Split the object out of the byte stream using the length in UNO S022 DE 0810, then parse the remaining segments",
+            ),
+            Self::BlankDataElementValue { .. } => Some(
+                "Omit the data element instead of sending spaces; trailing spaces are insignificant and must be suppressed",
+            ),
+            Self::SegmentWithoutDataElements { .. } => {
+                Some("Supply the segment's data, or omit the segment entirely if it is conditional")
+            }
+            Self::TooManyRepetitions { .. } => Some(
+                "Reduce the occurrences to the definition's maximum, or correct the definition if the directory allows more",
+            ),
+            Self::InvalidCharacterType { .. } => Some(
+                "Send a value of the declared class: `n` admits digits, an optional minus, a decimal mark and an exponent — never a space or a plus sign",
+            ),
+            Self::DataElementTooLong { .. } => Some(
+                "Shorten the value to the declared maximum; length is counted in characters, and a numeric value excludes its sign, decimal mark and exponent",
+            ),
+            Self::DataElementTooShort { .. } => Some(
+                "Pad the value to the declared fixed length, or correct the definition if the directory declares it variable",
+            ),
+            Self::TrailingSeparator { .. } => Some(
+                "Stop emitting separators once the last value has been written; ISO 9735-1 §8.7.1 and §8.7.2 require trailing ones to be omitted",
+            ),
+            Self::GroupsAndMessagesMixed { .. } => Some(
+                "Put every message inside a group, or none of them; ISO 9735-1 §7.1 does not allow both in one interchange",
+            ),
+            Self::InsignificantCharacters { .. } => Some(
+                "Suppress the insignificant characters before sending: leading zeroes in a variable-length numeric value, trailing spaces in a variable-length text one",
+            ),
+            Self::UnrecognisedSyntaxIdentifier(_) => Some(
+                "UNB S001 DE 0001 must name a defined repertoire: UNOA-UNOK, UNOX, UNOY, or KECA",
+            ),
             Self::ValidationErrors { .. }
             | Self::MessageCountMismatch { .. }
             | Self::SegmentCountMismatch { .. }
             | Self::UnexpectedMessageType { .. }
             | Self::InterchangeTooLarge { .. }
-            | Self::UnrecognisedSyntaxIdentifier(_)
             | Self::InvalidUtf8
             | Self::Io(_) => None,
         }
@@ -764,13 +1078,21 @@ impl miette::Diagnostic for EdifactError {
         Some(Box::new(self.stable_code()))
     }
 
+    /// Mirrors the severity the validation pipeline assigns.
+    ///
+    /// The two must agree: a `miette` render that calls a control-reference
+    /// mismatch a warning while [`ValidationReport`] files it as an error tells
+    /// the operator and the program two different things about the same
+    /// interchange. [`crate::ValidationReport`] is the source of truth, and this
+    /// delegates to it.
     fn severity(&self) -> Option<miette::Severity> {
-        match self {
-            Self::InvalidCodeValue { .. }
-            | Self::InvalidComponentCount { .. }
-            | Self::QualifierMismatch { .. } => Some(miette::Severity::Warning),
-            _ => Some(miette::Severity::Error),
-        }
+        Some(match crate::report::severity_for_error(self) {
+            crate::ValidationSeverity::Info => miette::Severity::Advice,
+            crate::ValidationSeverity::Warning => miette::Severity::Warning,
+            crate::ValidationSeverity::Error | crate::ValidationSeverity::Critical => {
+                miette::Severity::Error
+            }
+        })
     }
 
     fn help<'a>(&'a self) -> Option<Box<dyn std::fmt::Display + 'a>> {
@@ -807,6 +1129,7 @@ impl miette::Diagnostic for EdifactError {
                 expected,
                 actual,
                 message_ref,
+                ..
             } => Some(Box::new(format!(
                 "UNT for message {message_ref} declares {expected} segment(s) but {actual} were found. \
                  Check the UNT segment count",
@@ -974,6 +1297,83 @@ impl miette::Diagnostic for EdifactError {
             Self::LimitExceeded { limit, max } => Some(Box::new(format!(
                 "The input exceeds the configured {limit} limit of {max}. \
                  Raise it via ReaderConfig if the input is legitimate, or reject the input",
+            ))),
+            Self::EmptyInterchange { control_ref } => Some(Box::new(format!(
+                "Interchange {control_ref} carries no message and no group. \
+                 ISO 9735-1 §7.1 requires at least one; send nothing rather than an empty envelope",
+            ))),
+            Self::EmptyMessage { message_ref, .. } => Some(Box::new(format!(
+                "Message {message_ref} has nothing between UNH and UNT. \
+                 ISO 9735-1 §7.3 requires at least one additional segment",
+            ))),
+            Self::PackageNotSupported { tag, .. } => Some(Box::new(format!(
+                "{tag} opens or closes a package, whose object is arbitrary binary data \
+                 rather than EDIFACT. Split it out using the length in UNO S022 DE 0810, \
+                 then parse the remaining segments",
+            ))),
+            Self::BlankDataElementValue {
+                tag,
+                element_index,
+                component_index,
+                ..
+            } => Some(Box::new(format!(
+                "Segment {tag} element {element_index} component {component_index} holds only \
+                 spaces. ISO 9735-1 §9.3 forbids that — omit the element instead",
+            ))),
+            Self::SegmentWithoutDataElements { tag, .. } => Some(Box::new(format!(
+                "Segment {tag} carries only its tag. ISO 9735-1 §7.5 requires at least one \
+                 data element; §8.5 says a conditional segment with no data is omitted entirely",
+            ))),
+            Self::TooManyRepetitions {
+                tag,
+                element_index,
+                max,
+                actual,
+                ..
+            } => Some(Box::new(format!(
+                "Segment {tag} element {element_index} occurs {actual} times but its definition \
+                 allows at most {max}",
+            ))),
+            Self::InvalidCharacterType {
+                repr, value, tag, ..
+            } => Some(Box::new(format!(
+                "Segment {tag}: {value:?} is not a valid {repr} value. ISO 9735-1 §10 admits \
+                 digits, an optional minus sign, a decimal mark and an exponent — the space \
+                 character and the plus sign are not allowed",
+            ))),
+            Self::DataElementTooLong {
+                repr, actual, tag, ..
+            } => Some(Box::new(format!(
+                "Segment {tag}: the value is {actual} characters, but the directory declares \
+                 {repr}. Length is counted in characters rather than bytes",
+            ))),
+            Self::DataElementTooShort {
+                repr, actual, tag, ..
+            } => Some(Box::new(format!(
+                "Segment {tag}: the value is {actual} characters, but the directory declares the \
+                 fixed length {repr}",
+            ))),
+            Self::TrailingSeparator {
+                tag, element_index, ..
+            } => Some(Box::new(match element_index {
+                Some(index) => format!(
+                    "Segment {tag} element {index} ends in a component separator with no value \
+                     after it. ISO 9735-1 §8.7.2 requires trailing component separators to be \
+                     omitted",
+                ),
+                None => format!(
+                    "Segment {tag} ends in a data element separator with no value after it. \
+                     ISO 9735-1 §8.7.1 requires trailing data element separators to be omitted",
+                ),
+            })),
+            Self::GroupsAndMessagesMixed { .. } => Some(Box::new(
+                "ISO 9735-1 §7.1 lists what an interchange may contain, and the entries are \
+                 exclusive: groups containing messages, or bare messages — never both, because a \
+                 message outside every group cannot be counted in UNZ DE 0036",
+            )),
+            Self::InsignificantCharacters { tag, kind, .. } => Some(Box::new(format!(
+                "Segment {tag}: {kind}. ISO 9735-1 §9.1 requires insignificant characters to be \
+                 suppressed before transfer",
             ))),
         }
     }

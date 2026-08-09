@@ -155,10 +155,10 @@ struct SenderParty {
 
 #### Where layouts come from
 
-The crate ships the **ISO 9735 service segments** — `UNB`, `UNG`, `UNH`, `UNT`,
-`UNE`, `UNZ`, `UNS` — in `edifact_rs::service`, ready to point `layout` at. They
-are fixed by the syntax standard, so there is one correct answer and no directory
-version to choose:
+The crate ships every **ISO 9735-1 batch service segment** — `UNB`, `UNG`, `UNH`,
+`UNT`, `UNE`, `UNZ`, `UNS`, `UNO`, `UNP`, `UGH`, `UGT` — in `edifact_rs::service`,
+ready to point `layout` at. They are fixed by the syntax standard, so there is one
+correct answer and no directory version to choose:
 
 ```rust
 use edifact_rs::{EdifactDeserialize, service};
@@ -173,13 +173,32 @@ struct InterchangeHeader {
 }
 ```
 
+#### Message-level segments are yours to supply
+
 For **message-level** segments — `BGM`, `DTM`, `NAD`, `LIN` and their composites
-`C002`, `C507`, `C082`, … — you supply the layout yourself. That data belongs to
-a UN/EDIFACT *directory release*: it differs between D.96A and D.24B, it is
-large, and it is licensed separately, so the crate does not ship it. Write the
-subset you touch as `const` tables (as in the `NAD` example above), generate them
-from your directory of record, or load them at startup with
+`C002`, `C507`, `C082`, … — you supply the layout yourself. Be clear-eyed about
+what that means: `element = "code"` is turnkey for the service segments and is
+**authoring work** for everything else.
+
+The reason is licensing, not effort. The UN/EDIFACT directories are published by
+UNECE under the [UN UNTDID license agreement](https://service.unece.org/trade/untdid/license.htm),
+which grants a licence to use the Directory "only in the country where you
+acquired it and/or the country(ies) where your organization is located", requires
+the copyright notice to be reproduced on every copy or partial copy, and states
+that **you cannot modify the Directory and distribute it**. Transcribing
+directory content into Rust `const` tables and publishing it on crates.io is
+precisely that. A crate that shipped even a "stable subset" of composites would
+be redistributing modified Directory content worldwide, which the licence does
+not permit — so this crate ships the ISO 9735 syntax segments, which the standard
+fixes, and nothing from the directories.
+
+Write the subset you touch as `const` tables (as in the `NAD` example above),
+generate them from your directory of record, or load them at startup with
 `DirectoryValidatorBuilder` for the runtime-validation path.
+
+Whichever route you take, **audit the result against real messages** — a
+hand-authored layout that disagrees with the wire fails silently. See
+[Auditing a hand-written layout](@/docs/validation.md#auditing-a-hand-written-layout).
 
 A composite that repeats a data element by design — `C080 PARTY NAME` is `3036`
 five times — must be declared with `ComponentRef::repeated`, not with five
@@ -319,6 +338,56 @@ struct OrderMessage {
 `group` on a `Vec<T>` field collects all matching segments where
 `T::matches_segment` returns `true`.  `T` must implement `EdifactSegmentTag`.
 
+### `repeat` — repeated *data element*
+
+`group` repeats the **segment**. `repeat` repeats the **data element inside one
+segment** (ISO 9735-1 §8.6). Both are `Vec<T>` in Rust, and nothing but the
+attribute can tell them apart:
+
+```text
+RFF+ON:1'RFF+ON:2'       two RFF segments          → #[edifact(group)]
+RFF+ON:1*ON:2            one RFF, two occurrences  → #[edifact(repeat)]
+```
+
+A repetition separator divides whole **occurrences**, so every component of the
+element is transferred in each one — which is why the qualifier `ON` appears
+twice above. The derive handles that: a non-repeating field in the same element
+is emitted once per occurrence, and a repeating one contributes its *k*-th item.
+
+```rust
+use edifact_rs::{EdifactDeserialize, EdifactSerialize, from_bytes};
+
+#[derive(Debug, EdifactDeserialize, EdifactSerialize)]
+#[edifact(segment = "RFF")]
+struct OrderReferences {
+    #[edifact(element = 0, component = 0)]
+    qualifier: String,
+    #[edifact(element = 0, component = 1, repeat)]
+    numbers: Vec<String>,
+}
+
+// `UNA` position 050 declares `*`; so does syntax version 4 by default.
+let segments: Vec<_> = from_bytes(b"UNA:+.?*'RFF+ON:1*ON:2*ON:3'")
+    .collect::<Result<Vec<_>, _>>()?;
+let rff = OrderReferences::edifact_deserialize(&segments)?;
+
+assert_eq!(rff.qualifier, "ON");
+assert_eq!(rff.numbers, ["1", "2", "3"]);
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+An occurrence that omits the component yields `""` rather than disappearing:
+§8.7.3 makes an occurrence's position significant, so `DE*DE***DE` deliberately
+transfers two empty ones and dropping them would shift every later value left.
+An empty `Vec` emits the element as absent, which keeps the elements after it in
+position (§8.7.1).
+
+Writing needs an active repetition separator — see
+[Writing](@/docs/writing.md#repeating-data-elements). Without one the writer
+returns `RepetitionSeparatorNotDeclared`
+([`E037`](@/docs/error-reference.md#e037-repetitionseparatornotdeclared)) rather
+than emitting output that reads back as a single occurrence.
+
 ### `qualifier = "VALUE"` — message-field qualifier filter
 
 ```rust
@@ -406,7 +475,8 @@ Field rules:
 | `element = "DE"` | field | UN/EDIFACT data element identifier, resolved against `layout` at compile time |
 | `component = C` | field | Component index within the element (use with `element`) |
 | `composite` | field | Map the whole element to `EdifactCompositeDeserialize` |
-| `group` | field | Collect all matching segments into a `Vec<T>` |
+| `group` | field | Collect all matching **segments** into a `Vec<T>` |
+| `repeat` | field | Map the occurrences of a repeating **data element** into a `Vec<T>` |
 | `qualifier = "Q"` | field (message struct) | Filter which qualifier variant to bind to this field |
 
 ---

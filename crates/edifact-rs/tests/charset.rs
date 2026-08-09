@@ -465,3 +465,80 @@ fn decode_reader_handles_a_stream_that_returns_one_byte_at_a_time() {
     .expect("parse");
     assert_eq!(segments[1].element_str(1), Some("Müller"));
 }
+
+// ── decoding parse entry points ───────────────────────────────────────────────
+
+#[test]
+fn from_bytes_decoded_reads_a_conformant_unoc_interchange() {
+    let raw = unoc_interchange();
+    // The undecoded bytes are not UTF-8 and never claimed to be.
+    assert!(
+        edifact_rs::from_bytes(&raw)
+            .collect::<Result<Vec<_>, _>>()
+            .is_err()
+    );
+
+    let segments = edifact_rs::from_bytes_decoded(&raw).expect("decoded parse");
+    assert_eq!(segments[1].element_str(1), Some("Müller"));
+}
+
+#[test]
+fn from_reader_decoded_is_lazy_and_needs_no_question_mark() {
+    // The whole point: a plain `Iterator`, so a streaming pipeline does not have
+    // to be boxed or made eager just to sniff the repertoire.
+    let segments: Vec<_> =
+        edifact_rs::from_reader_decoded(std::io::Cursor::new(unoc_interchange()))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("decoded stream");
+    assert_eq!(segments[1].element_str(1), Some("Müller"));
+}
+
+#[test]
+fn a_decode_failure_arrives_as_the_first_item_not_at_construction() {
+    // `UNOX` is a real syntax identifier this crate cannot decode.  Constructing
+    // the iterator must still succeed; the error surfaces where parse errors do.
+    let raw = b"UNB+UNOX:3+S+R+260101:0900+IC1'UNZ+0+IC1'";
+    let mut stream = edifact_rs::from_reader_decoded(std::io::Cursor::new(&raw[..]));
+
+    let first = stream.next().expect("one item");
+    assert!(
+        matches!(
+            first,
+            Err(edifact_rs::EdifactError::UnsupportedCharset { .. })
+        ),
+        "got {first:?}"
+    );
+    // And it terminates rather than repeating the error forever.
+    assert!(stream.next().is_none());
+}
+
+#[test]
+fn decoding_entry_points_pass_reader_config_through() {
+    let config = edifact_rs::ReaderConfig::default().max_segments(1);
+    let raw = unoc_interchange();
+
+    let err = edifact_rs::from_bytes_decoded_with_config(&raw, config)
+        .expect_err("budget must be reported");
+    assert!(matches!(
+        err,
+        edifact_rs::EdifactError::LimitExceeded { .. }
+    ));
+
+    let err = edifact_rs::from_reader_decoded_with_config(std::io::Cursor::new(raw), config)
+        .collect::<Result<Vec<_>, _>>()
+        .expect_err("budget must be reported");
+    assert!(matches!(
+        err,
+        edifact_rs::EdifactError::LimitExceeded { .. }
+    ));
+}
+
+#[test]
+fn an_ascii_interchange_decodes_to_the_same_segments() {
+    let raw = b"UNB+UNOA:3+S+R+260101:0900+IC1'BGM+220'UNZ+0+IC1'";
+    let plain: Vec<_> = edifact_rs::from_bytes_owned(raw)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("plain");
+    let decoded = edifact_rs::from_bytes_decoded(raw).expect("decoded");
+    assert_eq!(plain, decoded);
+}

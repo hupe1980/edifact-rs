@@ -323,7 +323,7 @@ fn declared_components_cap_a_composite_arity() {
     );
 
     // Fewer components than declared is normal: conditional components may be
-    // omitted, and trailing empties are stripped per ISO 9735-1 §3.3.
+    // omitted, and trailing empties are stripped per ISO 9735-1 §8.7.2.
     let fewer = parse(b"NAD+MS+9900112233445'");
     let mut report = ValidationReport::default();
     validator.validate_batch(
@@ -426,3 +426,195 @@ fn a_repeated_composite_is_not_capped_at_its_entry_count() {
 }
 
 static NAD_C080_STATIC: SegmentDefinition = NAD_C080;
+
+// ── layout auditing ───────────────────────────────────────────────────────────
+
+mod layout_audit {
+    use edifact_rs::{
+        ComponentRef, ElementRef, LayoutFinding, SegmentDefinition, SegmentLayout, Status,
+        from_bytes,
+    };
+
+    /// A deliberately short `C507`: the directory declares 2005/2380/2379.
+    static SHORT_C507: &[ComponentRef] = &[
+        ComponentRef::new(1, "2005", Status::Mandatory),
+        ComponentRef::new(2, "2380", Status::Conditional),
+    ];
+    static SHORT_DTM_ELEMENTS: &[ElementRef] = &[ElementRef::composite(
+        1,
+        "C507",
+        Status::Mandatory,
+        1,
+        SHORT_C507,
+    )];
+    static SHORT_DTM: SegmentDefinition =
+        SegmentDefinition::new("DTM", "Date/time/period", SHORT_DTM_ELEMENTS);
+
+    /// The same segment declared correctly.
+    static FULL_C507: &[ComponentRef] = &[
+        ComponentRef::new(1, "2005", Status::Mandatory),
+        ComponentRef::new(2, "2380", Status::Conditional),
+        ComponentRef::new(3, "2379", Status::Conditional),
+    ];
+    static FULL_DTM_ELEMENTS: &[ElementRef] = &[ElementRef::composite(
+        1,
+        "C507",
+        Status::Mandatory,
+        1,
+        FULL_C507,
+    )];
+    static FULL_DTM: SegmentDefinition =
+        SegmentDefinition::new("DTM", "Date/time/period", FULL_DTM_ELEMENTS);
+
+    fn corpus(input: &[u8]) -> Vec<edifact_rs::Segment<'_>> {
+        from_bytes(input)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse")
+    }
+
+    #[test]
+    fn a_layout_the_wire_disproves_is_a_contradiction() {
+        // The format qualifier `102` has nowhere to go in the short layout.
+        let segments = corpus(b"DTM+137:20260101:102'");
+        let audit = SHORT_DTM.audit(&segments);
+
+        assert_eq!(audit.segments_examined(), 1);
+        assert!(audit.has_contradictions(), "{audit}");
+        assert!(audit.findings().iter().any(|f| matches!(
+            f,
+            LayoutFinding::UndeclaredComponent {
+                element: 0,
+                component: 2,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn a_correct_layout_against_a_full_corpus_is_silent() {
+        let segments = corpus(b"DTM+137:20260101:102'");
+        let audit = FULL_DTM.audit(&segments);
+
+        assert!(!audit.has_contradictions(), "{audit}");
+        assert_eq!(audit.unconfirmed().count(), 0);
+    }
+
+    #[test]
+    fn a_slot_the_corpus_never_reaches_is_reported_as_unconfirmed_not_wrong() {
+        // This is the case that stalls a migration: the layout may be right or
+        // wrong and the fixtures cannot say.  Silence here would be a lie.
+        let segments = corpus(b"DTM+137:20260101'");
+        let audit = FULL_DTM.audit(&segments);
+
+        assert!(!audit.has_contradictions(), "{audit}");
+        let unconfirmed: Vec<&str> = audit
+            .unconfirmed()
+            .map(|slot| slot.data_element.as_str())
+            .collect();
+        assert_eq!(unconfirmed, ["2379"]);
+    }
+
+    #[test]
+    fn a_mandatory_slot_that_is_empty_everywhere_is_a_contradiction() {
+        // `DTM+:20260101:102` leaves the mandatory qualifier empty.
+        let segments = corpus(b"DTM+:20260101:102'");
+        let audit = FULL_DTM.audit(&segments);
+
+        assert!(audit.has_contradictions(), "{audit}");
+        assert!(audit.findings().iter().any(|f| matches!(
+            f,
+            LayoutFinding::MandatoryNeverPopulated { slot } if slot.data_element == "2005"
+        )));
+    }
+
+    #[test]
+    fn an_empty_corpus_proves_nothing_and_says_so() {
+        // Every slot comes back unconfirmed, and the count makes the reason
+        // obvious rather than leaving a green test to imply approval.
+        let segments = corpus(b"BGM+220'");
+        let audit = FULL_DTM.audit(&segments);
+
+        assert_eq!(audit.segments_examined(), 0);
+        assert_eq!(audit.unconfirmed().count(), 2); // 2380 and 2379
+        // The mandatory 2005 is a contradiction only in the sense that nothing
+        // populated it; with no DTM at all that is what "unexamined" looks like.
+        assert!(audit.has_contradictions());
+    }
+
+    #[test]
+    fn repeated_occurrences_all_count_as_evidence() {
+        // A component populated only in the second occurrence is still observed.
+        let segments = corpus(b"UNA:+.?*'DTM+137:20260101*137:20260102:102'");
+        let audit = FULL_DTM.audit(&segments);
+
+        assert!(!audit.has_contradictions(), "{audit}");
+        assert_eq!(audit.unconfirmed().count(), 0);
+    }
+
+    #[test]
+    fn a_mandatory_component_of_an_absent_conditional_composite_is_not_a_violation() {
+        // ISO 9735-1 §8.6 makes a mandatory component required "if the composite
+        // data element is present" — not unconditionally.  Treating it as
+        // unconditional condemns every optional composite in a definition, which
+        // is most of them: `UNB` S005 comp 1 (0022) is mandatory inside a
+        // conditional composite, so a conformant UNB without a password would
+        // have been reported as violating its own layout.
+        let corpus = corpus(b"UNB+UNOC:3+S+R+260101:0900+IC1'");
+        let audit = edifact_rs::service::UNB.audit(&corpus);
+
+        assert_eq!(audit.segments_examined(), 1);
+        assert!(!audit.has_contradictions(), "{audit}");
+        // It is still surfaced — as a slot the corpus cannot speak to.
+        assert!(audit.unconfirmed().any(|slot| slot.data_element == "0022"));
+    }
+
+    #[test]
+    fn a_mandatory_component_of_a_present_composite_is_still_required() {
+        // The other half of §8.6: once the composite is present, its mandatory
+        // components are.  S005 comp 1 is populated here, comp 2 is optional.
+        let corpus = corpus(b"UNB+UNOC:3+S+R+260101:0900+IC1+:AA'");
+        let audit = edifact_rs::service::UNB.audit(&corpus);
+
+        assert!(audit.has_contradictions(), "{audit}");
+        assert!(audit.findings().iter().any(|f| matches!(
+            f,
+            LayoutFinding::MandatoryNeverPopulated { slot } if slot.data_element == "0022"
+        )));
+    }
+
+    #[test]
+    fn a_directory_wide_audit_covers_every_tag_the_corpus_contains() {
+        use edifact_rs::{audit_directory, service};
+
+        let corpus =
+            corpus(b"UNB+UNOC:3+S+R+260101:0900+IC1'UNH+M1+ORDERS:D:96A:UN'UNT+2+M1'UNZ+1+IC1'");
+        let audits = audit_directory(service::lookup, &corpus);
+
+        // One per distinct tag, in the order they first appear.
+        assert_eq!(
+            audits
+                .iter()
+                .map(edifact_rs::LayoutAudit::tag)
+                .collect::<Vec<_>>(),
+            ["UNB", "UNH", "UNT", "UNZ"],
+        );
+        assert!(audits.iter().all(|a| !a.has_contradictions()));
+        // A tag the corpus does not contain is not audited at all, rather than
+        // returning nothing but `NeverObserved` noise.
+        assert!(!audits.iter().any(|a| a.tag() == "UNG"));
+    }
+
+    #[test]
+    fn one_finding_per_position_however_large_the_corpus() {
+        // 360 fixtures must not produce 360 copies of the same finding.
+        let mut input = Vec::new();
+        for _ in 0..360 {
+            input.extend_from_slice(b"DTM+137:20260101:102'");
+        }
+        let segments = corpus(&input);
+        let audit = SHORT_DTM.audit(&segments);
+
+        assert_eq!(audit.segments_examined(), 360);
+        assert_eq!(audit.contradictions().count(), 1, "{audit}");
+    }
+}

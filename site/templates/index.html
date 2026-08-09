@@ -46,7 +46,7 @@
       "name": "Does edifact-rs support EDIFACT syntax version 4 repeating data elements?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Yes. When a UNA service string advice declares a repetition separator at position 7, repeating data elements are split into separate occurrences rather than left glued into the value, per ISO 9735-4 section 3.1."
+        "text": "Yes. The repetition separator is read from the UNA service string advice, or — when an interchange has no UNA — from the syntax version in UNB S001, which makes it an asterisk for syntax version 4. Repeating data elements are then split into separate occurrences rather than left glued into the value, per ISO 9735-1 clause 8.6."
       }
     }
   ]

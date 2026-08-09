@@ -242,6 +242,21 @@ impl ValidationContextBuilder {
         self
     }
 
+    /// Check the directory-independent ISO 9735-1 syntax rules, and enable the
+    /// envelope layer.
+    ///
+    /// See [`SyntaxValidator`][crate::SyntaxValidator] for the exact rules. They
+    /// apply to any interchange from any partner in any directory, so this needs
+    /// no configuration and is worth enabling wherever the envelope layer is on.
+    pub fn with_syntax_validation(mut self) -> Self {
+        self.inner.envelope_enabled = true;
+        self.inner.validators.push(LayeredValidator {
+            layer: ValidationLayer::Envelope,
+            validator: Box::new(crate::validator::SyntaxValidator),
+        });
+        self
+    }
+
     /// Add a validator assigned to `layer`.
     pub fn with_validator<V>(mut self, layer: ValidationLayer, mut validator: V) -> Self
     where

@@ -9,6 +9,309 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`SegmentLayout::audit`** — check a hand-written layout against real messages.
+  Authoring a `SegmentDefinition` has a silent failure mode: a layout that
+  disagrees with the wire resolves `value_by_code` to the *wrong component*,
+  returns a plausible value, and every test passes, because the definition is the
+  only thing in the program that says what the positions mean. Pointing it at a
+  corpus is what breaks that circle.
+  Findings separate **disproof** from **absence of evidence**:
+  `UndeclaredElement` / `UndeclaredComponent` mean the wire carries a value the
+  layout has no slot for, `MandatoryNeverPopulated` means a mandatory slot is
+  empty everywhere, and `NeverObserved` means the corpus never reaches the slot
+  at all. `has_contradictions` deliberately excludes the last one — a corpus that
+  cannot confirm a position says nothing about whether it is right — and
+  `unconfirmed()` lists exactly which positions still need a human or a fixture.
+  Findings are deduplicated per position, so hundreds of fixtures report each
+  disagreement once. `LayoutAudit` implements `Display` for a pasteable report.
+- **`SegmentLayout::slots`**, the flattened position list `audit` is built on, so
+  downstream tooling can walk either a compile-time or a runtime layout without
+  knowing which it holds.
+- **`from_bytes_decoded`, `from_reader_decoded`, and their `_with_config` forms** —
+  parse while decoding from the repertoire the interchange's own `UNB` declares,
+  in one call a caller cannot forget to make. Forgetting is the failure mode
+  worth designing against: a `UNOC` corpus stored as UTF-8 parses fine, so the
+  tests pass and the first *conformant* counterparty message is the one rejected.
+  `from_reader_decoded` stays a **plain `Iterator`**: the repertoire sniff happens
+  on the first `next()`, so a decode failure arrives as the first item instead of
+  forcing the whole pipeline eager through a `Result` at construction.
+
+- **Data element representations — `Repr` and `ReprKind`.** Every UN/EDIFACT
+  directory prints `an..35` / `n8` / `a1` beside each data element, and it is
+  what partners actually reject on; nothing in the crate could express it, so
+  nothing could check it. `ComponentRef::with_repr` and `ElementRef::with_repr`
+  attach one, and `DirectoryValidator` then checks character class (`E048`),
+  maximum length (`E049`) and fixed length (`E050`). Positions with no declared
+  representation are not checked, so a partial table stays useful.
+  Length follows the standard rather than the obvious reading: ISO 9735-1 §6
+  counts **characters, not bytes**, so a `UNOC` `ü` counts once; §10 excludes a
+  numeric value's sign, decimal mark and exponent, so `-123.45` is five
+  characters. `n` admits exactly the ISO 6093 forms §10 leaves — no space, no
+  plus sign, and at least one digit after a decimal mark.
+- **The shipped service tables now carry their representations** from
+  ISO 9735-1 Annex C, so `UNZ+abc+IC1'` and an over-long `UNB` DE 0020 are
+  rejected with no directory involved.
+- **Version-dependent representations — `with_repr_by_syntax_version`.** `S004`
+  DE 0017 is the only position in the service directory where syntax version 4
+  is not a superset of version 3: version 3 transfers `YYMMDD` (`n6`), version 4
+  `CCYYMMDD` (`n8`). Declaring both keeps each version checked exactly. The
+  obvious compromise — a single `n..8` — validates *neither*: it accepts a
+  six-digit date in a version 4 interchange and a seven-digit one in either. The
+  checker reads the version from `UNB` S001 DE 0002, and accepts either form only
+  when there is no `UNB` to read, since guessing would reject conformant data.
+
+- **ISO 9735-1 §8.7.1 / §8.7.2 trailing separators** (`E051`, warning) and
+  **§9.1 insignificant characters** (`E053`, warning). `BGM+220+'` and
+  `DTM+137:20260101:'` end in separators the standard requires to be omitted;
+  `007` in a variable-length numeric field and `"ACME "` in a text one carry
+  characters §9.1 requires the sender to suppress. Both are fingerprints of a
+  fixed-width source record copied into a variable-length field, and both make a
+  receiver's equality comparison fail. The narrow cases are honoured: an
+  *interior* omission must keep its separator (§8.7.1 Figure 1), `BGM+'` is how
+  §8.4 spells a mandatory segment with no data, "a single zero before a decimal
+  mark is allowed", and a *fixed*-length element is exempt from §9.1 entirely.
+- **`audit_directory`** — audit every layout a corpus exercises in one call,
+  rather than looping over `SegmentLayout::audit`. Only tags present in the
+  corpus are audited, so definitions the fixtures never reach cannot bury the
+  findings that matter.
+
+### Fixed
+
+- **`SegmentLayout::audit` flagged mandatory components of absent conditional
+  composites.** ISO 9735-1 §8.6 makes a mandatory component required "if the
+  composite data element is present", not unconditionally — so the audit
+  condemned every optional composite in a definition. `UNB` S005 component 1
+  (DE 0022) is mandatory inside a conditional composite, which meant a
+  conformant `UNB` with no recipient password was reported as violating its own
+  shipped layout. Such a slot is now `NeverObserved`, and becomes a contradiction
+  again once the composite is present. `LayoutSlot` gained `element_status` to
+  carry the distinction.
+- **"Groups and messages mixed" was reported with the general code.** The
+  envelope validator already detected it (§7.1), but raised
+  `InvalidSegmentForMessage`, which maps to `CONTRL` 15 — "not supported in this
+  position". Code 30 exists for exactly this condition, and §5.3.3 asks for the
+  precise code over the general one. It is now `E052` and maps to 30.
+- **`ElementRef::max_repeat` was never enforced.** It had been carried on every
+  element since the type existed and exposed by a getter, and no validator read
+  it — so a definition stating "this element occurs once" constrained nothing,
+  while the caller who wrote it believed otherwise. `DirectoryValidator` now
+  raises `E047` when a repeating data element exceeds its declared maximum.
+- **Seven `CONTRL` codes were unreachable.** `SyntaxError` shipped
+  `InvalidCharacterType` (37), `DataElementTooLong` (39), `DataElementTooShort`
+  (40), `TooManyRepetitions` (35), `TrailingSeparator` (45) and
+  `GroupsAndMessagesMixed` (30), and nothing in the crate could ever produce a
+  finding that mapped to them. The representation, occurrence and suppression
+  checks above close all of them. The codes that remain caller-supplied —
+  "unknown interchange sender", "too old", "no agreement" — are partner policy
+  the crate cannot know, and stay available through
+  `Contrl::with_interchange_error`.
+
+### Changed
+
+- **Breaking:** `SegmentLayout` gains a required `slots` method. External
+  implementors must add it; the two shipped implementations already have it.
+- **Breaking:** `LayoutSlot` gains an `element_status` field, without which
+  §8.6's "if the composite is present" cannot be evaluated.
+
+### Documentation
+
+- **Why directory composites are not shipped, stated rather than implied.** The
+  [UN UNTDID licence](https://service.unece.org/trade/untdid/license.htm) grants
+  use of the Directory only in the country where it was acquired, requires the
+  copyright notice on every partial copy, and states that it may not be modified
+  and distributed. Transcribing it into `const` tables and publishing that is
+  precisely what it forbids, so no "stable subset" of composites can ship either.
+  `element = "code"` is turnkey for the service segments and authoring work for
+  everything else — the guides now say so where the feature is introduced.
+- **Decoding a stream without making it eager** — a streaming-guide section on
+  why `decode_reader` returns a `Result`, and what `from_reader_decoded` does
+  instead.
+- **`GroupDef` in return position** — `static SCHEMA: &[GroupDef]` compiles
+  unchanged, but a trait method returning one needs
+  `&'static [GroupDef<'static>]`, because an elided lifetime in return position
+  binds to `&self`.
+
+---
+
+## [0.16.0] — 2026-08-09
+
+An audit against the normative text of **ISO 9735-1:2002** rather than against
+secondary sources. It found a rejected repertoire, a service segment table that
+disagreed with Annex C, two structural rules nothing was checking, a `miette`
+rendering that contradicted the validation report about the same interchange, and
+a citation in every file that pointed at the wrong part of the standard.
+
+### Added
+
+- **`CONTRL` acknowledgements (ISO 9735-4).** The syntax and service report
+  message — the reply a partner is owed when their `UNB` DE 0031 asks for one —
+  built from a [`ValidationReport`] rather than assembled alongside it, so the
+  acknowledgement you send and the findings you logged cannot disagree.
+  [`Contrl::receipt`] is the §5.3.1 receipt (action `8`),
+  [`Contrl::acknowledgement`] the clean acknowledgement (action `7`), and
+  [`Contrl::from_report`] the full report.
+  Grouped and ungrouped interchanges are both handled: §5.3.1 makes segment
+  groups 1 and 3 mutually exclusive, so a subject that uses `UNG`/`UNE` is
+  reported through `UCF` and one that does not gets `UCM` directly under the
+  `UCI` — read off the subject rather than configured.
+  Each finding is placed at the **lowest reporting level that can both locate it
+  and legally carry its code**: Annex A decides which of `UCI`/`UCF`/`UCM`/`UCS`/`UCD`
+  may carry which code, so a "duplicate detected" stops at the message rather
+  than descending into a `UCS` that could not express it, and a value fault
+  descends all the way to a `UCD` with its data element and component positions.
+  [`SyntaxError::permitted_at`] exposes that table; [`SyntaxError::for_error`]
+  and [`SyntaxError::for_issue`] map the crate's own findings — and any
+  third-party validator's, via the stable code — onto the narrowest code Annex A
+  offers, which is what §5.3.3 asks for.
+  §5.3.2 is respected where it is easiest to get wrong: action code `4` means
+  "this level **and all lower levels** rejected", so a fault inside one message
+  leaves the `UCI` and any `UCF` above it at `7` and rejects only that message's
+  `UCM`, instead of taking down every other message in the interchange. A fault
+  in a group's own `UNG`/`UNE` rejects that `UCF` and nothing outside it.
+  `to_interchange_bytes` wraps the result in its own interchange with the parties
+  swapped, as §5.3 requires, and computes `UNT` DE 0074 and `UNZ` DE 0036 from
+  what was actually emitted.
+- **The `CONTRL` reporting segments** `UCI`, `UCF`, `UCM`, `UCS`, `UCD` and the
+  composite `S011`, in `edifact_rs::service`. A `CONTRL` is built entirely from
+  segments in that module, so `service::lookup` validates one with no directory
+  involved — which is also how the crate tests its own output.
+- **`MessageEnvelope::header_span` / `trailer_span`**, and a `span` on
+  [`EdifactError::SegmentCountMismatch`]. A count mismatch is the trailer's
+  fault; carrying its span is what puts the finding on that message rather than
+  on the interchange, in a rendered diagnostic as much as in a `CONTRL`.
+- **Syntax-version-aware repetition separator.** ISO 9735-1 §5.1 makes `*` the
+  default repetition separator, and syntax version 4 is the version that has one
+  at all. An interchange with no `UNA` therefore *does* declare its separator —
+  through `UNB` S001 DE 0002 — and the crate now reads it there. A version 4
+  interchange without a `UNA` had its repetitions silently glued into the value;
+  a version 3 one still keeps `*` as ordinary data, because there it is an
+  ordinary level A character. New
+  [`ServiceStringAdvice::for_syntax_version`] exposes the rule directly. The
+  slice and reader paths agree, the reader adopting it from the `UNB` it just
+  parsed.
+- **`ReaderConfig::with_service_string_advice`.** Parse with delimiters the
+  caller supplies instead of discovering them. A message lifted out of an
+  interchange carries neither a `UNA` nor a `UNB`, so nothing in it records what
+  its interchange declared — and parsing it with the defaults silently
+  mis-splits every value. There was previously no way to parse such a fragment
+  correctly at all. An explicit advice also outranks a `UNA` in the input, so it
+  doubles as the escape hatch when a partner's header disagrees with what they
+  actually send.
+- **`SyntaxValidator`**, wired up by
+  `ValidationContextBuilder::with_syntax_validation`. Checks the two
+  directory-independent rules that no count can catch: a segment carrying
+  nothing but its tag (§7.5/§8.5, new `E046`) and a data element value made only
+  of spaces (§9.3, new `E045`, a warning). Both are artefacts a hand-rolled
+  writer produces by accident, and both are rejected downstream.
+- **Structural envelope rules.** An interchange with no message and no group
+  (§7.1) is now `E042`, and a message with nothing between its `UNH` and `UNT`
+  (§7.3) is `E043`. Both were previously accepted: `UNZ+0` and `UNT+2` make the
+  declared counts agree with the absent content, so every other check passed.
+- **`#[edifact(repeat)]` and `EdifactEvent::RepeatElement`.** The typed layer
+  could not read *or* write a repeating data element — the crate's headline parse
+  feature had no counterpart in the derive, so anyone whose partner uses
+  repetitions had to drop to raw `Element::repetitions()`. `repeat` maps the
+  occurrences of one data element onto a `Vec<T>`, as distinct from `group`,
+  which repeats whole segments; `RFF+ON:1*ON:2` and `RFF+ON:1'RFF+ON:2'` are both
+  `Vec<T>` in Rust and nothing but the attribute could tell them apart.
+  The write side models the standard rather than the Rust shape: a repetition
+  separator divides whole **occurrences**, so every component of the element is
+  re-emitted for each one — which is why `RFF+ON:1*ON:2` carries its qualifier
+  twice — and a non-repeating field in the same element is transferred in every
+  occurrence. Round-trips are byte-exact.
+  `repeated_components` and `repeated_components_owned` expose the same read
+  across occurrences without the derive. Emitting a repetition under a writer
+  with no declared separator is refused with `E037` before the separator byte is
+  written.
+- **`WriterEmitter::with_charset`.** The typed serialization path had no way to
+  reach [`Writer::with_charset`], so a `#[derive(EdifactSerialize)]` struct
+  could only ever go out as UTF-8 — wrong for every `UNOC`…`UNOK` partner, and
+  wrong silently.
+- **The remaining ISO 9735-1 batch service segments**: `UNO` and `UNP` (object
+  header and trailer), `UGH` and `UGT` (anti-collision segment group), plus
+  composites `S020`, `S021`, `S022`. `service::ALL` and `service::lookup` now
+  cover all eleven.
+- **`UNG` DE 0058** (application password) on `GroupIdentifier` and
+  `FunctionalGroupEnvelope` — the element that was missing from the segment
+  definition entirely.
+- **`severity_for_error`**, the single mapping from [`EdifactError`] to
+  [`ValidationSeverity`].
+
+### Fixed
+
+- **`UNOG`–`UNOK`, `UNOX` and `UNOY` were rejected by the envelope validator.**
+  It kept its own list of syntax identifiers that stopped at `UNOF`, so `UNOY` —
+  the UTF-8 repertoire the crate decodes, documents, and recommends — failed
+  envelope validation as `E031` while [`Charset`] handled it happily, and `KECA`
+  passed the validator only to be refused by every decoder. The list is gone;
+  [`Charset::from_syntax_identifier`] is the one place that knows, and it
+  distinguishes "not a syntax identifier" (`E031`) from "a real repertoire this
+  crate cannot decode" (`E039`).
+- **`UNG` disagreed with ISO 9735-1 Annex C.1.5.** Six of its seven elements
+  were marked mandatory; in the standard only the group reference number (DE
+  0048) is, and the rest are conditional — including the three that dependency
+  note D2 ties together as "all or none". A directory validator run over a
+  conformant group header therefore demanded an application sender, an
+  application recipient, a date, a controlling agency, and a message version
+  that the standard does not require. Element 8, DE 0058, was missing outright.
+  Names now follow version 4 as well: *message* group identification, *group*
+  control count.
+- **A `UNA` whose decimal mark was a space or a duplicate was rejected.**
+  ISO 9735-1 Annex B keeps position 030 only for upward compatibility and states
+  that the character transferred there "shall be ignored by the recipient" — it
+  is the one position where the standard permits a space and the one exempt from
+  the distinctness rule. [`ServiceStringAdvice::is_valid`] now validates the
+  five *active* service characters and leaves the decimal mark alone.
+- **`miette` and the validation report disagreed about severity.** The
+  `Diagnostic` impl rendered a `UNZ`/`UNE`/`UNT` control-reference mismatch and a
+  composite-arity violation as warnings while [`ValidationReport`] filed both as
+  errors — so an operator reading the rendered output and a program reading the
+  report drew opposite conclusions about the same interchange. Both now read
+  `severity_for_error`.
+- **A package was reported as a stray segment.** `UNO`…`UNP` is a legal member
+  of an interchange (§7.9); saying "invalid segment for message type ENVELOPE"
+  sent the reader hunting for a corruption that was not there. It is now `E044`,
+  which says what it is and what to do: the object is arbitrary binary data
+  whose length `UNO` S022 DE 0810 declares, so split it out and parse the rest.
+- **Every ISO 9735 citation in the codebase pointed somewhere wrong.** The
+  repetition separator was attributed to "ISO 9735-4 §3.1" — part 4 is the
+  `CONTRL` message; the separator is §5.1 and Annex B of part 1, and its
+  semantics are §8.6/§8.7.3. `UNZ` count semantics cited §9.2 ("Significant
+  zeroes"), `UNB` element positions cited §6.1.1 (character repertoires),
+  functional groups cited §8 (inclusion and exclusion), numeric representation
+  cited §7 (syntax structures), and trailing-component omission cited §3.3
+  (normative references). All 30-odd are now the clause that actually says it.
+- **The validation guide documented functional groups as unsupported**, rejected
+  with `E029` — a code retired when native `UNG`/`UNE` support landed. Groups
+  have been parsed, paired, and count-checked for two releases.
+- **The core-concepts guide's worked interchange declared `UNT+6` for a
+  five-segment message**, called the space at UNA position 050 the *default*
+  repetition separator when §5.1 makes it `*`, and mislabelled component 2 of a
+  `NAD` party identification as component 1.
+
+### Changed
+
+- **Breaking:** `ReaderConfig` gains a `service_string_advice` field. Construct
+  it from [`ReaderConfig::default`] and the builder methods rather than with a
+  struct literal.
+- **Breaking:** [`EdifactEvent`] and [`OwnedEdifactEvent`] gain a
+  `RepeatElement` variant. Both are `#[non_exhaustive]`, so an exhaustive
+  `match` needs a wildcard arm.
+- **Breaking:** [`GroupIdentifier`] and [`FunctionalGroupEnvelope`] gain an
+  `application_password` field, and [`MessageEnvelope`] gains `header_span` and
+  `trailer_span`. All are `#[non_exhaustive]`.
+- **Breaking:** [`EdifactError::SegmentCountMismatch`] gains a `span` field.
+  `#[non_exhaustive]`, so a `..` in the pattern absorbs it.
+- **Breaking:** `service::ALL` now covers the `CONTRL` segments as well.
+  `service::ENVELOPE` is the previous list, and `service::CONTRL` the new one.
+- **Breaking:** `ServiceStringAdvice::default()` no longer implies that the
+  decimal mark participates in delimiter validation, and `is_valid` accepts UNA
+  strings it previously rejected. Nothing that was accepted before is rejected now.
+- `service::ALL` grew from seven definitions to eleven; code matching on its
+  length or iterating it positionally will see the new entries.
+
 ---
 
 ## [0.15.0] — 2026-08-09
@@ -1196,7 +1499,8 @@ Initial public release.  See commit history for full details.
 
 ---
 
-[Unreleased]: https://github.com/hupe1980/edifact-rs/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/hupe1980/edifact-rs/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/hupe1980/edifact-rs/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/hupe1980/edifact-rs/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/hupe1980/edifact-rs/compare/v0.10.0...v0.14.0
 [0.10.0]: https://github.com/hupe1980/edifact-rs/compare/v0.9.1...v0.10.0

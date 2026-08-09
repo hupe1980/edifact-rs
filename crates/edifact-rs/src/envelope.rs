@@ -1,21 +1,49 @@
 //! EDIFACT envelope validation — UNB / UNG / UNH / UNT / UNE / UNZ.
 //!
 //! Validates the full ISO 9735-1 interchange structure including optional
-//! functional groups (`UNG`/`UNE`).  The public surface is:
+//! groups (`UNG`/`UNE`).  The public surface is:
 //!
 //! - [`validate_envelope`] / [`validate_envelope_from_owned`] — fail-fast strict validation
 //! - [`validate_envelope_lenient`] / [`validate_envelope_lenient_from_owned`] — collects all errors
 //! - [`parse_unh`] — zero-copy parse of UNH identifier fields
 //!
-//! # UNZ count semantics (ISO 9735-1 §9.2)
+//! # What is checked
 //!
-//! `UNZ` DE 0036 (the interchange control count) has dual semantics:
-//! - **No functional groups**: counts `UNH`/`UNT` message pairs.
-//! - **With functional groups**: counts `UNG`/`UNE` group pairs.
+//! | Rule | Source |
+//! |---|---|
+//! | The interchange opens with `UNB` and closes with `UNZ` | §7.1 |
+//! | It contains at least one message or group | §7.1 |
+//! | A group opens with `UNG`, closes with `UNE`, and is not nested | §7.2 |
+//! | A message opens with `UNH`, closes with `UNT`, and has a body | §7.3 |
+//! | `UNZ` DE 0020 repeats `UNB` DE 0020 | Annex C.1.5, UNZ note 1 |
+//! | `UNE` DE 0048 repeats `UNG` DE 0048 | Annex C.1.5, UNE note 1 |
+//! | `UNT` DE 0062 repeats `UNH` DE 0062 | Annex C.1.5, UNT note 1 |
+//! | `UNH` DE 0062 and `UNG` DE 0048 are unique within the interchange | Annex C.1.5, notes 2 / 5 |
+//! | `UNB` S001 DE 0001 names a defined character repertoire | §6, Annex C.3.4 |
+//! | The declared counts match what is there | Annex C.3.4, DE 0036 / 0060 / 0074 |
 //!
-//! `validate_envelope` checks the UNZ count against the appropriate unit
-//! (groups when groups are present, messages otherwise) and reports
-//! [`EdifactError::MessageCountMismatch`] on any discrepancy.
+//! # Count semantics
+//!
+//! The three control counts are defined in Annex C.3.4 and each counts something
+//! different:
+//!
+//! - `UNZ` DE 0036 — "the number of messages and packages in an interchange or,
+//!   if used, the number of groups in an interchange".
+//! - `UNE` DE 0060 — "the number of messages and packages in the group".
+//! - `UNT` DE 0074 — "the number of segments in a message body, plus the message
+//!   header segment and message trailer segment".
+//!
+//! A discrepancy is reported as [`EdifactError::MessageCountMismatch`] or
+//! [`EdifactError::SegmentCountMismatch`].
+//!
+//! # Packages
+//!
+//! An interchange may carry packages (`UNO`…`UNP`) instead of, or alongside,
+//! messages (§7.9). The object inside a package is arbitrary binary data whose
+//! length is declared in `UNO` S022 DE 0810 — it is not EDIFACT-encoded and this
+//! crate does not tokenize it. A package therefore reaches this validator as
+//! [`EdifactError::PackageNotSupported`] rather than as a misleading complaint
+//! about a stray segment.
 
 use crate::{
     OwnedSegment,
@@ -90,7 +118,7 @@ impl SegmentReader for OwnedSegment {
 /// exposed.  Optional fields that are absent in the source are represented
 /// as empty strings (`syntax_version`, qualifiers) or `None` (optional fields).
 ///
-/// UNB element positions (ISO 9735-1 §6.1.1, 0-indexed):
+/// UNB element positions (ISO 9735-1 Annex C.1.5 (UNB), 0-indexed):
 ///
 /// ```text
 /// [0] S001  syntax identifier + version
@@ -167,7 +195,7 @@ pub struct InterchangeEnvelope {
     /// Processing priority code (UNB DE 0029, element index 7), if present.
     ///
     /// Indicates the processing priority requested by the sender.
-    /// Rarely used in practice; included here for full ISO 9735-1 §6.1.1 compliance.
+    /// Rarely used in practice; included here for full ISO 9735-1 Annex C.1.5 (UNB) compliance.
     pub processing_priority: Option<String>,
     /// Acknowledgement request flag (UNB DE 0031, element index 8).
     ///
@@ -280,13 +308,21 @@ pub struct MessageEnvelope {
     pub sequence_of_transfers: Option<u32>,
     /// Transfer position indicator (UNH S010 DE 0073, element index 3 comp 1), if present.
     ///
-    /// Values per ISO 9735-1 §6.2.3: `"C"` = continuation, `"F"` = first, `"L"` = last.
+    /// Values per ISO 9735-1 Annex C.3.4 (DE 0073): `"C"` = continuation, `"F"` = first, `"L"` = last.
     /// `None` when element \[3\] is absent.
     pub transfer_position: Option<String>,
     /// Declared segment count from `UNT`.
     pub declared_segment_count: u32,
     /// Actual segment count between this `UNH` and its `UNT`.
     pub actual_segment_count: u32,
+    /// Byte range of this message's `UNH`.
+    pub header_span: Span,
+    /// Byte range of this message's `UNT`.
+    ///
+    /// A count mismatch is the trailer's fault, so this is where a diagnostic
+    /// should point and what places the finding on this message when a
+    /// [`Contrl`][crate::Contrl] is built from the report.
+    pub trailer_span: Span,
 }
 
 impl std::fmt::Display for MessageEnvelope {
@@ -306,7 +342,7 @@ impl std::fmt::Display for MessageEnvelope {
 
 /// Extracted data from a single `UNG` / `UNE` functional group envelope.
 ///
-/// ISO 9735-1 §8 defines optional functional groups that may wrap one or more
+/// ISO 9735-1 §7.2 defines optional functional groups that may wrap one or more
 /// `UNH`/`UNT` message pairs.  This type carries the parsed fields from both
 /// the `UNG` header and its matching `UNE` trailer, plus the validated messages.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -339,6 +375,12 @@ pub struct FunctionalGroupEnvelope {
     pub version: String,
     /// Message release number, e.g. `"96A"`.
     pub release: String,
+    /// Application password (UNG DE 0058), if present.
+    ///
+    /// A password to the recipient's division, department, or sectional
+    /// application system — the group-level counterpart of the interchange's
+    /// `recipient_password`.
+    pub application_password: Option<String>,
     /// Declared message count from `UNE` DE 0060.
     pub declared_message_count: u32,
     /// Actual number of `UNH`/`UNT` pairs found within this group.
@@ -536,16 +578,17 @@ pub fn parse_unh<'a>(unh: &'a Segment<'a>) -> Result<MessageIdentifier<'a>, Edif
 /// original byte buffer.  Use this for zero-allocation group routing in streaming
 /// scenarios where you need to inspect group identity without full validation.
 ///
-/// # UNG element positions (ISO 9735-1 §8, 0-indexed)
+/// # UNG element positions (ISO 9735-1 Annex C.1.5, 0-indexed)
 ///
 /// ```text
-/// [0] DE 0038  functional group identification
+/// [0] DE 0038  message group identification
 /// [1] S006     application sender id + qualifier (comp 0 / comp 1)
 /// [2] S007     application recipient id + qualifier (comp 0 / comp 1)
 /// [3] S004     date + time (comp 0 / comp 1)
-/// [4] DE 0048  group reference number
+/// [4] DE 0048  group reference number     ← the only mandatory one
 /// [5] DE 0051  controlling agency
 /// [6] S008     version + release (comp 0 / comp 1)
+/// [7] DE 0058  application password
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -569,6 +612,8 @@ pub struct GroupIdentifier<'a> {
     pub version: &'a str,
     /// Message release number from S008 (UNG DE 0054), e.g. `"96A"`.
     pub release: &'a str,
+    /// Application password (UNG DE 0058); empty when absent.
+    pub application_password: &'a str,
 }
 
 /// Extract identifier fields from a `UNG` segment (zero allocation).
@@ -611,6 +656,10 @@ pub fn parse_ung<'a>(ung: &'a Segment<'a>) -> Result<GroupIdentifier<'a>, Edifac
     let s008 = ung.get_element(6);
     let version = s008.as_ref().and_then(|e| e.get_component(0)).unwrap_or("");
     let release = s008.as_ref().and_then(|e| e.get_component(1)).unwrap_or("");
+    let application_password = ung
+        .get_element(7)
+        .and_then(|e| e.get_component(0))
+        .unwrap_or("");
     Ok(GroupIdentifier {
         group_id,
         app_sender,
@@ -621,13 +670,14 @@ pub fn parse_ung<'a>(ung: &'a Segment<'a>) -> Result<GroupIdentifier<'a>, Edifac
         controlling_agency,
         version,
         release,
+        application_password,
     })
 }
 
 /// Validate the EDIFACT interchange envelope (fail-fast, borrowed-segment path).
 ///
 /// Supports direct-message interchanges and functional-group interchanges
-/// (ISO 9735-1 §8).  Returns [`ValidatedInterchange`] on success.
+/// (ISO 9735-1 §7.2).  Returns [`ValidatedInterchange`] on success.
 pub fn validate_envelope(segments: &[Segment<'_>]) -> Result<ValidatedInterchange, EdifactError> {
     validate_envelope_impl(segments)
 }
@@ -797,9 +847,17 @@ fn validate_envelope_collecting<S: SegmentReader>(
         }
     };
 
-    // UNZ unit count semantics (ISO 9735-1 §9.2):
-    //   with groups    → counts groups
-    //   without groups → counts messages
+    // ISO 9735-1 §7.1: an interchange "shall contain at least one group, or one
+    // message or one package".  An empty one is a delivery that says nothing —
+    // and `UNZ+0` makes the counts agree, so nothing else would catch it.
+    if functional_groups.is_empty() && messages.is_empty() {
+        sink.push(EdifactError::EmptyInterchange {
+            control_ref: interchange_env.control_ref.clone(),
+        });
+    }
+
+    // `UNZ` DE 0036 counts "the number of messages and packages in an interchange
+    // or, if used, the number of groups in an interchange" (Annex C.3.4).
     let actual_unit_count = if functional_groups.is_empty() {
         messages.len()
     } else {
@@ -825,6 +883,7 @@ fn validate_envelope_collecting<S: SegmentReader>(
                 expected: msg.declared_segment_count,
                 actual: msg.actual_segment_count,
                 message_ref: msg.message_ref.clone(),
+                span: msg.trailer_span,
             });
         }
     }
@@ -887,12 +946,15 @@ fn extract_interchange<S: SegmentReader>(
     let syntax_identifier = sink.required(unb, 0, 0);
     let syntax_version = unb.component(0, 1).unwrap_or("").to_owned();
 
-    // Validate DE 0001 against the ISO 9735-1 §3.1 list of defined syntax identifiers.
-    const VALID_SYNTAX_IDS: &[&str] = &["UNOA", "UNOB", "UNOC", "UNOD", "UNOE", "UNOF", "KECA"];
-    if !VALID_SYNTAX_IDS.contains(&syntax_identifier.as_str()) {
-        sink.push(EdifactError::UnrecognisedSyntaxIdentifier(
-            syntax_identifier.clone(),
-        ));
+    // DE 0001 names a character repertoire, so `Charset` is the one place that
+    // knows which values exist — and it distinguishes "not a syntax identifier"
+    // from "a real repertoire this crate cannot decode".  A second hand-kept list
+    // here is exactly how `UNOY` came to be rejected as unrecognised while
+    // `Charset` decoded it happily.
+    if !syntax_identifier.is_empty() {
+        if let Err(error) = crate::Charset::from_syntax_identifier(&syntax_identifier) {
+            sink.push(error);
+        }
     }
 
     let sender_id = sink.required(unb, 1, 0);
@@ -1046,7 +1108,7 @@ fn extract_with_groups<S: SegmentReader>(
     sink: &mut ErrorSink,
 ) -> Result<Vec<FunctionalGroupEnvelope>, EdifactError> {
     let mut groups: Vec<FunctionalGroupEnvelope> = Vec::new();
-    // DE 0048 must be unique within the interchange (ISO 9735-1 §8); DE 0062
+    // DE 0048 must be unique within the interchange (ISO 9735-1 §7.2); DE 0062
     // must be unique across the whole interchange, so the set spans all groups.
     let mut seen_group_refs: HashSet<String> = HashSet::new();
     let mut seen_message_refs: HashSet<String> = HashSet::new();
@@ -1072,7 +1134,7 @@ fn extract_with_groups<S: SegmentReader>(
                 } else {
                     Some(time_raw.to_owned())
                 };
-                // UNG DE 0048 — group reference number (mandatory per ISO 9735-1 §8)
+                // UNG DE 0048 — group reference number (mandatory per ISO 9735-1 §7.2)
                 let group_ref = sink.required(ung, 4, 0);
                 if !seen_group_refs.insert(group_ref.clone()) {
                     sink.push(EdifactError::DuplicateReference {
@@ -1082,10 +1144,14 @@ fn extract_with_groups<S: SegmentReader>(
                     });
                 }
                 let controlling_agency = ung.component(5, 0).unwrap_or("").to_owned();
-                // UNG S008 — version (DE 0052, comp 0) + release (DE 0054, comp 1)
-                // S008 is always at element index [6]; there is no element [7] in ISO 9735-1 §8.
+                // UNG S008 — version (DE 0052, comp 0) + release (DE 0054, comp 1).
                 let version = ung.component(6, 0).unwrap_or("").to_owned();
                 let release = ung.component(6, 1).unwrap_or("").to_owned();
+                // UNG DE 0058 — application password (Annex C.1.5, position 080).
+                let application_password = ung
+                    .component(7, 0)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned);
 
                 let une = &inner[une_idx];
                 let declared_str = sink.required(une, 0, 0);
@@ -1133,6 +1199,7 @@ fn extract_with_groups<S: SegmentReader>(
                     controlling_agency,
                     version,
                     release,
+                    application_password,
                     declared_message_count,
                     actual_message_count,
                     messages,
@@ -1147,10 +1214,15 @@ fn extract_with_groups<S: SegmentReader>(
                 });
             }
             "UNH" => {
-                // Mixing direct messages with functional groups is invalid.
-                return Err(EdifactError::InvalidSegmentForMessage {
-                    tag: "UNH".to_owned(),
-                    message_type: "ENVELOPE".to_owned(),
+                // §7.1: an interchange holds groups or ungrouped messages, never
+                // both — a message outside any group has no group to be counted
+                // in.  `CONTRL` has a code for exactly this (30), and §5.3.3
+                // asks for the precise one over the general.
+                return Err(EdifactError::GroupsAndMessagesMixed { span: seg.span() });
+            }
+            "UNO" | "UNP" => {
+                return Err(EdifactError::PackageNotSupported {
+                    tag: seg.tag().to_owned(),
                     span: seg.span(),
                 });
             }
@@ -1249,6 +1321,17 @@ fn extract_messages_flat<S: SegmentReader>(
                     u32::MAX,
                 );
 
+                // ISO 9735-1 §7.3: a message "shall contain at least one
+                // additional segment" beyond its header and trailer.  A bare
+                // `UNH'UNT+2+…'` is a well-formed envelope around nothing, and
+                // its own segment count confirms it — so only this rule sees it.
+                if segment_span < 3 {
+                    sink.push(EdifactError::EmptyMessage {
+                        message_ref: message_ref.clone(),
+                        span: unh.span(),
+                    });
+                }
+
                 messages.push(MessageEnvelope {
                     message_ref,
                     message_type,
@@ -1261,12 +1344,25 @@ fn extract_messages_flat<S: SegmentReader>(
                     transfer_position,
                     declared_segment_count,
                     actual_segment_count,
+                    header_span: unh.span(),
+                    trailer_span: seg.span(),
                 });
             }
             "UNT" => {
                 return Err(EdifactError::InvalidSegmentForMessage {
                     tag: "UNT".to_owned(),
                     message_type: "ENVELOPE".to_owned(),
+                    span: seg.span(),
+                });
+            }
+            // A package is a legal member of an interchange (§7.9), so reporting
+            // it as a stray segment would send the reader looking for a
+            // corruption that is not there.  The object between UNO and UNP is
+            // arbitrary binary and is not EDIFACT-encoded, which is the reason
+            // this crate declines it rather than the reason it is invalid.
+            "UNO" | "UNP" => {
+                return Err(EdifactError::PackageNotSupported {
+                    tag: seg.tag().to_owned(),
                     span: seg.span(),
                 });
             }
@@ -1504,7 +1600,7 @@ mod tests {
         assert_eq!(r.interchange.recipient_qualifier, "14");
     }
 
-    // UNB DE 0026 (app_ref) is at element index 6 (ISO 9735-1 §6.1.1):
+    // UNB DE 0026 (app_ref) is at element index 6 (ISO 9735-1 Annex C.1.5 (UNB)):
     // [4]=control_ref [5]=S005/password [6]=0026/app_ref [7]=0029 [8]=0031/ack [9]=0032/comms [10]=0035/test
 
     #[test]
@@ -1777,7 +1873,7 @@ mod tests {
         assert_eq!(result.functional_groups.len(), 1);
         assert_eq!(result.functional_groups[0].actual_message_count, 2);
         assert_eq!(result.messages.len(), 2);
-        // UNZ = 1 group (not 2 messages): ISO 9735-1 §9.2
+        // UNZ = 1 group (not 2 messages): ISO 9735-1 Annex C.3.4 (DE 0036)
         assert_eq!(result.interchange.actual_unit_count, 1);
         assert_eq!(result.interchange.declared_unit_count, 1);
     }
@@ -2021,7 +2117,7 @@ mod tests {
 
     #[test]
     fn unrecognised_syntax_identifier_returns_err() {
-        // DE 0001 "XXXX" is not in the ISO 9735-1 §3.1 defined list.
+        // DE 0001 is `UN` plus a two-character repertoire code; "XXXX" names none.
         let input = b"UNB+XXXX:3+S+R+200101:0900+1'\
                       UNH+1+ORDERS:D:96A:UN'\
                       BGM+220+PO-001+9'\
@@ -2035,8 +2131,15 @@ mod tests {
     }
 
     #[test]
-    fn all_valid_syntax_identifiers_accepted() {
-        for id in &["UNOA", "UNOB", "UNOC", "UNOD", "UNOE", "UNOF", "KECA"] {
+    fn every_repertoire_the_crate_decodes_is_accepted_in_the_unb() {
+        // The envelope validator used to keep its own list of syntax
+        // identifiers, which stopped at UNOF — so `UNOY`, the UTF-8 repertoire
+        // this crate decodes and documents, was rejected as unrecognised while
+        // `Charset` handled it happily.  One list, in `Charset`, now decides.
+        for id in [
+            "UNOA", "UNOB", "UNOC", "UNOD", "UNOE", "UNOF", "UNOG", "UNOH", "UNOI", "UNOJ", "UNOK",
+            "UNOY",
+        ] {
             let input = format!(
                 "UNB+{id}:3+S+R+200101:0900+1'UNH+1+ORDERS:D:96A:UN'BGM+220+PO-001+9'UNT+3+1'UNZ+1+1'"
             );
@@ -2046,6 +2149,61 @@ mod tests {
                 "syntax id '{id}' should be accepted, got {result:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_defined_but_undecodable_repertoire_says_so() {
+        // `UNOX` and `KECA` are real ISO 9735 syntax identifiers that this crate
+        // cannot decode.  "Unsupported" and "unrecognised" are different claims:
+        // one is about this crate, the other about the sender.
+        for id in ["UNOX", "KECA"] {
+            let input = format!(
+                "UNB+{id}:3+S+R+200101:0900+1'UNH+1+ORDERS:D:96A:UN'BGM+220+PO-001+9'UNT+3+1'UNZ+1+1'"
+            );
+            let result = parse_and_validate(input.as_bytes());
+            assert!(
+                matches!(result, Err(EdifactError::UnsupportedCharset { ref syntax_identifier }) if syntax_identifier == id),
+                "expected UnsupportedCharset for '{id}', got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_interchange_with_no_content_is_rejected() {
+        // ISO 9735-1 §7.1.  `UNZ+0` makes the control count agree, so this is
+        // invisible to every other check.
+        let result = parse_and_validate(b"UNB+UNOC:3+S+R+260101:0900+IC1'UNZ+0+IC1'");
+        assert!(
+            matches!(result, Err(EdifactError::EmptyInterchange { ref control_ref }) if control_ref == "IC1"),
+            "expected EmptyInterchange, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn a_message_with_no_body_is_rejected() {
+        // ISO 9735-1 §7.3: a message "shall contain at least one additional
+        // segment".  `UNT+2` is self-consistent, so only this rule sees it.
+        let result = parse_and_validate(
+            b"UNB+UNOC:3+S+R+260101:0900+IC1'UNH+1+ORDERS:D:96A:UN'UNT+2+1'UNZ+1+IC1'",
+        );
+        assert!(
+            matches!(result, Err(EdifactError::EmptyMessage { ref message_ref, .. }) if message_ref == "1"),
+            "expected EmptyMessage, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn a_package_is_reported_as_a_package() {
+        // Not as a stray segment: `UNO` is a legal member of an interchange
+        // (§7.9), and saying "invalid segment for message type ENVELOPE" sends
+        // the reader hunting for a corruption that is not there.
+        let result = parse_and_validate(
+            b"UNB+UNOC:4+S+R+260101:0900+IC1'UNO+PKG1+AAF:1+ZZZ+1024'UNZ+1+IC1'",
+        );
+        assert!(
+            matches!(result, Err(EdifactError::PackageNotSupported { ref tag, .. }) if tag == "UNO"),
+            "expected PackageNotSupported, got {result:?}"
+        );
     }
 
     // ── UNB S005 password qualifier ───────────────────────────────────────────

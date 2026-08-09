@@ -154,23 +154,71 @@ let ctx = ValidationContext::builder()
 
 ### Built-in envelope validation
 
-The `EnvelopeValidator` checks `UNB`/`UNH`/`UNT`/`UNZ` segment presence, message
-counts, and segment counts.  Enable it with `with_envelope_validation()`:
+The `EnvelopeValidator` checks the whole ISO 9735-1 interchange structure —
+`UNB`/`UNZ`, `UNG`/`UNE` groups, `UNH`/`UNT` messages, the control references
+that tie each pair together, and the three control counts. Enable it with
+`with_envelope_validation()`:
 
 ```rust
 use edifact_rs::{ValidationContext, from_bytes};
 
 # let segs: Vec<_> = from_bytes(b"UNB+UNOA:1+SENDER:1+RECEIVER:1+200101:1000+1'UNH+1+ORDERS:D:96A:UN'BGM+220+PO-1'UNT+3+1'UNZ+1+1'").collect::<Result<_,_>>()?;
 let ctx = ValidationContext::builder()
-    .with_envelope_validation()  // adds UNB/UNH/UNT/UNZ structure checks
+    .with_envelope_validation()  // adds UNB/UNG/UNH/UNT/UNE/UNZ structure checks
     .build();
 let report = ctx.validate_lenient(&segs);
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-`UNG`/`UNE` functional-group segments are rejected with `E029`
-(`FunctionalGroupNotSupported`) since this library does not process legacy
-functional groups.
+Groups (`UNG`/`UNE`) are parsed and validated natively: nesting is rejected, the
+`UNE` reference must repeat the `UNG` one, and `UNZ` DE 0036 is checked against
+the *group* count rather than the message count — which is what Annex C.3.4
+requires once groups are in play.
+
+Two structural rules have no count to give them away and so are worth calling
+out. An interchange with no message and no group (§7.1) raises `E042`, and a
+message with nothing between its `UNH` and `UNT` (§7.3) raises `E043`. In both
+cases the declared counts agree with the content, so every other check passes.
+
+### Syntax validation
+
+`SyntaxValidator` checks the rules that hold for **every** interchange from every
+partner in every directory, so it needs no configuration:
+
+| Rule | Source | Code |
+|---|---|---|
+| A segment carries at least one data element besides its tag | §7.5, §8.5 | `E046` |
+| No data element value is made only of spaces | §9.3 | `E045` (warning) |
+| No segment or composite ends in a separator with nothing after it | §8.7.1, §8.7.2 | `E051` (warning) |
+
+All three are artefacts a hand-rolled writer produces by accident — an `ABC'`
+where a conditional segment should have been dropped entirely, a fixed-width
+source field copied across with its padding intact, or a loop that emits a
+separator before checking whether another value follows. None trips a count
+check, and all are rejected downstream.
+
+The trailing-separator rule is narrower than it first looks. An **interior**
+omission must *keep* its separator (§8.7.1 Figure 1), so `BGM+220++9'` is correct
+and is not reported; and `BGM+'` is how §8.4 spells a mandatory segment with no
+data to carry. Only a separator with nothing after it at all is a fault.
+
+```rust
+use edifact_rs::{ValidationContext, from_bytes};
+
+let segments: Vec<_> = from_bytes(b"FTX+   'DTM'").collect::<Result<Vec<_>, _>>()?;
+
+let report = ValidationContext::builder()
+    .with_syntax_validation()
+    .build()
+    .validate_lenient(&segments);
+
+assert_eq!(report.errors()[0].error_code(), Some("E046"));   // DTM has no data element
+assert_eq!(report.warnings()[0].error_code(), Some("E045")); // FTX value is only spaces
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+Note that `DTM+'` is *not* `E046`: an empty data element is present, which is how
+EDIFACT spells a mandatory segment that has no data to carry (§8.4).
 
 ### Per-message reference stamping
 
@@ -561,6 +609,219 @@ exact count, whereas declared components are an upper bound.
 > **Scope note**: `DirectoryValidator` validates element presence and length within
 > individual segments. It does not enforce full EDIFACT message grammar (conditional
 > segment groups, repeat counts). Use `ProfileRulePack` for those cross-segment rules.
+
+---
+
+## Data element representations
+
+Every UN/EDIFACT directory prints a representation beside each data element, and
+it is what partners actually reject on: a sender identification of 40 characters
+where the standard says `an..35` is refused at the far end, long after it was
+sent. Attach it with `with_repr` and `DirectoryValidator` checks it:
+
+```rust
+use edifact_rs::{ComponentRef, ElementRef, Repr, SegmentDefinition, Status};
+
+static C507: &[ComponentRef] = &[
+    ComponentRef::new(1, "2005", Status::Mandatory).with_repr(Repr::an_up_to(3)),
+    ComponentRef::new(2, "2380", Status::Conditional).with_repr(Repr::an_up_to(35)),
+    ComponentRef::new(3, "2379", Status::Conditional).with_repr(Repr::an_up_to(3)),
+];
+static DTM_ELEMENTS: &[ElementRef] =
+    &[ElementRef::composite(1, "C507", Status::Mandatory, 1, C507)];
+static DTM: SegmentDefinition = SegmentDefinition::new("DTM", "Date/time/period", DTM_ELEMENTS);
+```
+
+Three things follow, and each maps onto a `CONTRL` code:
+
+| Violation | Code | `CONTRL` |
+|---|---|---|
+| Wrong character class | [`E048`](@/docs/error-reference.md#e048-invalidcharactertype) | 37 |
+| Longer than the maximum | [`E049`](@/docs/error-reference.md#e049-dataelementtoolong) | 39 |
+| Shorter than a fixed length | [`E050`](@/docs/error-reference.md#e050-dataelementtooshort) | 40 |
+
+Positions with no declared representation are simply not checked, so a partial
+table stays useful instead of becoming a source of false findings.
+
+### Length is counted in characters
+
+ISO 9735-1 §6: "one graphic character shall be counted as one character,
+irrespective of the number of bytes/octets required to encode it." A `UNOC` `ü`
+is one character, not the two bytes UTF-8 needs for it. The release character is
+excluded too (§5), which is automatic here because release sequences are resolved
+before validation.
+
+A **numeric** value excludes more. §10: "the length of a numeric data element
+value shall not include the minus sign (-), the decimal mark (. or ,), or the
+exponent mark (E or e) and its exponent" — so `-123.45` is five characters and
+fits `n..5`.
+
+### What `n` admits
+
+§10 takes ISO 6093's forms and subtracts: "The space character and plus sign
+shall not be allowed", and "when a decimal mark is transferred, there shall be at
+least one digit after the decimal mark". So `2`, `2.00`, `0.5`, `.5` and `-3E4`
+are numeric; `1.`, `.`, `+1` and `1 2` are not.
+
+### The shipped service tables carry theirs
+
+`edifact_rs::service` declares the representations from ISO 9735-1 Annex C, so
+`UNZ+abc+IC1'` (DE 0036 is `n..6`) and a 20-character `UNB` DE 0020 (`an..14`)
+are rejected with no directory involved.
+
+### The one position that changed between syntax versions
+
+`S004` DE 0017, the date of preparation, is the **only** place in the service
+directory where version 4 is not a superset of version 3. Version 3 transfers
+`YYMMDD` (`n6`); version 4 widened it to `CCYYMMDD` (`n8`) to be year-2000
+correct.
+
+Collapsing the two into `n..8` would validate *neither* version: a six-digit date
+would pass in a version 4 interchange, and a seven-digit one in either. So the
+table declares both, and the checker picks by the version in `UNB` S001 DE 0002:
+
+```rust
+use edifact_rs::{ComponentRef, Repr, Status};
+
+const DATE: ComponentRef = ComponentRef::new(1, "0017", Status::Mandatory)
+    .with_repr_by_syntax_version(Repr::n(6), Repr::n(8));
+```
+
+`UNB+UNOA:3+…+200101:0900+…` passes and `…+20200101:0900+…` is rejected; under
+`UNOC:4` it is the other way round.
+
+When the version cannot be determined — validating a bare message window, which
+carries no `UNB` — **both** forms are accepted, because guessing would reject
+conformant data from whichever version was guessed against. A length that is
+neither, such as seven digits, is still rejected.
+
+### Suppression of insignificant characters
+
+With a representation attached, `DirectoryValidator` also applies §9.1: leading
+zeroes must be suppressed in a **variable-length** numeric value, trailing spaces
+in a variable-length text one. Both raise
+[`E053`](@/docs/error-reference.md#e053-insignificantcharacters) as a warning.
+
+Two exemptions come straight from the clause. "Nevertheless, a single zero before
+a decimal mark is allowed", so `0.5` passes and `00.5` does not. And a
+*fixed*-length element is exempt entirely — `n3` is zero-padded by design.
+
+### Occurrence limits
+
+`ElementRef`'s `max_repeat` is enforced as well, raising
+[`E047`](@/docs/error-reference.md#e047-toomanyrepetitions) (`CONTRL` 35) when a
+repeating data element occurs more often than the definition allows.
+
+---
+
+## Auditing a hand-written layout
+
+Authoring a `SegmentDefinition` by hand has a silent failure mode. A layout that
+disagrees with the wire resolves `value_by_code` to the **wrong component**,
+returns a plausible value, and every test still passes — the definition is the
+only thing in the program that says what the positions mean, so nothing inside
+the program can contradict it.
+
+`SegmentLayout::audit` breaks that circle by pointing the definition at real
+messages:
+
+```rust
+use edifact_rs::{ComponentRef, ElementRef, SegmentDefinition, SegmentLayout, Status, from_bytes};
+
+// A hand-authored C507 that stops one component short of the directory.
+static C507: &[ComponentRef] = &[
+    ComponentRef::new(1, "2005", Status::Mandatory),
+    ComponentRef::new(2, "2380", Status::Conditional),
+];
+static DTM_ELEMENTS: &[ElementRef] =
+    &[ElementRef::composite(1, "C507", Status::Mandatory, 1, C507)];
+static DTM: SegmentDefinition = SegmentDefinition::new("DTM", "Date/time/period", DTM_ELEMENTS);
+
+let corpus: Vec<_> = from_bytes(b"DTM+137:20260101:102'").collect::<Result<Vec<_>, _>>()?;
+let audit = DTM.audit(&corpus);
+
+// The format qualifier `102` has nowhere to go — the layout is short.
+assert!(audit.has_contradictions());
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+Three kinds of finding come back, and the distinction between them is the point:
+
+| Finding | Means |
+|---|---|
+| `UndeclaredElement` / `UndeclaredComponent` | The wire carries a value the layout has no slot for — the layout is **wrong**. |
+| `MandatoryNeverPopulated` | A slot the layout calls mandatory is empty everywhere — the status or the position is **wrong**. |
+| `NeverObserved` | Nothing in the corpus reaches this slot — the corpus **cannot confirm it**. |
+
+`NeverObserved` is not a defect, and `has_contradictions` deliberately excludes
+it. It is the honest answer to "does my definition match the directory?" when the
+fixtures are too thin to say, and it names exactly which positions still need a
+human to check them against the directory — or a fixture that reaches them:
+
+```rust
+# use edifact_rs::{ComponentRef, ElementRef, SegmentDefinition, SegmentLayout, Status, from_bytes};
+# static C507: &[ComponentRef] = &[
+#     ComponentRef::new(1, "2005", Status::Mandatory),
+#     ComponentRef::new(2, "2380", Status::Conditional),
+#     ComponentRef::new(3, "2379", Status::Conditional),
+# ];
+# static DTM_ELEMENTS: &[ElementRef] =
+#     &[ElementRef::composite(1, "C507", Status::Mandatory, 1, C507)];
+# static DTM: SegmentDefinition = SegmentDefinition::new("DTM", "Date/time/period", DTM_ELEMENTS);
+// No fixture in this corpus carries a format qualifier.
+let corpus: Vec<_> = from_bytes(b"DTM+137:20260101'").collect::<Result<Vec<_>, _>>()?;
+let audit = DTM.audit(&corpus);
+
+assert!(!audit.has_contradictions());          // nothing is disproved …
+let pending: Vec<&str> = audit.unconfirmed().map(|s| s.data_element.as_str()).collect();
+assert_eq!(pending, ["2379"]);                 // … but 2379 is still unverified
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+The assertion to put in a test is `!audit.has_contradictions()`, together with
+`audit.segments_examined() > 0` — an audit over a corpus with none of the segment
+proves nothing, and a green test that silently proved nothing is the failure this
+whole facility exists to prevent. `LayoutAudit` also implements `Display`, so
+printing it gives a report you can paste into a review.
+
+Findings are deduplicated per position, so a corpus of hundreds of fixtures
+reports each disagreement once rather than once per message.
+
+### Auditing a whole directory
+
+`audit_directory` answers the question a hand-authored directory actually raises
+— *which of my definitions does this corpus disprove, and which can it not speak
+to?* — in one call:
+
+```rust
+use edifact_rs::{audit_directory, from_bytes, service};
+
+let corpus: Vec<_> = from_bytes(
+    b"UNB+UNOC:3+S+R+260101:0900+IC1'UNH+M1+ORDERS:D:96A:UN'UNT+2+M1'UNZ+1+IC1'",
+)
+.collect::<Result<Vec<_>, _>>()?;
+
+for audit in audit_directory(service::lookup, &corpus) {
+    assert!(!audit.has_contradictions(), "{audit}");
+}
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+Only tags the corpus contains are audited. A definition the fixtures never
+exercise would produce nothing but `NeverObserved` entries and bury the findings
+that matter — ask `SegmentLayout::audit` directly for those.
+
+### Mandatory components of an absent composite
+
+ISO 9735-1 §8.6 makes a mandatory component required "**if** the composite data
+element is present", not unconditionally — and the audit follows that. `UNB` S005
+component 1 (DE 0022, the recipient password) is mandatory *inside* a composite
+that is itself conditional, so a conformant `UNB` with no password does not
+violate its own layout. It comes back as `NeverObserved` instead, which is the
+truthful answer: the corpus has nothing to say about it.
+
+Once the composite *is* present, its mandatory components are required again, and
+a missing one is a contradiction.
 
 ---
 

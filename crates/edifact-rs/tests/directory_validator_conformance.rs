@@ -303,3 +303,286 @@ fn faults_from_different_check_families_are_all_reported() {
         "component-count fault not reported: {codes:?}"
     );
 }
+
+// ── representation and repetition enforcement ─────────────────────────────────
+
+mod representation {
+    use edifact_rs::{
+        ComponentRef, DirectoryValidator, ElementRef, Repr, SegmentDefinition, Status,
+        ValidationContext, ValidationLayer, from_bytes, service,
+    };
+
+    fn service_report(input: &[u8]) -> edifact_rs::ValidationReport {
+        let segments: Vec<_> = from_bytes(input)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
+        let validator = DirectoryValidator::new(
+            "iso-9735-service",
+            service::lookup,
+            |_, _| true,
+            |_, _| None,
+            |_, _| None,
+            None,
+        );
+        ValidationContext::builder()
+            .with_validator(ValidationLayer::Structure, validator)
+            .build()
+            .validate_lenient(&segments)
+    }
+
+    fn codes(report: &edifact_rs::ValidationReport) -> Vec<&str> {
+        report
+            .iter_issues()
+            .filter_map(edifact_rs::ValidationIssue::error_code)
+            .collect()
+    }
+
+    #[test]
+    fn a_non_numeric_control_count_is_rejected() {
+        // UNZ DE 0036 is `n..6`.  Nothing previously checked this: the segment
+        // has the right arity, so structure validation passed it through.
+        let report = service_report(b"UNZ+abc+IC1'");
+        assert!(codes(&report).contains(&"E048"), "{report:#?}");
+    }
+
+    #[test]
+    fn an_oversized_interchange_control_reference_is_rejected() {
+        // DE 0020 is `an..14`; this is 20 characters.
+        let report = service_report(b"UNZ+1+ABCDEFGHIJKLMNOPQRST'");
+        assert!(codes(&report).contains(&"E049"), "{report:#?}");
+    }
+
+    #[test]
+    fn a_fixed_length_value_that_is_short_is_rejected() {
+        // S001 DE 0001 is `a4`; `UNO` is three characters.
+        let report = service_report(b"UNB+UNO:3+S+R+260101:0900+IC1'");
+        assert!(codes(&report).contains(&"E050"), "{report:#?}");
+    }
+
+    #[test]
+    fn length_is_counted_in_characters_not_bytes() {
+        // ISO 9735-1 §6: one graphic character counts once whatever its
+        // encoding.  `ü` is two UTF-8 bytes and must not count as two.
+        static NAME: &[ElementRef] =
+            &[ElementRef::new(1, "9999", Status::Mandatory, 1).with_repr(Repr::an_up_to(5))];
+        static SEG: SegmentDefinition = SegmentDefinition::new("ZZZ", "Test", NAME);
+
+        let segments: Vec<_> = from_bytes("ZZZ+üüüüü'".as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
+        let validator = DirectoryValidator::new(
+            "t",
+            |tag| (tag == "ZZZ").then_some(&SEG),
+            |_, _| true,
+            |_, _| None,
+            |_, _| None,
+            None,
+        );
+        let report = ValidationContext::builder()
+            .with_validator(ValidationLayer::Structure, validator)
+            .build()
+            .validate_lenient(&segments);
+        assert!(!report.has_errors(), "{report:#?}");
+    }
+
+    #[test]
+    fn a_numeric_length_excludes_sign_decimal_mark_and_exponent() {
+        // ISO 9735-1 §10: the length "shall not include the minus sign, the
+        // decimal mark, or the exponent mark and its exponent".  `-123.45` is
+        // five characters, so `n..5` admits it.
+        static AMOUNT: &[ElementRef] =
+            &[ElementRef::new(1, "9999", Status::Mandatory, 1).with_repr(Repr::n_up_to(5))];
+        static SEG: SegmentDefinition = SegmentDefinition::new("ZZZ", "Test", AMOUNT);
+
+        let segments: Vec<_> = from_bytes(b"ZZZ+-123.45'")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
+        let validator = DirectoryValidator::new(
+            "t",
+            |tag| (tag == "ZZZ").then_some(&SEG),
+            |_, _| true,
+            |_, _| None,
+            |_, _| None,
+            None,
+        );
+        let report = ValidationContext::builder()
+            .with_validator(ValidationLayer::Structure, validator)
+            .build()
+            .validate_lenient(&segments);
+        assert!(!report.has_errors(), "{report:#?}");
+    }
+
+    #[test]
+    fn a_plus_sign_or_space_is_not_a_numeric_value() {
+        // §10 excludes both explicitly.
+        for value in [&b"ZZZ++123'"[..], &b"ZZZ+1 2'"[..]] {
+            static AMOUNT: &[ElementRef] =
+                &[ElementRef::new(1, "9999", Status::Mandatory, 1).with_repr(Repr::n_up_to(9))];
+            static SEG: SegmentDefinition = SegmentDefinition::new("ZZZ", "Test", AMOUNT);
+
+            let segments: Vec<_> = from_bytes(value)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("parse");
+            let validator = DirectoryValidator::new(
+                "t",
+                |tag| (tag == "ZZZ").then_some(&SEG),
+                |_, _| true,
+                |_, _| None,
+                |_, _| None,
+                None,
+            );
+            let report = ValidationContext::builder()
+                .with_validator(ValidationLayer::Structure, validator)
+                .build()
+                .validate_lenient(&segments);
+            // `ZZZ++123` leaves element 0 empty and puts `123` in element 1;
+            // `ZZZ+1 2` is a single value with an embedded space.
+            assert!(
+                report.has_errors(),
+                "{:?} must be rejected: {report:#?}",
+                std::str::from_utf8(value).unwrap()
+            );
+        }
+    }
+
+    // ── the one position where v4 is not a superset of v3 ────────────────────
+    //
+    // S004 DE 0017: version 3 transfers YYMMDD (n6), version 4 CCYYMMDD (n8).
+    // Collapsing them into `n..8` would validate neither version correctly, so
+    // the table declares both and the checker picks by UNB S001 DE 0002.
+
+    #[test]
+    fn a_version_3_date_is_checked_as_n6() {
+        let ok = service_report(b"UNB+UNOA:3+SENDER+RECEIVER+200101:0900+IC1'");
+        assert!(!ok.has_errors(), "YYMMDD must pass under v3: {ok:#?}");
+
+        // A version 4 date in a version 3 interchange is wrong for that version.
+        let bad = service_report(b"UNB+UNOA:3+SENDER+RECEIVER+20200101:0900+IC1'");
+        assert!(
+            codes(&bad).contains(&"E049"),
+            "CCYYMMDD must be rejected under v3: {bad:#?}"
+        );
+    }
+
+    #[test]
+    fn a_version_4_date_is_checked_as_n8() {
+        let ok = service_report(b"UNB+UNOC:4+SENDER+RECEIVER+20260101:0900+IC1'");
+        assert!(!ok.has_errors(), "CCYYMMDD must pass under v4: {ok:#?}");
+
+        // The `n..8` compromise this replaced accepted exactly this — a version
+        // 3 date silently passing as a version 4 one.
+        let bad = service_report(b"UNB+UNOC:4+SENDER+RECEIVER+260101:0900+IC1'");
+        assert!(
+            codes(&bad).contains(&"E050"),
+            "YYMMDD must be rejected under v4: {bad:#?}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_syntax_version_accepts_either_date_form() {
+        // Validating a message window, or any slice with no UNB, cannot know the
+        // version.  Guessing would reject conformant data from whichever version
+        // was guessed against, so both forms are accepted.
+        static S004: &[ComponentRef] = &[ComponentRef::new(1, "0017", Status::Mandatory)
+            .with_repr_by_syntax_version(Repr::n(6), Repr::n(8))];
+        static ELEMENTS: &[ElementRef] =
+            &[ElementRef::composite(1, "S004", Status::Mandatory, 1, S004)];
+        static SEG: SegmentDefinition = SegmentDefinition::new("ZZZ", "Test", ELEMENTS);
+
+        for date in [&b"ZZZ+200101'"[..], &b"ZZZ+20200101'"[..]] {
+            let segments: Vec<_> = from_bytes(date)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("parse");
+            let validator = DirectoryValidator::new(
+                "t",
+                |tag| (tag == "ZZZ").then_some(&SEG),
+                |_, _| true,
+                |_, _| None,
+                |_, _| None,
+                None,
+            );
+            let report = ValidationContext::builder()
+                .with_validator(ValidationLayer::Structure, validator)
+                .build()
+                .validate_lenient(&segments);
+            assert!(
+                !report.has_errors(),
+                "{:?} must pass with no UNB: {report:#?}",
+                std::str::from_utf8(date).unwrap()
+            );
+        }
+
+        // A length that is neither form is still wrong.
+        let segments: Vec<_> = from_bytes(b"ZZZ+2001011'")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
+        let validator = DirectoryValidator::new(
+            "t",
+            |tag| (tag == "ZZZ").then_some(&SEG),
+            |_, _| true,
+            |_, _| None,
+            |_, _| None,
+            None,
+        );
+        let report = ValidationContext::builder()
+            .with_validator(ValidationLayer::Structure, validator)
+            .build()
+            .validate_lenient(&segments);
+        assert!(report.has_errors(), "seven digits is neither n6 nor n8");
+    }
+
+    #[test]
+    fn max_repeat_is_enforced() {
+        // Previously dead metadata: every ElementRef carried a maximum and
+        // nothing read it, so a definition saying "once" constrained nothing.
+        static ONCE: &[ElementRef] = &[ElementRef::new(1, "9999", Status::Mandatory, 1)];
+        static SEG: SegmentDefinition = SegmentDefinition::new("ZZZ", "Test", ONCE);
+
+        let segments: Vec<_> = from_bytes(b"UNA:+.?*'ZZZ+a*b*c'")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
+        let validator = DirectoryValidator::new(
+            "t",
+            |tag| (tag == "ZZZ").then_some(&SEG),
+            |_, _| true,
+            |_, _| None,
+            |_, _| None,
+            None,
+        );
+        let report = ValidationContext::builder()
+            .with_validator(ValidationLayer::Structure, validator)
+            .build()
+            .validate_lenient(&segments);
+        assert!(
+            report.iter_issues().any(|i| i.error_code() == Some("E047")),
+            "{report:#?}"
+        );
+    }
+
+    #[test]
+    fn a_definition_without_representations_reports_nothing_new() {
+        // A partial table must stay useful rather than become a source of
+        // false findings, so unstated positions are simply not checked.
+        static BARE: &[ComponentRef] = &[ComponentRef::new(1, "9999", Status::Mandatory)];
+        static ELEMENTS: &[ElementRef] =
+            &[ElementRef::composite(1, "C999", Status::Mandatory, 1, BARE)];
+        static SEG: SegmentDefinition = SegmentDefinition::new("ZZZ", "Test", ELEMENTS);
+
+        let segments: Vec<_> = from_bytes(b"ZZZ+anything at all goes here'")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
+        let validator = DirectoryValidator::new(
+            "t",
+            |tag| (tag == "ZZZ").then_some(&SEG),
+            |_, _| true,
+            |_, _| None,
+            |_, _| None,
+            None,
+        );
+        let report = ValidationContext::builder()
+            .with_validator(ValidationLayer::Structure, validator)
+            .build()
+            .validate_lenient(&segments);
+        assert!(!report.has_errors(), "{report:#?}");
+    }
+}

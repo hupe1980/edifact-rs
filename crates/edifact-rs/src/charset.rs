@@ -1,9 +1,10 @@
 //! EDIFACT character repertoires — the `UNB` S001 DE 0001 syntax identifier.
 //!
 //! An EDIFACT interchange is self-describing about its encoding: `UNB` S001
-//! component 1 names the repertoire the payload is written in, and the service
-//! characters, segment tags, and that identifier itself are always ASCII, so the
-//! header can be read before the encoding is known (ISO 9735-1 §4).
+//! component 1 names the repertoire the payload is written in, and ISO 9735-1
+//! §6 requires everything up to and including S001 to be written in the ISO/IEC
+//! 646 basic code table — so the header can always be read before the encoding
+//! is known.
 //!
 //! # Why this exists
 //!
@@ -104,6 +105,12 @@ enum HighHalf {
 }
 
 /// ISO 9735 level A punctuation, in addition to `A`–`Z`, `0`–`9`, and space.
+///
+/// The first group (`.` through `=`) plus the four service characters
+/// (`'` `+` `:` `?`) is available unconditionally. The second group
+/// (`!` `"` `%` `&` `*` `;` `<` `>`) is level A too, but ISO 9735 withholds it
+/// from telex transmission — a transport distinction this crate does not model,
+/// so those characters are permitted.
 const LEVEL_A_PUNCTUATION: &[char] = &[
     '.', ',', '-', '(', ')', '/', '=', '\'', '+', ':', '?', '!', '"', '%', '&', '*', ';', '<', '>',
 ];
@@ -516,7 +523,7 @@ impl<R: Read> Read for DecodingReader<R> {
 /// to learn the encoding *before* decoding anything, and running the parser over
 /// a `UNOC` interchange can fail on a sender name two elements later. Service
 /// characters, segment tags, and DE 0001 itself are ASCII in every repertoire
-/// (ISO 9735-1 §4), so this scan is always safe.
+/// (ISO 9735-1 §6), so this scan is always safe.
 ///
 /// Returns `Ok(None)` when the input carries no `UNB` — an interchange fragment,
 /// or a bare message.

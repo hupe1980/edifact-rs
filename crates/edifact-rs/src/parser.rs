@@ -306,6 +306,19 @@ pub struct ReaderConfig {
     ///
     /// Default: `None` (unlimited).
     pub max_messages: Option<usize>,
+    /// Service characters to use instead of reading them from the input.
+    ///
+    /// `None` — the default — discovers them the way ISO 9735-1 says a receiver
+    /// should: from a leading `UNA` if there is one, otherwise the §5.1 defaults
+    /// with the repetition separator resolved from `UNB` S001 DE 0002.
+    ///
+    /// Set this when the input is a **fragment** that carries neither: a single
+    /// message lifted out of an interchange has no `UNA` and no `UNB`, so nothing
+    /// in it records the delimiters its interchange declared, and parsing it with
+    /// the defaults silently mis-splits every value.
+    ///
+    /// Default: `None`.
+    pub service_string_advice: Option<crate::tokenizer::ServiceStringAdvice>,
 }
 
 impl Default for ReaderConfig {
@@ -315,6 +328,7 @@ impl Default for ReaderConfig {
             max_segments: None,
             max_input_bytes: None,
             max_messages: None,
+            service_string_advice: None,
         }
     }
 }
@@ -345,6 +359,33 @@ impl ReaderConfig {
     #[must_use]
     pub fn max_messages(mut self, limit: usize) -> Self {
         self.max_messages = Some(limit);
+        self
+    }
+
+    /// Parse with these service characters instead of discovering them.
+    ///
+    /// See [`service_string_advice`][Self::service_string_advice].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::{ReaderConfig, ServiceStringAdvice, from_bytes_with_config};
+    ///
+    /// // A message lifted out of an interchange whose UNA declared `;` and `~`.
+    /// let ssa = ServiceStringAdvice::from_bytes(b"UNA:;.? ~")?;
+    /// let config = ReaderConfig::default().with_service_string_advice(ssa);
+    ///
+    /// let segments: Vec<_> = from_bytes_with_config(b"BGM;220;PO-4711~", config)
+    ///     .collect::<Result<Vec<_>, _>>()?;
+    /// assert_eq!(segments[0].element_str(1), Some("PO-4711"));
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    #[must_use]
+    pub fn with_service_string_advice(
+        mut self,
+        ssa: crate::tokenizer::ServiceStringAdvice,
+    ) -> Self {
+        self.service_string_advice = Some(ssa);
         self
     }
 }
@@ -391,6 +432,10 @@ pub struct OwnedSegmentStream<R: BufRead> {
     in_message: bool,
     /// Total bytes consumed from the reader (UNA header + segment data).
     bytes_consumed: u64,
+    /// Whether the delimiters are already settled — because the caller supplied
+    /// them, or because a `UNA` stated them.  While this is `false` the `UNB`'s
+    /// own syntax version still gets to choose the repetition separator.
+    delimiters_settled: bool,
 }
 
 impl<R: BufRead> OwnedSegmentStream<R> {
@@ -399,9 +444,13 @@ impl<R: BufRead> OwnedSegmentStream<R> {
     }
 
     fn with_config(reader: R, config: ReaderConfig) -> Self {
+        let (ssa, delimiters_settled) = match config.service_string_advice {
+            Some(ssa) => (ssa, true),
+            None => (crate::tokenizer::ServiceStringAdvice::default(), false),
+        };
         Self {
             reader,
-            ssa: crate::tokenizer::ServiceStringAdvice::default(),
+            ssa,
             state: StreamState::Init,
             stream_offset: 0,
             config,
@@ -409,6 +458,23 @@ impl<R: BufRead> OwnedSegmentStream<R> {
             messages_yielded: 0,
             in_message: false,
             bytes_consumed: 0,
+            delimiters_settled,
+        }
+    }
+
+    /// Adopt the repetition separator implied by a `UNB`'s syntax version.
+    ///
+    /// Only reached when nothing has already settled the delimiters: a `UNA`
+    /// states all six explicitly, and a caller-supplied advice is by definition
+    /// the last word.  Version 4 is the version that has a repetition separator
+    /// at all, and its default is `*` (ISO 9735-1 §5.1).
+    ///
+    /// The `UNB` itself has no repeating data elements, so re-reading it under
+    /// the updated advice would not change a thing.
+    fn adopt_syntax_version(&mut self, unb: &OwnedSegment) {
+        self.delimiters_settled = true;
+        if unb.component_str(0, 1) == Some("4") {
+            self.ssa.repetition_sep = b'*';
         }
     }
 
@@ -602,6 +668,9 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
                             self.state = StreamState::Done;
                             return Some(Err(error));
                         }
+                        if !self.delimiters_settled && seg.tag == "UNB" {
+                            self.adopt_syntax_version(&seg);
+                        }
                         self.account(&seg.tag);
                         return Some(Ok(seg));
                     }
@@ -636,6 +705,8 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
                 &mut scanned,
                 &mut slow_offset,
                 self.config.max_segment_bytes,
+                &mut self.delimiters_settled,
+                self.config.service_string_advice.is_some(),
             ) {
                 Ok(Some(r)) => r,
                 Ok(None) => return None,
@@ -666,6 +737,9 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
                     if let Some(error) = self.check_limits(&seg.tag) {
                         self.state = StreamState::Done;
                         return Some(Err(error));
+                    }
+                    if !self.delimiters_settled && seg.tag == "UNB" {
+                        self.adopt_syntax_version(&seg);
                     }
                     self.account(&seg.tag);
                     return Some(Ok(seg));
@@ -717,12 +791,15 @@ pub fn from_reader_with_config<R: Read>(
     from_bufread_stream_with_config(BufReader::new(reader), config)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_next_raw_segment<R: BufRead>(
     reader: &mut R,
     ssa: &mut crate::tokenizer::ServiceStringAdvice,
     scanned_header: &mut bool,
     stream_offset: &mut usize,
     max_segment_bytes: usize,
+    delimiters_settled: &mut bool,
+    advice_overridden: bool,
 ) -> Result<Option<crate::tokenizer::RawSegment>, EdifactError> {
     loop {
         let Some((first_offset, first)) = read_next_non_ws_byte(reader, stream_offset)? else {
@@ -740,7 +817,7 @@ fn read_next_raw_segment<R: BufRead>(
                 for slot in una.iter_mut().skip(3) {
                     *slot = read_required_byte(reader, stream_offset)?;
                 }
-                *ssa = crate::tokenizer::ServiceStringAdvice {
+                let declared = crate::tokenizer::ServiceStringAdvice {
                     component_sep: una[3],
                     element_sep: una[4],
                     decimal_mark: una[5],
@@ -748,9 +825,16 @@ fn read_next_raw_segment<R: BufRead>(
                     repetition_sep: una[7],
                     segment_term: una[8],
                 };
-                if !ssa.is_valid() {
+                if !declared.is_valid() {
                     return Err(EdifactError::InvalidUna);
                 }
+                // A malformed UNA is still an error when the caller supplied its
+                // own advice — the input is broken either way — but the caller's
+                // choice, not the header's, is what parsing then uses.
+                if !advice_overridden {
+                    *ssa = declared;
+                }
+                *delimiters_settled = true;
                 *scanned_header = true;
                 continue;
             }
@@ -1015,6 +1099,60 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         assert_eq!(from_reader[1].element_str(0), Some("XXXXXX"));
+    }
+
+    #[test]
+    fn the_reader_adopts_the_repetition_separator_from_the_unb_syntax_version() {
+        // The slice path resolves this before tokenizing; the reader can only
+        // learn it once the UNB has been parsed.  Both must agree.
+        let input = b"UNB+UNOC:4+S+R+260101:0900+IC1'RFF+ON:1*ON:2'UNZ+0+IC1'";
+
+        let from_slice: Vec<_> = crate::from_bytes(input)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("slice path");
+        let from_reader = from_reader(std::io::Cursor::new(&input[..])).expect("reader path");
+
+        assert_eq!(from_slice[1].get_element(0).unwrap().repeat_count(), 2);
+        assert_eq!(from_reader[1].elements[0].repeat_count(), 2);
+    }
+
+    #[test]
+    fn an_explicit_service_string_advice_parses_a_fragment_with_no_header() {
+        // A message lifted out of an interchange carries neither UNA nor UNB, so
+        // nothing in it records the delimiters — the caller has to supply them.
+        let ssa = ServiceStringAdvice::from_bytes(b"UNA:;.? ~").expect("UNA");
+        let config = ReaderConfig::default().with_service_string_advice(ssa);
+
+        let from_slice: Vec<_> = crate::from_bytes_with_config(b"BGM;220;PO-4711~", config)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("slice path");
+        assert_eq!(from_slice[0].element_str(1), Some("PO-4711"));
+
+        let from_reader: Vec<_> =
+            from_reader_with_config(std::io::Cursor::new(b"BGM;220;PO-4711~"), config)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("reader path");
+        assert_eq!(from_reader[0].element_str(1), Some("PO-4711"));
+    }
+
+    #[test]
+    fn an_explicit_service_string_advice_outranks_the_una_in_the_input() {
+        let ssa = ServiceStringAdvice::default();
+        let config = ReaderConfig::default().with_service_string_advice(ssa);
+        // The UNA declares `;`, the caller insists on `+`.
+        let input = b"UNA:;.? 'BGM+220'";
+
+        for segments in [
+            crate::from_bytes_with_config(input, config)
+                .map(|r| r.map(crate::OwnedSegment::from))
+                .collect::<Result<Vec<_>, _>>()
+                .expect("slice path"),
+            from_reader_with_config(std::io::Cursor::new(&input[..]), config)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("reader path"),
+        ] {
+            assert_eq!(segments[0].element_str(0).unwrap(), "220");
+        }
     }
 
     #[test]

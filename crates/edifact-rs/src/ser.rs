@@ -203,10 +203,11 @@ fn serialize_with_decimal_mark<E: EventEmitter>(
 /// Reject `NaN` and infinity before they reach the wire.
 ///
 /// `Display` renders them as `NaN`, `inf`, and `-inf` — text that is not an
-/// EDIFACT numeric data element (ISO 9735-1 §7 allows digits, an optional sign,
-/// and the decimal mark), that no receiver can parse, and that this crate's own
-/// reader would hand back as a string rather than a number. Emitting it would
-/// turn a calculation bug into a wire-format bug discovered days later.
+/// EDIFACT numeric data element (ISO 9735-1 §10 admits the ISO 6093
+/// representations: digits, an optional minus sign, a decimal mark, and an
+/// exponent), that no receiver can parse, and that this crate's own reader would
+/// hand back as a string rather than a number. Emitting it would turn a
+/// calculation bug into a wire-format bug discovered days later.
 #[inline]
 fn reject_non_finite(value: f64) -> Result<(), EdifactError> {
     if value.is_finite() {

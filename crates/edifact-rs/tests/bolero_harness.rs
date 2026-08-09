@@ -225,25 +225,32 @@ fn fuzz_service_string_advice_valid_una_prefix() {
                 "is_valid disagreed with from_bytes for {suffix:?}"
             );
             if ssa.is_valid() {
-                let mandatory = [
+                // The *active* service characters are the ones the tokenizer
+                // splits on.  The decimal mark is not among them: ISO 9735-1
+                // Annex B says the recipient ignores it, and it is the one
+                // position where the standard permits a space.
+                let mut active = vec![
                     ssa.component_sep,
                     ssa.element_sep,
-                    ssa.decimal_mark,
                     ssa.release_char,
                     ssa.segment_term,
                 ];
-                for (i, a) in mandatory.iter().enumerate() {
+                if ssa.is_repetition_active() {
+                    active.push(ssa.repetition_sep);
+                }
+                for (i, a) in active.iter().enumerate() {
                     assert!(
-                        (0x21..=0x7E).contains(a),
-                        "non-printable delimiter {a:#04X}"
+                        (0x21..=0x7E).contains(a) && !a.is_ascii_alphanumeric(),
+                        "delimiter {a:#04X} is not printable non-alphanumeric ASCII"
                     );
-                    for b in &mandatory[i + 1..] {
+                    for b in &active[i + 1..] {
                         assert_ne!(a, b, "duplicate delimiter {a:#04X}");
                     }
                 }
                 assert!(
-                    ssa.repetition_sep == b' ' || !mandatory.contains(&ssa.repetition_sep),
-                    "repetition separator collides with a mandatory delimiter"
+                    (0x20..=0x7E).contains(&ssa.decimal_mark),
+                    "decimal mark {:#04X} is not a graphic ASCII byte",
+                    ssa.decimal_mark
                 );
             }
         });

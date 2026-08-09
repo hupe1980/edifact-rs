@@ -681,6 +681,19 @@ impl<W: Write> Writer<W> {
         Ok(())
     }
 
+    /// Write one repetition separator byte, or refuse when none is declared.
+    ///
+    /// Emitting the space sentinel would produce output that reads back as a
+    /// single occurrence whose value contains a space — corrupt, and quietly so.
+    #[inline]
+    pub(crate) fn write_repetition_sep(&mut self) -> Result<(), EdifactError> {
+        if !self.ssa.is_repetition_active() {
+            return Err(EdifactError::RepetitionSeparatorNotDeclared);
+        }
+        self.inner.write_all(&[self.ssa.repetition_sep])?;
+        Ok(())
+    }
+
     /// Write the segment terminator and increment the internal segment counter.
     #[inline]
     pub(crate) fn write_segment_term_and_count(&mut self) -> Result<(), EdifactError> {

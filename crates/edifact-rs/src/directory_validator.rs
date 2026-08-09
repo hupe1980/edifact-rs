@@ -1,5 +1,6 @@
 //! Shared UN/EDIFACT directory validation engine used by D.11A, D.01B and D.96A.
 
+use crate::error::Insignificant;
 use crate::validator::{ValidationRuleContext, Validator, report_error};
 use crate::{EdifactError, Segment, ValidationIssue, ValidationReport, ValidationSeverity};
 use std::sync::Arc;
@@ -16,6 +17,277 @@ pub enum Status {
     Mandatory,
     /// Element is optional unless additional rules require it.
     Conditional,
+}
+
+/// The character class of a data element value — the `a` / `n` / `an` of a
+/// directory's representation column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ReprKind {
+    /// `a` — alphabetic. Digits are not permitted.
+    Alphabetic,
+    /// `n` — numeric, in the ISO 6093 forms ISO 9735-1 §10 admits: digits, an
+    /// optional leading minus, a decimal mark (`.` or `,`), and an exponent.
+    /// The space character and the plus sign are explicitly not allowed.
+    Numeric,
+    /// `an` — alphanumeric. Any character the interchange's repertoire permits.
+    Alphanumeric,
+}
+
+impl ReprKind {
+    /// The directory's abbreviation for this class.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Alphabetic => "a",
+            Self::Numeric => "n",
+            Self::Alphanumeric => "an",
+        }
+    }
+}
+
+/// A data element's representation — `an..35`, `n8`, `a1` and friends.
+///
+/// This is the column every UN/EDIFACT directory prints beside a data element,
+/// and the thing partners actually reject on: a sender identification of 40
+/// characters where the standard says `an..35` is refused at the far end, long
+/// after it was sent.
+///
+/// # Length is counted in characters
+///
+/// ISO 9735-1 §6: "one graphic character shall be counted as one character,
+/// irrespective of the number of bytes/octets required to encode it" — so `ü`
+/// is one, not two. §5 excludes the release character from the count, which is
+/// automatic here because release sequences are already resolved by the time a
+/// value reaches validation.
+///
+/// For a numeric value §10 excludes more: "the length ... shall not include the
+/// minus sign (-), the decimal mark (. or ,), or the exponent mark (E or e) and
+/// its exponent". `-123.45` is therefore five characters long, not seven.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Repr {
+    kind: ReprKind,
+    max: u16,
+    fixed: bool,
+}
+
+impl Repr {
+    /// `an{max}` — exactly `max` alphanumeric characters.
+    #[must_use]
+    pub const fn an(max: u16) -> Self {
+        Self {
+            kind: ReprKind::Alphanumeric,
+            max,
+            fixed: true,
+        }
+    }
+
+    /// `an..{max}` — up to `max` alphanumeric characters.
+    #[must_use]
+    pub const fn an_up_to(max: u16) -> Self {
+        Self {
+            kind: ReprKind::Alphanumeric,
+            max,
+            fixed: false,
+        }
+    }
+
+    /// `a{max}` — exactly `max` alphabetic characters.
+    #[must_use]
+    pub const fn a(max: u16) -> Self {
+        Self {
+            kind: ReprKind::Alphabetic,
+            max,
+            fixed: true,
+        }
+    }
+
+    /// `a..{max}` — up to `max` alphabetic characters.
+    #[must_use]
+    pub const fn a_up_to(max: u16) -> Self {
+        Self {
+            kind: ReprKind::Alphabetic,
+            max,
+            fixed: false,
+        }
+    }
+
+    /// `n{max}` — exactly `max` numeric characters.
+    #[must_use]
+    pub const fn n(max: u16) -> Self {
+        Self {
+            kind: ReprKind::Numeric,
+            max,
+            fixed: true,
+        }
+    }
+
+    /// `n..{max}` — up to `max` numeric characters.
+    #[must_use]
+    pub const fn n_up_to(max: u16) -> Self {
+        Self {
+            kind: ReprKind::Numeric,
+            max,
+            fixed: false,
+        }
+    }
+
+    /// The character class.
+    #[must_use]
+    pub const fn kind(self) -> ReprKind {
+        self.kind
+    }
+
+    /// The maximum number of characters.
+    #[must_use]
+    pub const fn max_length(self) -> u16 {
+        self.max
+    }
+
+    /// The minimum number of characters — `max_length` when fixed, else 1.
+    ///
+    /// A data element is "present" only when it carries at least one character
+    /// (§8.1), so a variable-length minimum is never zero.
+    #[must_use]
+    pub const fn min_length(self) -> u16 {
+        if self.fixed { self.max } else { 1 }
+    }
+
+    /// Whether the length is fixed (`an3`) rather than variable (`an..3`).
+    #[must_use]
+    pub const fn is_fixed(self) -> bool {
+        self.fixed
+    }
+
+    /// The number of characters `value` contributes toward its length limit.
+    ///
+    /// For a numeric value this is §10's count, which excludes the sign, the
+    /// decimal mark, and the exponent.
+    #[must_use]
+    pub fn measure(self, value: &str) -> usize {
+        match self.kind {
+            ReprKind::Numeric => {
+                let mantissa = value
+                    .split_once(['E', 'e'])
+                    .map_or(value, |(mantissa, _exponent)| mantissa);
+                mantissa
+                    .chars()
+                    .filter(|c| !matches!(c, '-' | '.' | ','))
+                    .count()
+            }
+            _ => value.chars().count(),
+        }
+    }
+
+    /// Whether every character of `value` belongs to this representation's class.
+    #[must_use]
+    pub fn permits_characters(self, value: &str) -> bool {
+        match self.kind {
+            ReprKind::Alphanumeric => true,
+            ReprKind::Alphabetic => !value.chars().any(|c| c.is_ascii_digit()),
+            ReprKind::Numeric => is_iso6093_numeric(value),
+        }
+    }
+}
+
+impl std::fmt::Display for Repr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.fixed {
+            write!(f, "{}{}", self.kind.as_str(), self.max)
+        } else {
+            write!(f, "{}..{}", self.kind.as_str(), self.max)
+        }
+    }
+}
+
+/// Whether `value` is one of the numeric forms ISO 9735-1 §10 admits.
+///
+/// §10 takes ISO 6093's representations and subtracts: "The space character and
+/// plus sign shall not be allowed", and "when a decimal mark is transferred,
+/// there shall be at least one digit after the decimal mark" — which is why
+/// `1.` and `.` are rejected while `.5` and `2.00` are not.
+fn is_iso6093_numeric(value: &str) -> bool {
+    let (mantissa, exponent) = match value.split_once(['E', 'e']) {
+        Some((mantissa, exponent)) => (mantissa, Some(exponent)),
+        None => (value, None),
+    };
+    if let Some(exponent) = exponent {
+        let digits = exponent.strip_prefix('-').unwrap_or(exponent);
+        if digits.is_empty() || !digits.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+    }
+    let digits = mantissa.strip_prefix('-').unwrap_or(mantissa);
+    if digits.is_empty() {
+        return false;
+    }
+    match digits.split_once(['.', ',']) {
+        Some((integer, fraction)) => {
+            // At least one digit after the mark; the integer part may be empty.
+            !fraction.is_empty()
+                && fraction.chars().all(|c| c.is_ascii_digit())
+                && integer.chars().all(|c| c.is_ascii_digit())
+        }
+        None => digits.chars().all(|c| c.is_ascii_digit()),
+    }
+}
+
+/// What a value at one position must satisfy.
+///
+/// Usually a single [`Repr`]. Two only where the syntax versions disagree and
+/// the interchange has not said which it is — see
+/// [`ComponentRef::with_repr_by_syntax_version`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReprRequirement {
+    primary: Repr,
+    /// Accepted as well, when the syntax version could not be determined.
+    alternative: Option<Repr>,
+}
+
+impl ReprRequirement {
+    const fn single(repr: Repr) -> Self {
+        Self {
+            primary: repr,
+            alternative: None,
+        }
+    }
+
+    /// Whether `value` satisfies the class of any accepted representation.
+    fn permits_characters(&self, value: &str) -> bool {
+        self.primary.permits_characters(value)
+            || self
+                .alternative
+                .is_some_and(|repr| repr.permits_characters(value))
+    }
+
+    /// Whether `value`'s length satisfies any accepted representation.
+    fn permits_length(&self, value: &str) -> bool {
+        let fits = |repr: Repr| {
+            let length = repr.measure(value);
+            length >= usize::from(repr.min_length()) && length <= usize::from(repr.max_length())
+        };
+        fits(self.primary) || self.alternative.is_some_and(fits)
+    }
+
+    /// `true` when every accepted representation is longer than `value`.
+    fn is_too_short(&self, value: &str) -> bool {
+        let short = |repr: Repr| repr.measure(value) < usize::from(repr.min_length());
+        short(self.primary) && self.alternative.is_none_or(short)
+    }
+
+    /// The measured length under the primary representation, for reporting.
+    fn measure(&self, value: &str) -> usize {
+        self.primary.measure(value)
+    }
+}
+
+impl std::fmt::Display for ReprRequirement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.alternative {
+            Some(alternative) => write!(f, "{} or {alternative}", self.primary),
+            None => write!(f, "{}", self.primary),
+        }
+    }
 }
 
 /// Reference to a component data element within a composite data element.
@@ -38,6 +310,10 @@ pub struct ComponentRef {
     /// How many consecutive slots this component occupies; `1` unless the
     /// composite repeats it by design.
     repeat_count: u8,
+    /// The directory's representation, when the definition states one.
+    repr: Option<Repr>,
+    /// The representation from syntax version 4 onward, where it differs.
+    repr_from_v4: Option<Repr>,
 }
 
 impl ComponentRef {
@@ -68,6 +344,8 @@ impl ComponentRef {
             data_element,
             status,
             repeat_count: 1,
+            repr: None,
+            repr_from_v4: None,
         }
     }
 
@@ -135,6 +413,8 @@ impl ComponentRef {
             data_element,
             status,
             repeat_count,
+            repr: None,
+            repr_from_v4: None,
         }
     }
 
@@ -167,6 +447,60 @@ impl ComponentRef {
     pub const fn status(&self) -> Status {
         self.status
     }
+
+    /// Attach the directory's representation, e.g. `an..35`.
+    ///
+    /// Without one, a definition still resolves identifiers and checks presence;
+    /// with one, [`DirectoryValidator`] also checks length and character class —
+    /// which is what a partner's translator does before it rejects the file.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::{ComponentRef, Repr, Status};
+    ///
+    /// const SENDER: ComponentRef =
+    ///     ComponentRef::new(1, "0004", Status::Mandatory).with_repr(Repr::an_up_to(35));
+    /// ```
+    #[must_use]
+    pub const fn with_repr(mut self, repr: Repr) -> Self {
+        self.repr = Some(repr);
+        self
+    }
+
+    /// The declared representation, if the definition states one.
+    #[must_use]
+    #[inline]
+    pub const fn repr(&self) -> Option<Repr> {
+        self.repr
+    }
+    /// Declare a representation that changed between syntax versions.
+    ///
+    /// The service directory has exactly one such position: `S004` DE 0017, the
+    /// date of preparation. Version 3 transfers `YYMMDD` (`n6`); version 4
+    /// widened it to `CCYYMMDD` (`n8`) to be year-2000 correct. It is the only
+    /// place where version 4 is *not* a superset of version 3.
+    ///
+    /// Declaring both keeps each version checked exactly. Collapsing them into
+    /// `n..8` would have accepted a six-digit date in a version 4 interchange
+    /// and a seven-digit one in either — validating neither version correctly.
+    ///
+    /// The syntax version comes from `UNB` S001 DE 0002. When it cannot be
+    /// determined — validating a bare message window, say — **both** are
+    /// accepted, because guessing would reject conformant data.
+    #[must_use]
+    pub const fn with_repr_by_syntax_version(mut self, up_to_v3: Repr, from_v4: Repr) -> Self {
+        self.repr = Some(up_to_v3);
+        self.repr_from_v4 = Some(from_v4);
+        self
+    }
+
+    /// The representation used from syntax version 4 onward, when it differs.
+    #[must_use]
+    #[inline]
+    pub const fn repr_from_v4(&self) -> Option<Repr> {
+        self.repr_from_v4
+    }
 }
 
 /// Reference to a data element within a segment definition.
@@ -190,6 +524,11 @@ pub struct ElementRef {
     /// Component definitions when this element is a composite; empty for a
     /// simple data element.
     components: &'static [ComponentRef],
+    /// The directory's representation for a *simple* element; composites carry
+    /// theirs on each component.
+    repr: Option<Repr>,
+    /// The representation from syntax version 4 onward, where it differs.
+    repr_from_v4: Option<Repr>,
 }
 
 impl ElementRef {
@@ -230,6 +569,8 @@ impl ElementRef {
             status,
             max_repeat,
             components: &[],
+            repr: None,
+            repr_from_v4: None,
         }
     }
 
@@ -276,6 +617,8 @@ impl ElementRef {
             status,
             max_repeat,
             components,
+            repr: None,
+            repr_from_v4: None,
         }
     }
 
@@ -312,6 +655,50 @@ impl ElementRef {
     #[inline]
     pub const fn components(&self) -> &'static [ComponentRef] {
         self.components
+    }
+
+    /// Attach the directory's representation for a simple data element.
+    ///
+    /// A composite carries its representations on the components instead, so
+    /// this is ignored when `components` is non-empty.
+    #[must_use]
+    pub const fn with_repr(mut self, repr: Repr) -> Self {
+        self.repr = Some(repr);
+        self
+    }
+
+    /// The declared representation, if the definition states one.
+    #[must_use]
+    #[inline]
+    pub const fn repr(&self) -> Option<Repr> {
+        self.repr
+    }
+    /// Declare a representation that changed between syntax versions.
+    ///
+    /// The service directory has exactly one such position: `S004` DE 0017, the
+    /// date of preparation. Version 3 transfers `YYMMDD` (`n6`); version 4
+    /// widened it to `CCYYMMDD` (`n8`) to be year-2000 correct. It is the only
+    /// place where version 4 is *not* a superset of version 3.
+    ///
+    /// Declaring both keeps each version checked exactly. Collapsing them into
+    /// `n..8` would have accepted a six-digit date in a version 4 interchange
+    /// and a seven-digit one in either — validating neither version correctly.
+    ///
+    /// The syntax version comes from `UNB` S001 DE 0002. When it cannot be
+    /// determined — validating a bare message window, say — **both** are
+    /// accepted, because guessing would reject conformant data.
+    #[must_use]
+    pub const fn with_repr_by_syntax_version(mut self, up_to_v3: Repr, from_v4: Repr) -> Self {
+        self.repr = Some(up_to_v3);
+        self.repr_from_v4 = Some(from_v4);
+        self
+    }
+
+    /// The representation used from syntax version 4 onward, when it differs.
+    #[must_use]
+    #[inline]
+    pub const fn repr_from_v4(&self) -> Option<Repr> {
+        self.repr_from_v4
     }
 }
 
@@ -440,6 +827,410 @@ pub trait SegmentLayout {
     /// appear in this definition, and [`EdifactError::AmbiguousDataElement`]
     /// when it appears at more than one position.
     fn resolve_code(&self, data_element: &str) -> Result<ElementPath, EdifactError>;
+
+    /// Every position this layout declares, flattened and in order.
+    ///
+    /// Implemented by both the compile-time and runtime definitions, so tooling
+    /// can walk a layout without knowing which one it holds.
+    fn slots(&self) -> Vec<LayoutSlot>;
+
+    /// Check this layout against real messages and report what does not line up.
+    ///
+    /// Hand-authoring a segment definition has a silent failure mode: a layout
+    /// that disagrees with the wire resolves `value_by_code` to the *wrong
+    /// component*, returns a plausible value, and every test still passes. There
+    /// is no way to notice from inside the program — the definition is the only
+    /// thing that says what the positions mean.
+    ///
+    /// Pointing the definition at a corpus is what breaks that circle. Three
+    /// kinds of finding come back, and the third is the one that matters most:
+    ///
+    /// | Finding | Means |
+    /// |---|---|
+    /// | [`UndeclaredElement`][LayoutFinding::UndeclaredElement] / [`UndeclaredComponent`][LayoutFinding::UndeclaredComponent] | The wire carries a value the layout has no slot for — the layout is **wrong**. |
+    /// | [`MandatoryNeverPopulated`][LayoutFinding::MandatoryNeverPopulated] | A slot the layout calls mandatory is empty everywhere — the status or the position is **wrong**. |
+    /// | [`NeverObserved`][LayoutFinding::NeverObserved] | Nothing in the corpus reaches this slot, so **the corpus cannot confirm it**. |
+    ///
+    /// `NeverObserved` is not a defect. It is the honest answer to "does my
+    /// definition match the directory?" when the fixtures are too thin to tell,
+    /// and it names exactly which positions to go and check by hand.
+    ///
+    /// Only segments whose tag matches [`layout_tag`][Self::layout_tag] are
+    /// examined; the rest of the slice is ignored, so a whole interchange can be
+    /// passed in as-is.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::{ComponentRef, ElementRef, SegmentDefinition, SegmentLayout, Status, from_bytes};
+    ///
+    /// // A hand-authored C507 that stops one component short of the directory.
+    /// static C507: &[ComponentRef] = &[
+    ///     ComponentRef::new(1, "2005", Status::Mandatory),
+    ///     ComponentRef::new(2, "2380", Status::Conditional),
+    /// ];
+    /// static DTM_ELEMENTS: &[ElementRef] =
+    ///     &[ElementRef::composite(1, "C507", Status::Mandatory, 1, C507)];
+    /// static DTM: SegmentDefinition =
+    ///     SegmentDefinition::new("DTM", "Date/time/period", DTM_ELEMENTS);
+    ///
+    /// let corpus: Vec<_> = from_bytes(b"DTM+137:20260101:102'").collect::<Result<Vec<_>, _>>()?;
+    /// let audit = DTM.audit(&corpus);
+    ///
+    /// // The format qualifier `102` has nowhere to go — the layout is short.
+    /// assert!(audit.has_contradictions());
+    /// assert_eq!(audit.segments_examined(), 1);
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    fn audit(&self, segments: &[crate::Segment<'_>]) -> LayoutAudit {
+        audit_layout(self.layout_tag(), &self.slots(), segments)
+    }
+}
+
+/// One declared position in a [`SegmentLayout`], flattened.
+///
+/// Produced by [`SegmentLayout::slots`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutSlot {
+    /// Zero-based data element index within the segment.
+    pub element: usize,
+    /// Zero-based component index, or `None` for a simple data element.
+    pub component: Option<usize>,
+    /// The UN/EDIFACT identifier declared at this position.
+    pub data_element: String,
+    /// Whether the layout calls this position mandatory.
+    pub status: Status,
+    /// The status of the **enclosing data element**.
+    ///
+    /// Equal to `status` for a simple data element. For a component it is the
+    /// composite's own status, which is what decides whether a mandatory
+    /// component is actually required: ISO 9735-1 §8.6 makes it mandatory "if
+    /// the composite data element is present", not unconditionally.
+    pub element_status: Status,
+}
+
+impl LayoutSlot {
+    /// Component index treating a simple data element as component 0.
+    #[must_use]
+    pub fn component_index(&self) -> usize {
+        self.component.unwrap_or(0)
+    }
+}
+
+/// One way a layout and a corpus disagree — or fail to inform each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LayoutFinding {
+    /// A segment carried a populated data element beyond the last one declared.
+    UndeclaredElement {
+        /// Zero-based index of the undeclared element.
+        element: usize,
+        /// Byte span of the segment that carried it.
+        span: crate::Span,
+    },
+    /// An element carried a populated component beyond the last one declared.
+    UndeclaredComponent {
+        /// Zero-based element index.
+        element: usize,
+        /// Zero-based index of the undeclared component.
+        component: usize,
+        /// Byte span of the segment that carried it.
+        span: crate::Span,
+    },
+    /// A position the layout calls mandatory was empty in every segment.
+    MandatoryNeverPopulated {
+        /// The declared position.
+        slot: LayoutSlot,
+    },
+    /// No segment in the corpus populated this position.
+    ///
+    /// Evidence of nothing rather than evidence of a fault: the corpus is too
+    /// thin to confirm or refute the slot.
+    NeverObserved {
+        /// The declared position.
+        slot: LayoutSlot,
+    },
+}
+
+/// The result of checking a [`SegmentLayout`] against a corpus.
+///
+/// See [`SegmentLayout::audit`].
+#[derive(Debug, Clone, Default)]
+pub struct LayoutAudit {
+    tag: String,
+    segments_examined: usize,
+    findings: Vec<LayoutFinding>,
+}
+
+impl LayoutAudit {
+    /// The segment tag that was audited.
+    #[must_use]
+    pub fn tag(&self) -> &str {
+        &self.tag
+    }
+
+    /// How many segments in the corpus carried that tag.
+    ///
+    /// Zero means the audit proved nothing at all — worth asserting on.
+    #[must_use]
+    pub fn segments_examined(&self) -> usize {
+        self.segments_examined
+    }
+
+    /// Every finding, in declaration order.
+    #[must_use]
+    pub fn findings(&self) -> &[LayoutFinding] {
+        &self.findings
+    }
+
+    /// Findings that mean the layout is **wrong**, as opposed to unconfirmed.
+    ///
+    /// [`NeverObserved`][LayoutFinding::NeverObserved] is excluded: a corpus
+    /// that never reaches a slot says nothing about whether the slot is right.
+    pub fn contradictions(&self) -> impl Iterator<Item = &LayoutFinding> {
+        self.findings
+            .iter()
+            .filter(|f| !matches!(f, LayoutFinding::NeverObserved { .. }))
+    }
+
+    /// `true` when the corpus contradicts the layout.
+    ///
+    /// This is the assertion to put in a test: it fails on a layout the wire
+    /// disproves, and stays quiet about slots the fixtures simply never exercise.
+    #[must_use]
+    pub fn has_contradictions(&self) -> bool {
+        self.contradictions().next().is_some()
+    }
+
+    /// Positions the corpus never reached, in declaration order.
+    ///
+    /// Each one is a slot to verify against the directory by hand — or a gap to
+    /// fill with a fixture.
+    pub fn unconfirmed(&self) -> impl Iterator<Item = &LayoutSlot> {
+        self.findings.iter().filter_map(|f| match f {
+            LayoutFinding::NeverObserved { slot } => Some(slot),
+            _ => None,
+        })
+    }
+}
+
+impl std::fmt::Display for LayoutAudit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "{}: {} segment(s) examined, {} contradiction(s), {} unconfirmed slot(s)",
+            self.tag,
+            self.segments_examined,
+            self.contradictions().count(),
+            self.unconfirmed().count(),
+        )?;
+        for finding in &self.findings {
+            match finding {
+                LayoutFinding::UndeclaredElement { element, span } => writeln!(
+                    f,
+                    "  element {element} is populated at bytes {span} but the layout declares no such element",
+                )?,
+                LayoutFinding::UndeclaredComponent {
+                    element,
+                    component,
+                    span,
+                } => writeln!(
+                    f,
+                    "  element {element} component {component} is populated at bytes {span} but the layout declares no such component",
+                )?,
+                LayoutFinding::MandatoryNeverPopulated { slot } => writeln!(
+                    f,
+                    "  {} is declared mandatory but is empty in every segment",
+                    describe_slot(slot),
+                )?,
+                LayoutFinding::NeverObserved { slot } => writeln!(
+                    f,
+                    "  {} was never populated — this corpus cannot confirm it",
+                    describe_slot(slot),
+                )?,
+            }
+        }
+        Ok(())
+    }
+}
+
+fn describe_slot(slot: &LayoutSlot) -> String {
+    match slot.component {
+        Some(component) => format!(
+            "DE {} (element {}, component {component})",
+            slot.data_element, slot.element
+        ),
+        None => format!("DE {} (element {})", slot.data_element, slot.element),
+    }
+}
+
+/// Audit every layout a corpus actually exercises, in one call.
+///
+/// [`SegmentLayout::audit`] answers for one segment. A hand-authored directory
+/// has dozens, and the question worth asking is about all of them at once:
+/// *which of my definitions does this corpus disprove, and which can it not
+/// speak to?*
+///
+/// Only tags present in the corpus are audited — a definition the fixtures never
+/// exercise would produce nothing but `NeverObserved` noise and drown the
+/// findings that matter. Ask [`SegmentLayout::audit`] directly for those.
+///
+/// Results come back in the order the tags first appear, so the report reads in
+/// message order.
+///
+/// # Example
+///
+/// ```
+/// use edifact_rs::{audit_directory, from_bytes, service};
+///
+/// let corpus: Vec<_> = from_bytes(
+///     b"UNB+UNOC:3+S+R+260101:0900+IC1'UNH+M1+ORDERS:D:96A:UN'UNT+2+M1'UNZ+1+IC1'",
+/// )
+/// .collect::<Result<Vec<_>, _>>()?;
+///
+/// let audits = audit_directory(service::lookup, &corpus);
+///
+/// // One audit per distinct tag the corpus contains.
+/// assert_eq!(audits.len(), 4);
+/// // The shipped service tables are not disproved by conformant input.
+/// assert!(audits.iter().all(|a| !a.has_contradictions()));
+/// # Ok::<(), edifact_rs::EdifactError>(())
+/// ```
+pub fn audit_directory<'a, L, F>(lookup: F, segments: &[crate::Segment<'_>]) -> Vec<LayoutAudit>
+where
+    L: SegmentLayout + ?Sized + 'a,
+    F: Fn(&str) -> Option<&'a L>,
+{
+    let mut seen: Vec<&str> = Vec::new();
+    for segment in segments {
+        if !seen.contains(&segment.tag) {
+            seen.push(segment.tag);
+        }
+    }
+    seen.into_iter()
+        .filter_map(|tag| lookup(tag).map(|layout| layout.audit(segments)))
+        .collect()
+}
+
+/// Shared implementation behind [`SegmentLayout::audit`].
+fn audit_layout(tag: &str, slots: &[LayoutSlot], segments: &[crate::Segment<'_>]) -> LayoutAudit {
+    let mut audit = LayoutAudit {
+        tag: tag.to_owned(),
+        segments_examined: 0,
+        findings: Vec::new(),
+    };
+
+    // Highest declared index per element, so "beyond the layout" is decidable.
+    let declared_elements = slots.iter().map(|s| s.element + 1).max().unwrap_or(0);
+    let mut declared_components: Vec<usize> = vec![0; declared_elements];
+    for slot in slots {
+        let width = slot.component_index() + 1;
+        if width > declared_components[slot.element] {
+            declared_components[slot.element] = width;
+        }
+    }
+
+    let mut populated: Vec<Vec<bool>> = declared_components
+        .iter()
+        .map(|width| vec![false; *width])
+        .collect();
+
+    for segment in segments.iter().filter(|s| s.tag == tag) {
+        audit.segments_examined += 1;
+        for (element_index, element) in segment.elements.iter().enumerate() {
+            // Every occurrence counts: a repeating element populates the same
+            // declared positions each time (ISO 9735-1 §8.6).
+            for occurrence in element.repetitions() {
+                for (component_index, (value, _)) in occurrence.iter().enumerate() {
+                    // A trailing empty component is how EDIFACT spells "absent"
+                    // (§8.7.2), so only a populated one is evidence of anything.
+                    if value.is_empty() {
+                        continue;
+                    }
+                    if element_index >= declared_elements {
+                        push_once(
+                            &mut audit.findings,
+                            LayoutFinding::UndeclaredElement {
+                                element: element_index,
+                                span: segment.span,
+                            },
+                        );
+                        continue;
+                    }
+                    if component_index >= declared_components[element_index] {
+                        push_once(
+                            &mut audit.findings,
+                            LayoutFinding::UndeclaredComponent {
+                                element: element_index,
+                                component: component_index,
+                                span: segment.span,
+                            },
+                        );
+                        continue;
+                    }
+                    populated[element_index][component_index] = true;
+                }
+            }
+        }
+    }
+
+    // Whether any position of each element was populated — which is exactly
+    // ISO 9735-1 §8.1's definition of a composite being "present".
+    let element_populated: Vec<bool> = populated
+        .iter()
+        .map(|components| components.iter().any(|seen| *seen))
+        .collect();
+
+    for slot in slots {
+        if populated[slot.element][slot.component_index()] {
+            continue;
+        }
+        // §8.6: "A mandatory component data element in a composite data element
+        // shall be present **if the composite data element is present**."  A
+        // conditional composite that the corpus never carries therefore says
+        // nothing about its mandatory components — reporting them as violations
+        // would condemn every optional composite in the definition.
+        let required_here = slot.status == Status::Mandatory
+            && (slot.component.is_none()
+                || slot.element_status == Status::Mandatory
+                || element_populated[slot.element]);
+        audit.findings.push(if required_here {
+            LayoutFinding::MandatoryNeverPopulated { slot: slot.clone() }
+        } else {
+            LayoutFinding::NeverObserved { slot: slot.clone() }
+        });
+    }
+
+    audit
+}
+
+/// Record a finding unless an equivalent one is already present.
+///
+/// A corpus of 360 fixtures would otherwise report the same undeclared
+/// component 360 times, burying every other finding.
+fn push_once(findings: &mut Vec<LayoutFinding>, finding: LayoutFinding) {
+    let duplicate = findings.iter().any(|existing| match (existing, &finding) {
+        (
+            LayoutFinding::UndeclaredElement { element: a, .. },
+            LayoutFinding::UndeclaredElement { element: b, .. },
+        ) => a == b,
+        (
+            LayoutFinding::UndeclaredComponent {
+                element: a,
+                component: c,
+                ..
+            },
+            LayoutFinding::UndeclaredComponent {
+                element: b,
+                component: d,
+                ..
+            },
+        ) => a == b && c == d,
+        _ => false,
+    });
+    if !duplicate {
+        findings.push(finding);
+    }
 }
 
 impl SegmentDefinition {
@@ -633,6 +1424,32 @@ impl SegmentLayout for SegmentDefinition {
         }
         resolve_outcome(self.tag, data_element, hits, found)
     }
+
+    fn slots(&self) -> Vec<LayoutSlot> {
+        let mut out = Vec::new();
+        for element in self.elements {
+            if element.components.is_empty() {
+                out.push(LayoutSlot {
+                    element: element.position as usize - 1,
+                    component: None,
+                    data_element: element.data_element.to_owned(),
+                    status: element.status,
+                    element_status: element.status,
+                });
+                continue;
+            }
+            for component in element.components {
+                out.push(LayoutSlot {
+                    element: element.position as usize - 1,
+                    component: Some(component.position as usize - 1),
+                    data_element: component.data_element.to_owned(),
+                    status: component.status,
+                    element_status: element.status,
+                });
+            }
+        }
+        out
+    }
 }
 
 /// Turn a resolution scan's `(hit count, first match)` into a `Result`.
@@ -678,6 +1495,10 @@ pub struct OwnedElementRef {
     status: Status,
     /// Maximum repetition count.
     max_repeat: u8,
+    /// The directory's representation for a *simple* element.
+    repr: Option<Repr>,
+    /// The representation from syntax version 4 onward, where it differs.
+    repr_from_v4: Option<Repr>,
     /// Component definitions when this element is a composite; empty for a
     /// simple data element.
     components: Vec<OwnedComponentRef>,
@@ -697,6 +1518,10 @@ pub struct OwnedComponentRef {
     data_element: String,
     /// Requirement status.
     status: Status,
+    /// The directory's representation, when the definition states one.
+    repr: Option<Repr>,
+    /// The representation from syntax version 4 onward, where it differs.
+    repr_from_v4: Option<Repr>,
     /// How many consecutive slots this component occupies.
     repeat_count: u8,
 }
@@ -717,6 +1542,8 @@ impl OwnedComponentRef {
             data_element,
             status,
             repeat_count: 1,
+            repr: None,
+            repr_from_v4: None,
         }
     }
 
@@ -740,6 +1567,8 @@ impl OwnedComponentRef {
             data_element,
             status,
             repeat_count,
+            repr: None,
+            repr_from_v4: None,
         }
     }
 
@@ -768,6 +1597,8 @@ impl OwnedComponentRef {
             data_element,
             status,
             repeat_count: 1,
+            repr: None,
+            repr_from_v4: None,
         })
     }
 
@@ -787,6 +1618,37 @@ impl OwnedComponentRef {
     #[inline]
     pub fn status(&self) -> Status {
         self.status
+    }
+
+    /// Attach the directory's representation, e.g. `an..35`.
+    #[must_use]
+    pub fn with_repr(mut self, repr: Repr) -> Self {
+        self.repr = Some(repr);
+        self
+    }
+
+    /// The declared representation, if the definition states one.
+    #[inline]
+    #[must_use]
+    pub fn repr(&self) -> Option<Repr> {
+        self.repr
+    }
+
+    /// Declare a representation that changed between syntax versions.
+    ///
+    /// See [`ComponentRef::with_repr_by_syntax_version`].
+    #[must_use]
+    pub fn with_repr_by_syntax_version(mut self, up_to_v3: Repr, from_v4: Repr) -> Self {
+        self.repr = Some(up_to_v3);
+        self.repr_from_v4 = Some(from_v4);
+        self
+    }
+
+    /// The representation used from syntax version 4 onward, when it differs.
+    #[inline]
+    #[must_use]
+    pub fn repr_from_v4(&self) -> Option<Repr> {
+        self.repr_from_v4
     }
 }
 
@@ -922,6 +1784,32 @@ impl SegmentLayout for OwnedSegmentDef {
         }
         resolve_outcome(&self.tag, data_element, hits, found)
     }
+
+    fn slots(&self) -> Vec<LayoutSlot> {
+        let mut out = Vec::new();
+        for element in &self.elements {
+            if element.components.is_empty() {
+                out.push(LayoutSlot {
+                    element: element.position as usize - 1,
+                    component: None,
+                    data_element: element.data_element.clone(),
+                    status: element.status,
+                    element_status: element.status,
+                });
+                continue;
+            }
+            for component in &element.components {
+                out.push(LayoutSlot {
+                    element: element.position as usize - 1,
+                    component: Some(component.position as usize - 1),
+                    data_element: component.data_element.clone(),
+                    status: component.status,
+                    element_status: element.status,
+                });
+            }
+        }
+        out
+    }
 }
 
 impl OwnedElementRef {
@@ -953,6 +1841,8 @@ impl OwnedElementRef {
             data_element,
             status,
             max_repeat,
+            repr: None,
+            repr_from_v4: None,
             components: Vec::new(),
         }
     }
@@ -980,6 +1870,8 @@ impl OwnedElementRef {
             data_element,
             status,
             max_repeat,
+            repr: None,
+            repr_from_v4: None,
             components: Vec::new(),
         })
     }
@@ -1036,6 +1928,37 @@ impl OwnedElementRef {
     #[inline]
     pub fn max_repeat(&self) -> u8 {
         self.max_repeat
+    }
+
+    /// Attach the directory's representation for a simple data element.
+    #[must_use]
+    pub fn with_repr(mut self, repr: Repr) -> Self {
+        self.repr = Some(repr);
+        self
+    }
+
+    /// The declared representation, if the definition states one.
+    #[inline]
+    #[must_use]
+    pub fn repr(&self) -> Option<Repr> {
+        self.repr
+    }
+
+    /// Declare a representation that changed between syntax versions.
+    ///
+    /// See [`ComponentRef::with_repr_by_syntax_version`].
+    #[must_use]
+    pub fn with_repr_by_syntax_version(mut self, up_to_v3: Repr, from_v4: Repr) -> Self {
+        self.repr = Some(up_to_v3);
+        self.repr_from_v4 = Some(from_v4);
+        self
+    }
+
+    /// The representation used from syntax version 4 onward, when it differs.
+    #[inline]
+    #[must_use]
+    pub fn repr_from_v4(&self) -> Option<Repr> {
+        self.repr_from_v4
     }
 }
 
@@ -1196,6 +2119,89 @@ impl SegmentDefRef<'_> {
     ///
     /// `None` when the element is not defined, or is defined without
     /// components — in which case its arity is not constrained by the layout.
+    /// The declared maximum occurrence count for the element at `index`.
+    fn max_repeat_at(&self, index: usize) -> Option<u8> {
+        let position = u8::try_from(index.checked_add(1)?).ok()?;
+        match self {
+            Self::Static(d) => d
+                .elements
+                .iter()
+                .find(|e| e.position == position)
+                .map(ElementRef::max_repeat),
+            Self::Owned(d) => d
+                .elements
+                .iter()
+                .find(|e| e.position == position)
+                .map(OwnedElementRef::max_repeat),
+        }
+    }
+
+    /// The representation required at `(element, component)`, if any.
+    ///
+    /// A composite states its representations on the components; a simple data
+    /// element states one on the element itself and only at component 0.
+    ///
+    /// `syntax_version` selects between the two forms of a position that changed
+    /// between versions; `None` accepts either, because guessing would reject
+    /// conformant data.
+    fn repr_at(
+        &self,
+        element: usize,
+        component: usize,
+        syntax_version: Option<u8>,
+    ) -> Option<ReprRequirement> {
+        let position = u8::try_from(element.checked_add(1)?).ok()?;
+        let component_position = u8::try_from(component.checked_add(1)?).ok()?;
+        match self {
+            Self::Static(d) => {
+                let element = d.elements.iter().find(|e| e.position == position)?;
+                if element.components.is_empty() {
+                    return if component == 0 {
+                        select_repr(element.repr(), element.repr_from_v4(), syntax_version)
+                    } else {
+                        None
+                    };
+                }
+                let component_ref = element.components.iter().find(|c| {
+                    // A component declared with `repeated` spans several
+                    // consecutive slots, all of the same representation.
+                    let first = c.position();
+                    let last = first.saturating_add(c.repeat_count().saturating_sub(1));
+                    (first..=last).contains(&component_position)
+                })?;
+                select_repr(
+                    component_ref.repr(),
+                    component_ref.repr_from_v4(),
+                    syntax_version,
+                )
+            }
+            Self::Owned(d) => {
+                let element = d.elements.iter().find(|e| e.position == position)?;
+                if element.components.is_empty() {
+                    return if component == 0 {
+                        select_repr(
+                            OwnedElementRef::repr(element),
+                            OwnedElementRef::repr_from_v4(element),
+                            syntax_version,
+                        )
+                    } else {
+                        None
+                    };
+                }
+                let component_ref = element.components.iter().find(|c| {
+                    let first = c.position();
+                    let last = first.saturating_add(c.repeat_count().saturating_sub(1));
+                    (first..=last).contains(&component_position)
+                })?;
+                select_repr(
+                    component_ref.repr(),
+                    component_ref.repr_from_v4(),
+                    syntax_version,
+                )
+            }
+        }
+    }
+
     fn declared_component_count(&self, index: usize) -> Option<u8> {
         let position = u8::try_from(index.checked_add(1)?).ok()?;
         let count: u32 = match self {
@@ -1214,6 +2220,42 @@ impl SegmentDefRef<'_> {
             return None;
         }
         u8::try_from(count).ok()
+    }
+}
+
+/// Read the syntax version number from `UNB` S001 DE 0002.
+///
+/// `None` when the slice carries no readable `UNB` — a message window, say.
+fn detect_syntax_version(segments: &[Segment<'_>]) -> Option<u8> {
+    segments
+        .iter()
+        .find(|s| s.tag == "UNB")
+        .and_then(|unb| unb.component_str(0, 1))
+        .and_then(|version| version.parse().ok())
+}
+
+/// Pick the representation that applies to `syntax_version`.
+///
+/// Version 4 onward uses `from_v4` when the definition states one. An unknown
+/// version accepts either, because a definition that distinguishes them is
+/// distinguishing a real incompatibility — guessing would reject conformant data
+/// from whichever version we guessed against.
+fn select_repr(
+    base: Option<Repr>,
+    from_v4: Option<Repr>,
+    syntax_version: Option<u8>,
+) -> Option<ReprRequirement> {
+    match (base, from_v4) {
+        (_, None) => base.map(ReprRequirement::single),
+        (None, Some(v4)) => Some(ReprRequirement::single(v4)),
+        (Some(base), Some(v4)) => Some(match syntax_version {
+            Some(version) if version >= 4 => ReprRequirement::single(v4),
+            Some(_) => ReprRequirement::single(base),
+            None => ReprRequirement {
+                primary: base,
+                alternative: Some(v4),
+            },
+        }),
     }
 }
 
@@ -1498,7 +2540,7 @@ impl DirectoryValidator {
 
     /// Count the non-trailing-empty components in element `element_idx` of `seg`.
     ///
-    /// Per ISO 9735-1 §3.3 ("Trailing empty component data elements may be omitted"),
+    /// Per ISO 9735-1 §8.7.2 ("Trailing empty component data elements may be omitted"),
     /// a sender is not required to transmit trailing empty components; this function
     /// therefore strips them before checking against the expected count so that
     /// conformant messages with omitted trailing components are still accepted.
@@ -1554,6 +2596,164 @@ impl DirectoryValidator {
         }
     }
 
+    /// Enforce each element's declared maximum number of occurrences.
+    ///
+    /// `max_repeat` had been carried on every `ElementRef` since the type
+    /// existed, exposed by a getter, and read by nothing — so a definition that
+    /// said "this element occurs once" constrained nothing at all, and a caller
+    /// who wrote it believed otherwise.
+    fn collect_repetition_issues(
+        &self,
+        seg: &Segment<'_>,
+        def: &SegmentDefRef<'_>,
+        out: &mut Vec<EdifactError>,
+    ) {
+        for (index, element) in seg.elements.iter().enumerate() {
+            let Some(max) = def.max_repeat_at(index) else {
+                continue;
+            };
+            // A declared maximum of zero would forbid the element outright,
+            // which is what `Status` is for; treat it as "unconstrained".
+            if max == 0 {
+                continue;
+            }
+            let actual = element.repeat_count();
+            if actual > usize::from(max) {
+                out.push(EdifactError::TooManyRepetitions {
+                    tag: seg.tag.to_owned(),
+                    element_index: index,
+                    max,
+                    actual,
+                    span: element.span,
+                });
+            }
+        }
+    }
+
+    /// Check every populated value against its declared representation.
+    ///
+    /// Only positions the definition actually states a representation for are
+    /// checked, so a partial table stays useful rather than becoming a source of
+    /// false findings.
+    fn collect_representation_issues(
+        &self,
+        seg: &Segment<'_>,
+        def: &SegmentDefRef<'_>,
+        syntax_version: Option<u8>,
+        out: &mut Vec<EdifactError>,
+    ) {
+        for (element_index, element) in seg.elements.iter().enumerate() {
+            for occurrence in element.repetitions() {
+                for (component_index, (value, span)) in occurrence.iter().enumerate() {
+                    // An empty value is an absent one (§8.1); its presence is
+                    // the mandatory check's business, not the representation's.
+                    if value.is_empty() {
+                        continue;
+                    }
+                    let Some(repr) = def.repr_at(element_index, component_index, syntax_version)
+                    else {
+                        continue;
+                    };
+                    if !repr.permits_characters(value) {
+                        out.push(EdifactError::InvalidCharacterType {
+                            tag: seg.tag.to_owned(),
+                            element_index,
+                            component_index,
+                            repr: repr.to_string(),
+                            value: value.to_string(),
+                            span: *span,
+                        });
+                        // The length of a value that is not of the declared
+                        // class is not meaningful — §10's numeric count in
+                        // particular assumes a numeric value.
+                        continue;
+                    }
+                    self.collect_insignificant_characters(
+                        seg,
+                        element_index,
+                        component_index,
+                        value,
+                        *span,
+                        repr.primary,
+                        out,
+                    );
+                    if repr.permits_length(value) {
+                        continue;
+                    }
+                    let actual = repr.measure(value);
+                    out.push(if repr.is_too_short(value) {
+                        EdifactError::DataElementTooShort {
+                            tag: seg.tag.to_owned(),
+                            element_index,
+                            component_index,
+                            repr: repr.to_string(),
+                            actual,
+                            span: *span,
+                        }
+                    } else {
+                        EdifactError::DataElementTooLong {
+                            tag: seg.tag.to_owned(),
+                            element_index,
+                            component_index,
+                            repr: repr.to_string(),
+                            actual,
+                            span: *span,
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    /// Report characters ISO 9735-1 §9.1 requires the sender to suppress.
+    ///
+    /// Only **variable length** elements are covered, which is what §9.1 says:
+    /// a fixed-length numeric field is padded with leading zeroes by design, and
+    /// a fixed-length text one with trailing spaces.
+    #[allow(clippy::too_many_arguments)]
+    fn collect_insignificant_characters(
+        &self,
+        seg: &Segment<'_>,
+        element_index: usize,
+        component_index: usize,
+        value: &str,
+        span: crate::Span,
+        repr: Repr,
+        out: &mut Vec<EdifactError>,
+    ) {
+        if repr.is_fixed() {
+            return;
+        }
+        let kind = match repr.kind() {
+            ReprKind::Numeric => {
+                let digits = value.strip_prefix('-').unwrap_or(value);
+                // "Nevertheless, a single zero before a decimal mark is
+                // allowed", so `0.5` is correct and only `00…` is not.
+                let leading_zeroes = digits.starts_with('0')
+                    && digits.len() > 1
+                    && !digits.starts_with("0.")
+                    && !digits.starts_with("0,");
+                if !leading_zeroes {
+                    return;
+                }
+                Insignificant::LeadingZeroes
+            }
+            ReprKind::Alphabetic | ReprKind::Alphanumeric => {
+                if !value.ends_with(' ') {
+                    return;
+                }
+                Insignificant::TrailingSpaces
+            }
+        };
+        out.push(EdifactError::InsignificantCharacters {
+            tag: seg.tag.to_owned(),
+            element_index,
+            component_index,
+            kind,
+            span,
+        });
+    }
+
     fn collect_code_list_issues(&self, seg: &Segment<'_>, out: &mut Vec<EdifactError>) {
         for (elem_idx, comp_idx, de) in (self.code_list_rules)(seg.tag) {
             let value = seg
@@ -1598,7 +2798,12 @@ impl DirectoryValidator {
     /// whose whole purpose is an exhaustive report has no business hiding two of
     /// them.  Only the checks that cannot proceed without a resolved definition
     /// short-circuit.
-    fn collect_segment_issues(&self, seg: &Segment<'_>, out: &mut Vec<EdifactError>) {
+    fn collect_segment_issues(
+        &self,
+        seg: &Segment<'_>,
+        syntax_version: Option<u8>,
+        out: &mut Vec<EdifactError>,
+    ) {
         if !self.structure_checks && !self.code_list_checks {
             return;
         }
@@ -1671,6 +2876,8 @@ impl DirectoryValidator {
             .unwrap_or_else(|never| match never {});
 
             self.collect_component_count_issues(seg, &def, out);
+            self.collect_repetition_issues(seg, &def, out);
+            self.collect_representation_issues(seg, &def, syntax_version, out);
 
             if let Some(rule) = &self.additional_structure_rule {
                 if let Err(error) = rule(seg) {
@@ -1696,9 +2903,12 @@ impl Validator for DirectoryValidator {
         report: &mut ValidationReport,
         _context: &ValidationRuleContext<'_>,
     ) {
+        // The syntax version decides which form of a version-dependent
+        // representation applies; `UNB` S001 DE 0002 is where it is stated.
+        let syntax_version = detect_syntax_version(segments);
         let mut issues = Vec::new();
         for seg in segments {
-            self.collect_segment_issues(seg, &mut issues);
+            self.collect_segment_issues(seg, syntax_version, &mut issues);
             for err in issues.drain(..) {
                 report_error(report, err);
             }
@@ -1883,7 +3093,7 @@ mod tests {
         assert!(!report.has_errors());
     }
 
-    // ── effective_component_count (ISO 9735-1 §3.3 trailing-empty-component trim) ──
+    // ── effective_component_count (ISO 9735-1 §8.7.2 trailing-empty-component trim) ──
 
     fn parse_single(input: &[u8]) -> crate::OwnedSegment {
         crate::from_reader_collect(std::io::Cursor::new(input))
@@ -1896,7 +3106,7 @@ mod tests {
     #[test]
     fn trailing_empty_component_stripped_from_dtm() {
         // DTM+137:20200101: has three components in element 0; the third is empty.
-        // ISO 9735-1 §3.3 says trailing empty components may be omitted,
+        // ISO 9735-1 §8.7.2 says trailing empty components may be omitted,
         // so effective count should be 2.
         let owned = parse_single(b"DTM+137:20200101:'");
         let seg = owned.as_borrowed();

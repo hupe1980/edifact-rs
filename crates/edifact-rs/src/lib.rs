@@ -84,9 +84,16 @@
 //!   budgets). A limit never ends the iterator quietly, because that is
 //!   indistinguishable from a clean end of input and would let a caller accept
 //!   a truncated interchange as a complete one.
-//! - When a `UNA` declares a repetition separator at position 7, repeating data
-//!   elements are split into [`Element::repetitions`] rather than left glued
-//!   into the value (ISO 9735-4 §3.1).
+//! - The service characters are discovered the way ISO 9735-1 says a receiver
+//!   should discover them: from a leading `UNA` if there is one, otherwise the
+//!   §5.1 defaults with the repetition separator resolved from the syntax
+//!   version in `UNB` S001 DE 0002 — active as `*` for version 4, inactive for
+//!   versions 1–3, where `*` is ordinary data. Override both with
+//!   [`ReaderConfig::with_service_string_advice`] when parsing a fragment that
+//!   carries neither header.
+//! - When the repetition separator is active, repeating data elements are split
+//!   into [`Element::repetitions`] rather than left glued into the value
+//!   (ISO 9735-1 §8.6).
 //!
 //! These contracts apply to both slice-based parsing (`from_bytes`) and
 //! reader-based parsing (`from_reader`).
@@ -179,6 +186,8 @@
 // ── core modules ──────────────────────────────────────────────────────────────
 /// EDIFACT character repertoires (`UNB` S001 DE 0001) and transcoding.
 pub mod charset;
+/// `CONTRL` — the ISO 9735-4 syntax and service report message.
+pub mod contrl;
 pub mod directory_validator;
 pub(crate) mod envelope;
 /// Error types and validation reporting primitives.
@@ -204,12 +213,13 @@ pub mod ser;
 
 // ── flat re-exports: core ─────────────────────────────────────────────────────
 pub use charset::{Charset, DecodingReader, decode_interchange, decode_reader, sniff_charset};
+pub use contrl::{Action, Contrl, ReportingLevel, SyntaxError};
 pub use envelope::{
     FunctionalGroupEnvelope, GroupIdentifier, InterchangeEnvelope, LenientResult, MessageEnvelope,
     MessageIdentifier, ValidatedInterchange, parse_ung, parse_unh, validate_envelope,
     validate_envelope_from_owned, validate_envelope_lenient, validate_envelope_lenient_from_owned,
 };
-pub use error::{EdifactError, IoError};
+pub use error::{EdifactError, Insignificant, IoError};
 pub use group::{
     GroupDef, SegmentGroupIndexed, group_owned_segments_indexed, group_segments_indexed,
 };
@@ -221,11 +231,13 @@ pub use parser::{
     OwnedSegmentStream, Parser, ReaderConfig, from_bufread, from_bufread_stream,
     from_bufread_stream_with_config, from_reader_with_config,
 };
+pub use report::severity_for_error;
 pub use report::{ValidationIssue, ValidationReport, ValidationSeverity};
 pub use tokenizer::{ServiceStringAdvice, Token, Tokenizer};
 pub use validator::{
-    CharsetValidator, EnvelopeValidator, ProfileRule, ProfileRulePack, ValidationContext,
-    ValidationContextBuilder, ValidationLayer, ValidationRuleContext, Validator, validate_each,
+    CharsetValidator, EnvelopeValidator, ProfileRule, ProfileRulePack, SyntaxValidator,
+    ValidationContext, ValidationContextBuilder, ValidationLayer, ValidationRuleContext, Validator,
+    validate_each,
 };
 pub use writer::{AsDataElement, DataElement, MessageWriter, Writer};
 
@@ -242,7 +254,8 @@ pub use de::{
     find_qualified_segment_owned, find_segment, find_segment_owned, find_segment_typed,
     find_segments_iter, find_segments_typed, get_components_iter,
     groups_are_contiguous_by_qualifier, message_windows_from_reader, optional_component,
-    optional_element, qualifier_matches_pattern, required_component, required_element,
+    optional_element, qualifier_matches_pattern, repeated_components, repeated_components_owned,
+    required_component, required_element,
 };
 
 /// Splits a byte slice into [`MessageWindow`] views, one per `UNH`/`UNT` envelope,
@@ -270,7 +283,8 @@ pub use de::message_windows_bytes as from_bytes_windows;
 
 pub use directory_validator::{
     ComponentRef, DirectoryValidator, DirectoryValidatorBuilder, ElementPath, ElementRef,
-    OwnedComponentRef, OwnedElementRef, OwnedSegmentDef, SegmentDefinition, SegmentLayout, Status,
+    LayoutAudit, LayoutFinding, LayoutSlot, OwnedComponentRef, OwnedElementRef, OwnedSegmentDef,
+    Repr, ReprKind, SegmentDefinition, SegmentLayout, Status, audit_directory,
 };
 #[cfg(feature = "derive")]
 #[cfg_attr(docsrs, doc(cfg(feature = "derive")))]
@@ -422,7 +436,16 @@ pub fn from_bytes(input: &[u8]) -> FromBytesIter<'_> {
 /// assert!(matches!(err, EdifactError::LimitExceeded { limit: "max_segments", max: 1 }));
 /// ```
 pub fn from_bytes_with_config(input: &[u8], config: parser::ReaderConfig) -> FromBytesIter<'_> {
-    let (parser, pending_error) = match tokenizer::ServiceStringAdvice::from_bytes(input) {
+    // A malformed `UNA` is rejected even when the caller supplied its own
+    // service characters: the input is broken either way, and silently parsing
+    // past a nine-byte header nobody validated would be the worse answer.
+    let discovered = tokenizer::ServiceStringAdvice::from_bytes(input);
+    let resolved = match (config.service_string_advice, discovered) {
+        (_, Err(error)) => Err(error),
+        (Some(override_ssa), Ok(_)) => Ok(override_ssa),
+        (None, Ok(ssa)) => Ok(ssa),
+    };
+    let (parser, pending_error) = match resolved {
         Ok(ssa) => {
             let t = tokenizer::Tokenizer::with_limit(input, ssa, config.max_segment_bytes);
             (Some(parser::Parser::new(t)), None)
@@ -515,6 +538,145 @@ pub fn from_bytes_owned_with_config(
     config: ReaderConfig,
 ) -> impl Iterator<Item = Result<OwnedSegment, EdifactError>> + '_ {
     from_bytes_with_config(input, config).map(|r| r.map(OwnedSegment::from))
+}
+
+/// Parse a byte slice, decoding it from the repertoire its own `UNB` declares.
+///
+/// [`decode_interchange`] followed by [`from_bytes_owned`], in one call that a
+/// caller cannot forget to make. Forgetting is the failure mode worth designing
+/// against: a `UNOC` corpus stored as UTF-8 parses fine, so the tests pass and
+/// the first *conformant* counterparty message — the one with `ü` as the single
+/// byte `0xFC` — is rejected as invalid text.
+///
+/// Segments are owned because the decoded buffer is this function's, not the
+/// caller's: an ISO 8859-1 payload has to be transcoded to exist as UTF-8 at
+/// all. When the payload is already ASCII or `UNOY`, decoding borrows and copies
+/// nothing, but the segments are still owned — reach for
+/// [`decode_interchange`] plus [`from_bytes`] when you want to keep the
+/// zero-copy path and hold the buffer yourself.
+///
+/// # Errors
+///
+/// As [`decode_interchange`], plus any parse error.
+///
+/// # Example
+///
+/// ```
+/// // A conformant UNOC interchange: `Müller` is `4D FC 6C 6C 65 72`.
+/// let mut raw = b"UNB+UNOC:3+S+R+260101:0900+IC1'NAD+BY+M".to_vec();
+/// raw.push(0xFC);
+/// raw.extend_from_slice(b"ller'UNZ+0+IC1'");
+///
+/// // Parsing it directly fails — it is not UTF-8, and it never claimed to be.
+/// assert!(edifact_rs::from_bytes(&raw).collect::<Result<Vec<_>, _>>().is_err());
+///
+/// let segments = edifact_rs::from_bytes_decoded(&raw)?;
+/// assert_eq!(segments[1].element_str(1), Some("Müller"));
+/// # Ok::<(), edifact_rs::EdifactError>(())
+/// ```
+pub fn from_bytes_decoded(input: &[u8]) -> Result<Vec<OwnedSegment>, EdifactError> {
+    from_bytes_decoded_with_config(input, ReaderConfig::default())
+}
+
+/// [`from_bytes_decoded`] with explicit [`ReaderConfig`] limits.
+///
+/// # Errors
+///
+/// As [`from_bytes_decoded`].
+pub fn from_bytes_decoded_with_config(
+    input: &[u8],
+    config: ReaderConfig,
+) -> Result<Vec<OwnedSegment>, EdifactError> {
+    let decoded = charset::decode_interchange(input)?;
+    from_bytes_owned_with_config(&decoded, config).collect()
+}
+
+/// Parse a reader, decoding it from the repertoire the stream's own `UNB`
+/// declares — **lazily**.
+///
+/// [`decode_reader`] has to read far enough to find the `UNB` before it can
+/// answer, so it returns a `Result` — and a `?` on it turns a lazy pipeline
+/// eager, forcing the caller to box the iterator or wrap the error in a
+/// one-item chain. This does the sniff on the first `next()` instead, so the
+/// signature stays a plain `Iterator` and a decode failure arrives as its first
+/// item, exactly like a parse failure does.
+///
+/// # Example
+///
+/// ```
+/// let mut raw = b"UNB+UNOC:3+S+R+260101:0900+IC1'NAD+BY+M".to_vec();
+/// raw.push(0xFC);
+/// raw.extend_from_slice(b"ller'UNZ+0+IC1'");
+///
+/// // No `?` before the loop: the pipeline stays lazy.
+/// let segments: Vec<_> = edifact_rs::from_reader_decoded(std::io::Cursor::new(raw))
+///     .collect::<Result<Vec<_>, _>>()?;
+/// assert_eq!(segments[1].element_str(1), Some("Müller"));
+/// # Ok::<(), edifact_rs::EdifactError>(())
+/// ```
+pub fn from_reader_decoded<R: Read>(reader: R) -> DecodingSegmentStream<R> {
+    from_reader_decoded_with_config(reader, ReaderConfig::default())
+}
+
+/// [`from_reader_decoded`] with explicit [`ReaderConfig`] limits.
+pub fn from_reader_decoded_with_config<R: Read>(
+    reader: R,
+    config: ReaderConfig,
+) -> DecodingSegmentStream<R> {
+    DecodingSegmentStream {
+        state: DecodingState::Pending(reader),
+        config,
+    }
+}
+
+/// Lazy iterator returned by [`from_reader_decoded`].
+///
+/// Sniffs the interchange's repertoire on the first `next()`, so constructing it
+/// cannot fail and the caller keeps a plain `Iterator`.
+pub struct DecodingSegmentStream<R: Read> {
+    state: DecodingState<R>,
+    config: ReaderConfig,
+}
+
+type DecodedReader<R> = charset::DecodingReader<std::io::Chain<std::io::Cursor<Vec<u8>>, R>>;
+
+enum DecodingState<R: Read> {
+    /// Nothing read yet; the repertoire is still unknown.
+    Pending(R),
+    /// Repertoire resolved; segments are streaming.
+    Running(Box<parser::OwnedSegmentStream<std::io::BufReader<DecodedReader<R>>>>),
+    /// Terminated, by exhaustion or by a decode failure already reported.
+    Done,
+}
+
+impl<R: Read> Iterator for DecodingSegmentStream<R> {
+    type Item = Result<OwnedSegment, EdifactError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match &mut self.state {
+                DecodingState::Done => return None,
+                DecodingState::Running(stream) => return stream.next(),
+                DecodingState::Pending(_) => {
+                    let DecodingState::Pending(reader) =
+                        std::mem::replace(&mut self.state, DecodingState::Done)
+                    else {
+                        unreachable!("guarded by the match arm")
+                    };
+                    // The sniff happens here rather than at construction, which
+                    // is what keeps the signature a plain `Iterator`.
+                    match charset::decode_reader(reader) {
+                        Ok(decoded) => {
+                            self.state = DecodingState::Running(Box::new(
+                                parser::from_reader_with_config(decoded, self.config),
+                            ));
+                        }
+                        Err(error) => return Some(Err(error)),
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Serialize `segments` to an [`std::io::Write`] implementation.
@@ -632,6 +794,7 @@ mod doc_guides {
         CharacterSets,
         "../../../site/content/docs/character-sets.md"
     );
+    guide!(Contrl, "../../../site/content/docs/contrl.md");
     guide!(CoreConcepts, "../../../site/content/docs/core-concepts.md");
     guide!(Parsing, "../../../site/content/docs/parsing.md");
     guide!(ProfilePacks, "../../../site/content/docs/profile-packs.md");

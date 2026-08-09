@@ -188,19 +188,8 @@ where
 
 /// Convert a low-level validation error to a user-facing issue and append it.
 ///
-/// # Severity mapping
-///
-/// The mapping from `EdifactError` variant to `ValidationSeverity` is:
-///
-/// | Variant | Severity |
-/// |---|---|
-/// | `InvalidCodeValue` | `Warning` |
-/// | *(everything else)* | `Error` |
-///
-/// Rationale: a code-list mismatch indicates a value that *could* be intentional,
-/// since non-standard extension codes are common in practice.  Everything else —
-/// structural violations, control-reference mismatches, parse errors — is a hard
-/// error.
+/// Severity comes from [`report::severity_for_error`][crate::report::severity_for_error],
+/// which is also what the `miette` rendering uses.
 pub(crate) fn report_error(report: &mut ValidationReport, err: EdifactError) {
     let issue = issue_from_error(err);
     match issue.severity {
@@ -237,6 +226,133 @@ impl Validator for EnvelopeValidator {
 
     fn fork(&self) -> Option<Box<dyn Validator + Send + Sync>> {
         Some(Box::new(EnvelopeValidator))
+    }
+}
+
+// ── SyntaxValidator ───────────────────────────────────────────────────────────
+
+/// Checks the ISO 9735-1 rules that hold for **every** interchange, whatever
+/// directory or profile it claims.
+///
+/// These are the rules a partner's translator enforces before it ever looks at a
+/// message type, and they need no directory to check:
+///
+/// | Rule | Source | Reported as |
+/// |---|---|---|
+/// | A segment carries at least one data element besides its tag | §7.5, §8.5 | `E046` |
+/// | No data element value is made only of spaces | §9.3 | `E045` (warning) |
+///
+/// Both are things a hand-rolled writer produces by accident: an `ABC'` where a
+/// conditional segment should have been dropped entirely, or a fixed-width field
+/// padded with spaces instead of suppressed. Neither trips a count check, and
+/// both are rejected downstream.
+///
+/// Registered by
+/// [`ValidationContextBuilder::with_syntax_validation`][crate::ValidationContextBuilder::with_syntax_validation].
+///
+/// # Example
+///
+/// ```
+/// use edifact_rs::{from_bytes, ValidationContext};
+///
+/// // `FTX+` carries a value of nothing but spaces; `DTM` carries no data at all.
+/// let segments: Vec<_> = from_bytes(b"FTX+   'DTM'")
+///     .collect::<Result<_, _>>()?;
+///
+/// let report = ValidationContext::builder()
+///     .with_syntax_validation()
+///     .build()
+///     .validate_lenient(&segments);
+///
+/// assert_eq!(report.errors()[0].error_code(), Some("E046")); // DTM has no data element
+/// assert_eq!(report.warnings()[0].error_code(), Some("E045")); // FTX value is only spaces
+/// # Ok::<(), edifact_rs::EdifactError>(())
+/// ```
+pub struct SyntaxValidator;
+
+impl Validator for SyntaxValidator {
+    fn validate_batch(
+        &self,
+        segments: &[Segment<'_>],
+        report: &mut ValidationReport,
+        _context: &ValidationRuleContext<'_>,
+    ) {
+        for segment in segments {
+            // §7.5: "A segment shall contain at least one data element in
+            // addition to the segment tag."  A segment whose only element is
+            // empty still satisfies this — §8.4 spells out `ABC'` versus the
+            // mandatory-segment-with-no-data form — so the test is on presence,
+            // not on content.
+            if segment.elements.is_empty() {
+                report_error(
+                    report,
+                    EdifactError::SegmentWithoutDataElements {
+                        tag: segment.tag.to_owned(),
+                        span: segment.span,
+                    },
+                );
+            }
+
+            // §8.7.1: separators that would follow omitted data elements at the
+            // end of a segment "shall also be omitted".  A segment ending in an
+            // empty element carries a separator that says nothing.
+            if segment
+                .elements
+                .last()
+                .is_some_and(|element| element.repetitions().flatten().all(|(v, _)| v.is_empty()))
+                && segment.elements.len() > 1
+            {
+                report_error(
+                    report,
+                    EdifactError::TrailingSeparator {
+                        tag: segment.tag.to_owned(),
+                        element_index: None,
+                        span: segment.span,
+                    },
+                );
+            }
+
+            for (element_index, element) in segment.elements.iter().enumerate() {
+                // §8.7.2 says the same for components at the end of a composite.
+                // Only a composite can have one: a single-component element that
+                // is empty is an omitted element, not a trailing separator.
+                if element.components.len() > 1
+                    && element.components.last().is_some_and(|(v, _)| v.is_empty())
+                {
+                    report_error(
+                        report,
+                        EdifactError::TrailingSeparator {
+                            tag: segment.tag.to_owned(),
+                            element_index: Some(element_index),
+                            span: element.span,
+                        },
+                    );
+                }
+
+                for components in element.repetitions() {
+                    for (component_index, (value, span)) in components.iter().enumerate() {
+                        // §9.3: "A data element value containing only space(s)
+                        // shall not be allowed."  An empty value is a different
+                        // thing entirely — that is how EDIFACT spells "absent".
+                        if !value.is_empty() && value.bytes().all(|b| b == b' ') {
+                            report_error(
+                                report,
+                                EdifactError::BlankDataElementValue {
+                                    tag: segment.tag.to_owned(),
+                                    element_index,
+                                    component_index,
+                                    span: *span,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn fork(&self) -> Option<Box<dyn Validator + Send + Sync>> {
+        Some(Box::new(SyntaxValidator))
     }
 }
 
@@ -382,7 +498,8 @@ impl Validator for CharsetValidator {
 
 fn issue_from_error(err: EdifactError) -> ValidationIssue {
     let code = err.stable_code();
-    let mut issue = ValidationIssue::new(severity_for(&err), err.to_string()).with_error_code(code);
+    let mut issue = ValidationIssue::new(crate::report::severity_for_error(&err), err.to_string())
+        .with_error_code(code);
     let default_hint = err.recovery_hint();
 
     match err {
@@ -438,8 +555,89 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
                 .with_element_index(u8::try_from(element_index).unwrap_or(u8::MAX))
                 .with_span(span);
         }
-        EdifactError::DuplicateReference { tag, span, .. } => {
+        EdifactError::DuplicateReference { tag, span, .. }
+        | EdifactError::PackageNotSupported { tag, span }
+        | EdifactError::SegmentWithoutDataElements { tag, span } => {
             issue = issue.with_segment(tag).with_span(span);
+        }
+        EdifactError::EmptyMessage { span, .. } => {
+            issue = issue.with_segment("UNH").with_span(span);
+        }
+        EdifactError::GroupsAndMessagesMixed { span } => {
+            issue = issue.with_segment("UNH").with_span(span);
+        }
+        EdifactError::TrailingSeparator {
+            tag,
+            element_index,
+            span,
+        } => {
+            issue = issue.with_segment(tag).with_span(span);
+            if let Some(index) = element_index.and_then(|i| u8::try_from(i).ok()) {
+                issue = issue.with_element_index(index);
+            }
+        }
+        // The trailer is what got the count wrong, and carrying its span is what
+        // places the finding on that message rather than on the interchange.
+        EdifactError::SegmentCountMismatch {
+            span, message_ref, ..
+        } => {
+            issue = issue
+                .with_segment("UNT")
+                .with_span(span)
+                .with_message_ref(message_ref);
+        }
+        EdifactError::TooManyRepetitions {
+            tag,
+            element_index,
+            span,
+            ..
+        } => {
+            issue = issue.with_segment(tag).with_span(span);
+            if let Ok(index) = u8::try_from(element_index) {
+                issue = issue.with_element_index(index);
+            }
+        }
+        EdifactError::InvalidCharacterType {
+            tag,
+            element_index,
+            component_index,
+            span,
+            ..
+        }
+        | EdifactError::DataElementTooLong {
+            tag,
+            element_index,
+            component_index,
+            span,
+            ..
+        }
+        | EdifactError::DataElementTooShort {
+            tag,
+            element_index,
+            component_index,
+            span,
+            ..
+        }
+        | EdifactError::InsignificantCharacters {
+            tag,
+            element_index,
+            component_index,
+            span,
+            ..
+        }
+        | EdifactError::BlankDataElementValue {
+            tag,
+            element_index,
+            component_index,
+            span,
+        } => {
+            issue = issue.with_segment(tag).with_span(span);
+            if let Ok(index) = u8::try_from(element_index) {
+                issue = issue.with_element_index(index);
+            }
+            if let Ok(index) = u8::try_from(component_index) {
+                issue = issue.with_component_index(index);
+            }
         }
         EdifactError::MissingRequiredElement { tag, element_index } => {
             issue = issue.with_segment(tag);
@@ -480,20 +678,6 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
     }
 
     issue
-}
-
-fn severity_for(err: &EdifactError) -> ValidationSeverity {
-    match err {
-        // A value outside a known code list may be an intentional non-standard
-        // extension, which is common in practice — so this is advisory.
-        //
-        // `QualifierMismatch` is deliberately *not* grouped here: it is only ever
-        // produced for UNZ/UNE/UNT control-reference mismatches, which are hard
-        // ISO 9735-1 structural violations.  Downgrading it let a spliced or
-        // truncated interchange pass `validate_strict`.
-        EdifactError::InvalidCodeValue { .. } => ValidationSeverity::Warning,
-        _ => ValidationSeverity::Error,
-    }
 }
 
 #[cfg(test)]
