@@ -114,6 +114,15 @@ close documented-but-missing features and gaps in the guides.
   library; examples now use neutral profile names and the UN/EDIFACT message
   types (`ORDERS`, `INVOIC`) that need no domain context.
 
+### Build
+
+- **Pinned `trybuild` to 1.0.119.** 1.0.120 raised its own MSRV to Rust 1.88,
+  which broke the MSRV job. 1.0.119 is the last release that still supports 1.85.
+- **A guide snippet illustrating attribute syntax was marked `rust`**, so rustdoc
+  tried to compile a bare outer attribute with nothing after it. Newer toolchains
+  happened to accept it; the MSRV job did not — which is exactly what that job is
+  for. It is now `text`, like the other syntax illustrations.
+
 ### Site
 
 - **The guides moved from `docs/` to a Zola site under `site/`** and are now
