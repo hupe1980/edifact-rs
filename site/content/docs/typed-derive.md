@@ -77,8 +77,8 @@ struct NadMs {
 The generated `matches_segment` impl checks that element 0 equals `"MS"`.
 Use wildcard suffix with `*` for prefix matching:
 
-```rust
-#[edifact(segment = "NAD", qualifier = "M*")] // matches "MS", "MR", "MT", …
+```text
+#[edifact(segment = "NAD", qualifier = "M*")]   // matches "MS", "MR", "MT", …
 ```
 
 ### `qualifier_from = N` — dynamic qualifier at runtime
