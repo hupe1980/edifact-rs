@@ -169,6 +169,11 @@ the derive dropping components on write — was silent data loss on the way out.
 - `qualifier_matches_pattern` drops a redundant overlap check from its
   single-wildcard fast path; the length test it duplicated already decides the
   same question.
+- `just ci` now runs the `docsrs-check` job. CI has always built the docs on
+  **nightly** with `--cfg docsrs -D warnings`, which enables lints stable does
+  not have — `redundant_explicit_links`, for one — so a tree that passed
+  `just ci` could still fail CI on documentation alone. The justfile's whole
+  promise is parity; `just nightly-install` provides the toolchain it needs.
 
 ### Documentation
 
