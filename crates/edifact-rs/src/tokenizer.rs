@@ -121,6 +121,11 @@ impl ServiceStringAdvice {
     /// For any external or user-provided input, prefer [`from_bytes`](Self::from_bytes)
     /// which validates delimiter uniqueness and rejects invalid bytes.
     pub fn from_bytes_unchecked(input: &[u8]) -> Self {
+        // A byte-order mark and stray newlines ahead of the header are common in
+        // files that have been through a Windows editor or an FTP hop; ISO 9735
+        // says nothing about them, and refusing to look past them would reject
+        // interchanges that are otherwise perfectly conformant.
+        let input = &input[prologue_len(input)..];
         // UNA is 9 bytes: "UNA" + 6 service chars
         if input.len() >= 9 && &input[..3] == b"UNA" {
             Self {
@@ -247,6 +252,37 @@ impl ServiceStringAdvice {
     }
 }
 
+/// The UTF-8 byte order mark, which real-world EDIFACT files acquire from
+/// editors and transfer tooling even though ISO 9735 never mentions one.
+pub(crate) const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
+
+/// Length of the non-EDIFACT prologue at the head of an interchange.
+///
+/// Covers a UTF-8 byte order mark and any run of ASCII whitespace before the
+/// first service segment. Nothing in ISO 9735 authorises either, but both turn
+/// up constantly, and the alternative — rejecting the interchange with
+/// `InvalidSegmentTag("\u{feff}UNB")` — points the reader at the wrong problem.
+#[inline]
+pub(crate) fn prologue_len(input: &[u8]) -> usize {
+    let mut pos = usize::from(input.starts_with(&UTF8_BOM)) * 3;
+    while pos < input.len() && matches!(input[pos], b' ' | b'\t' | b'\r' | b'\n') {
+        pos += 1;
+    }
+    pos
+}
+
+/// Whether `tag` is a syntactically valid segment tag.
+///
+/// Exactly three ASCII uppercase letters. Both the tokenizer and the writer
+/// consult this, so what the writer emits is always something the parser
+/// accepts: a tag is written verbatim and cannot be release-escaped, so a
+/// lowercase, mis-sized, or delimiter-bearing one produces bytes that do not
+/// read back as the segment they were written from.
+#[inline]
+pub(crate) fn is_valid_segment_tag(tag: &str) -> bool {
+    tag.len() == 3 && tag.bytes().all(|b| b.is_ascii_uppercase())
+}
+
 /// Read the syntax version number (`UNB` S001 DE 0002) out of raw bytes.
 ///
 /// Deliberately byte-level and deliberately tiny: this runs *before* the
@@ -257,10 +293,7 @@ impl ServiceStringAdvice {
 ///
 /// Returns `None` for input with no readable `UNB` S001.
 fn sniff_syntax_version(input: &[u8]) -> Option<u8> {
-    let mut pos = 0;
-    while pos < input.len() && matches!(input[pos], b' ' | b'\t' | b'\r' | b'\n') {
-        pos += 1;
-    }
+    let pos = prologue_len(input);
     // `UNB+` — the element separator is the §5.1 default, because a UNA that
     // changed it would have been used instead of this function.
     if input.len() < pos + 4 || &input[pos..pos + 3] != b"UNB" || input[pos + 3] != b'+' {
@@ -362,11 +395,11 @@ enum TokState {
 }
 
 impl<'a> Tokenizer<'a> {
-    /// Return the byte offset of the first non-UNA byte in `input`.
+    /// Return the byte offset of the first segment tag in `input`.
     ///
-    /// If the input starts with the `UNA` service string advice (first 3
-    /// bytes are `b"UNA"`), the UNA header is exactly 9 bytes long and the
-    /// first segment tag starts at offset 9.  Otherwise parsing starts at 0.
+    /// Skips the [`prologue_len`] prologue (byte order mark plus leading
+    /// whitespace) and, if a `UNA` service string advice follows it, the nine
+    /// bytes of that header.
     ///
     /// Only correct for a slice that starts at the head of an interchange.
     /// A slice holding a single already-delimited segment must use
@@ -374,10 +407,11 @@ impl<'a> Tokenizer<'a> {
     /// segment tag and skipping nine bytes of it corrupts the parse.
     #[inline]
     fn una_start_pos(input: &[u8]) -> usize {
-        if input.len() >= 9 && &input[..3] == b"UNA" {
-            9
+        let start = prologue_len(input);
+        if input.len() >= start + 9 && &input[start..start + 3] == b"UNA" {
+            start + 9
         } else {
-            0
+            start
         }
     }
 
@@ -647,7 +681,7 @@ impl<'a> Tokenizer<'a> {
         self.segment_start = start;
         let tag = std::str::from_utf8(tag_bytes)
             .map_err(|_| EdifactError::InvalidSegmentTag(format!("{tag_bytes:?}")))?;
-        if tag.len() != 3 || !tag.bytes().all(|b| b.is_ascii_uppercase()) {
+        if !is_valid_segment_tag(tag) {
             return Err(EdifactError::InvalidSegmentTag(tag.to_owned()));
         }
         self.state = TokState::InSegment;
@@ -903,7 +937,7 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("element-less segment must parse");
         assert_eq!(
-            segs.iter().map(|s| s.tag).collect::<Vec<_>>(),
+            segs.iter().map(|s| s.tag()).collect::<Vec<_>>(),
             vec!["UNZ", "UNB"]
         );
         assert!(segs[0].elements.is_empty());
@@ -966,8 +1000,9 @@ mod tests {
     fn chunked_reader_parses_via_parser() {
         // The reader tokenizer path was removed; verify the equivalent via the parser.
         let input = b"UNA:+.? 'BGM+220+test?+value'UNT+2+1'";
-        let segments =
+        let segments: Vec<_> =
             crate::parser::from_bufread(std::io::BufReader::new(std::io::Cursor::new(input)))
+                .collect::<Result<_, _>>()
                 .expect("parser should succeed");
         assert!(segments.iter().any(|s| s.tag == "BGM"));
         // The release sequence '?+' inside 'test?+value' should survive in the element.
@@ -976,7 +1011,7 @@ mod tests {
             .elements
             .get(1)
             .and_then(|e| e.components.first())
-            .map(|(s, _)| s.as_str());
+            .map(|(s, _)| s.as_ref());
         assert_eq!(raw_val, Some("test+value"));
     }
 }

@@ -37,12 +37,12 @@ impl EdifactCompositeSerialize for Vec<String> {
         emitter: &mut E,
     ) -> Result<(), EdifactError> {
         if self.is_empty() {
-            return emitter.emit(EdifactEvent::Element { value: "" });
+            return emitter.emit(EdifactEvent::element(""));
         }
 
-        emitter.emit(EdifactEvent::Element { value: &self[0] })?;
+        emitter.emit(EdifactEvent::element(&self[0]))?;
         for component in self.iter().skip(1) {
-            emitter.emit(EdifactEvent::ComponentElement { value: component })?;
+            emitter.emit(EdifactEvent::component(component))?;
         }
         Ok(())
     }
@@ -53,16 +53,14 @@ impl EdifactCompositeSerialize for Vec<String> {
 impl EdifactSerialize for str {
     #[inline]
     fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
-        emitter.emit(EdifactEvent::Element { value: self })
+        emitter.emit(EdifactEvent::element(self))
     }
 }
 
 impl EdifactSerialize for String {
     #[inline]
     fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
-        emitter.emit(EdifactEvent::Element {
-            value: self.as_str(),
-        })
+        emitter.emit(EdifactEvent::element(self.as_str()))
     }
 }
 
@@ -71,7 +69,7 @@ impl<T: EdifactSerialize> EdifactSerialize for Option<T> {
     fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
         match self {
             Some(v) => v.edifact_serialize(emitter),
-            None => emitter.emit(EdifactEvent::Element { value: "" }),
+            None => emitter.emit(EdifactEvent::element("")),
         }
     }
 }
@@ -109,11 +107,11 @@ macro_rules! impl_serialize_int {
                         let written = 42 - w.len();
                         // Display output for all integer/bool types is ASCII-only.
                         let s = std::str::from_utf8(&buf[..written]).map_err(|_| EdifactError::InvalidUtf8)?;
-                        emitter.emit(EdifactEvent::Element { value: s })
+                        emitter.emit(EdifactEvent::element(s))
                     } else {
                         // Extraordinary case: fall back to heap to avoid any panic.
                         let s = format!("{self}");
-                        emitter.emit(EdifactEvent::Element { value: &s })
+                        emitter.emit(EdifactEvent::element(&s))
                     }
                 }
             }
@@ -128,41 +126,53 @@ impl_serialize_int!(
 
 // ── decimal-mark-aware float wrapper ─────────────────────────────────────────
 
-/// Decimal-mark-aware wrapper for `f32` or `f64` serialization.
+/// Decimal-mark-aware wrapper for numeric serialization.
 ///
-/// Rust's [`Display`][std::fmt::Display] for `f32`/`f64` always uses `.` as the
-/// decimal separator.  EDIFACT interchanges can declare a different decimal mark
-/// in the UNA service string — `,` is the common alternative.
+/// Rust's [`Display`][std::fmt::Display] always writes `.` as the decimal
+/// separator. An EDIFACT interchange may declare a different decimal mark in its
+/// `UNA` service string — `,` is the common alternative — and this wrapper is
+/// what routes a value through that setting.
 ///
 /// # Required for float serialization
 ///
-/// `edifact-rs` intentionally provides **no** blanket `EdifactSerialize` impl for
-/// `f32`/`f64`.  This forces callers to make the decimal-mark intent explicit:
+/// `edifact-rs` deliberately provides **no** blanket `EdifactSerialize` impl for
+/// `f32`/`f64`, so that the decimal-mark intent is always explicit at the call
+/// site rather than silently defaulted:
 ///
 /// ```
-/// use edifact_rs::ser::DecimalFloat;
-/// use edifact_rs::{EdifactSerialize, VecEmitter, OwnedEdifactEvent};
+/// use edifact_rs::{DecimalFloat, EdifactEvent, EdifactSerialize, VecEmitter};
 ///
 /// let mut emitter = VecEmitter::default();
-/// DecimalFloat(12.5_f64).edifact_serialize(&mut emitter).unwrap();
-/// assert!(matches!(&emitter.events[0], OwnedEdifactEvent::Element { value } if value == "12.5"));
+/// DecimalFloat(12.5_f64).edifact_serialize(&mut emitter)?;
+/// assert!(matches!(&emitter.events[0], EdifactEvent::Element { value } if value == "12.5"));
+/// # Ok::<(), edifact_rs::EdifactError>(())
 /// ```
 ///
-/// When the emitter's [`EventEmitter::decimal_mark`] is `b','`, the output will be `"12,5"`.
+/// When the emitter's [`EventEmitter::decimal_mark`] is `b','`, the same value
+/// goes out as `"12,5"`.
 ///
-/// # Supported inner types
+/// # Inner types
 ///
-/// `DecimalFloat<f32>`, `DecimalFloat<f64>`. For any type that implements
-/// [`std::fmt::Display`], use [`DecimalFloatDisplay`] instead.
+/// Anything that implements [`Display`][std::fmt::Display] and renders a decimal
+/// point: `f32`, `f64`, `rust_decimal::Decimal`, `bigdecimal::BigDecimal`, and so
+/// on. There is deliberately only one wrapper — a float-only variant alongside a
+/// `Display` one meant the two could (and did) disagree about non-finite values.
+///
+/// # Non-finite values are refused
+///
+/// `NaN` and the infinities have no EDIFACT representation, so serializing one
+/// is [`EdifactError::NonFiniteNumber`] rather than a wire format no receiver can
+/// parse:
+///
+/// ```
+/// use edifact_rs::{DecimalFloat, EdifactError, EdifactSerialize, VecEmitter};
+///
+/// let mut emitter = VecEmitter::default();
+/// let err = DecimalFloat(f64::NAN).edifact_serialize(&mut emitter).unwrap_err();
+/// assert!(matches!(err, EdifactError::NonFiniteNumber { .. }));
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DecimalFloat<T>(pub T);
-
-/// Decimal-mark-aware serializer for any [`std::fmt::Display`] value.
-///
-/// Like [`DecimalFloat`] but works with any type whose `Display` uses `.` as a
-/// decimal point (e.g., `rust_decimal::Decimal`, `bigdecimal::BigDecimal`).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct DecimalFloatDisplay<T: std::fmt::Display>(pub T);
 
 fn serialize_with_decimal_mark<E: EventEmitter>(
     display: &dyn std::fmt::Display,
@@ -171,32 +181,34 @@ fn serialize_with_decimal_mark<E: EventEmitter>(
     use std::io::Write as _;
     let mark = emitter.decimal_mark();
 
-    // Fast path: standard interchange — avoid any string manipulation.
+    // Fast path: standard interchange — avoid any heap allocation.
     if mark == b'.' {
         let mut buf = [0u8; 320];
         let mut w: &mut [u8] = &mut buf;
         if write!(w, "{display}").is_ok() {
             let written = 320 - w.len();
-            // INVARIANT: float Display output is ASCII-only.
             let s = std::str::from_utf8(&buf[..written]).map_err(|_| EdifactError::InvalidUtf8)?;
-            return emitter.emit(EdifactEvent::Element { value: s });
+            reject_non_finite(s)?;
+            return emitter.emit(EdifactEvent::element(s));
         }
         // Buffer overflow fallback (extraordinarily large exponent).
         let s = format!("{display}");
-        return emitter.emit(EdifactEvent::Element { value: &s });
+        reject_non_finite(&s)?;
+        return emitter.emit(EdifactEvent::element(&s));
     }
 
     // Non-standard decimal mark: format as string then replace '.'.
     // INVARIANT: `mark` is ASCII (validated by ServiceStringAdvice::is_valid()).
     let s = format!("{display}");
+    reject_non_finite(&s)?;
     if s.contains('.') {
         // Encode `mark` as a 1–4 byte UTF-8 slice on the stack; no heap allocation.
         let mut mark_buf = [0u8; 4];
         let mark_str = (mark as char).encode_utf8(&mut mark_buf);
         let replaced = s.replace('.', mark_str);
-        emitter.emit(EdifactEvent::Element { value: &replaced })
+        emitter.emit(EdifactEvent::element(&replaced))
     } else {
-        emitter.emit(EdifactEvent::Element { value: &s })
+        emitter.emit(EdifactEvent::element(&s))
     }
 }
 
@@ -208,33 +220,25 @@ fn serialize_with_decimal_mark<E: EventEmitter>(
 /// exponent), that no receiver can parse, and that this crate's own reader would
 /// hand back as a string rather than a number. Emitting it would turn a
 /// calculation bug into a wire-format bug discovered days later.
+///
+/// Checked against the *rendering* rather than against `f64::is_finite`, so the
+/// rule reaches every [`Display`][std::fmt::Display] type — a decimal library
+/// with its own NaN is caught by the same test as `f64::NAN`.
 #[inline]
-fn reject_non_finite(value: f64) -> Result<(), EdifactError> {
-    if value.is_finite() {
-        return Ok(());
+fn reject_non_finite(rendered: &str) -> Result<(), EdifactError> {
+    let bare = rendered.strip_prefix(['+', '-']).unwrap_or(rendered);
+    if bare.eq_ignore_ascii_case("nan")
+        || bare.eq_ignore_ascii_case("inf")
+        || bare.eq_ignore_ascii_case("infinity")
+    {
+        return Err(EdifactError::NonFiniteNumber {
+            value: rendered.to_owned(),
+        });
     }
-    Err(EdifactError::NonFiniteNumber {
-        value: value.to_string(),
-    })
+    Ok(())
 }
 
-impl EdifactSerialize for DecimalFloat<f32> {
-    #[inline]
-    fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
-        reject_non_finite(f64::from(self.0))?;
-        serialize_with_decimal_mark(&self.0, emitter)
-    }
-}
-
-impl EdifactSerialize for DecimalFloat<f64> {
-    #[inline]
-    fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
-        reject_non_finite(self.0)?;
-        serialize_with_decimal_mark(&self.0, emitter)
-    }
-}
-
-impl<T: std::fmt::Display> EdifactSerialize for DecimalFloatDisplay<T> {
+impl<T: std::fmt::Display> EdifactSerialize for DecimalFloat<T> {
     #[inline]
     fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
         serialize_with_decimal_mark(&self.0, emitter)
@@ -291,7 +295,7 @@ pub fn emit_sparse_segment<E: EventEmitter>(
 ) -> Result<(), EdifactError> {
     parts.sort_by_key(|(element, component, _)| (*element, *component));
 
-    emitter.emit(EdifactEvent::StartSegment { tag })?;
+    emitter.emit(EdifactEvent::start(tag))?;
 
     // `parts` is sorted, so the last entry carries the highest element index and
     // one linear walk covers every slot.
@@ -312,18 +316,18 @@ pub fn emit_sparse_segment<E: EventEmitter>(
             // Fill any skipped component slots so positions stay meaningful.
             while next_component < *component {
                 let event = if opened {
-                    EdifactEvent::ComponentElement { value: "" }
+                    EdifactEvent::component("")
                 } else {
-                    EdifactEvent::Element { value: "" }
+                    EdifactEvent::element("")
                 };
                 emitter.emit(event)?;
                 opened = true;
                 next_component += 1;
             }
             let event = if opened {
-                EdifactEvent::ComponentElement { value }
+                EdifactEvent::component(value.as_ref())
             } else {
-                EdifactEvent::Element { value }
+                EdifactEvent::element(value.as_ref())
             };
             emitter.emit(event)?;
             opened = true;
@@ -333,7 +337,7 @@ pub fn emit_sparse_segment<E: EventEmitter>(
         if !opened {
             // No value for this element at all — emit an empty placeholder so
             // the following elements keep their positions.
-            emitter.emit(EdifactEvent::Element { value: "" })?;
+            emitter.emit(EdifactEvent::element(""))?;
         }
     }
 
@@ -374,7 +378,7 @@ pub fn to_edifact_string<T: EdifactSerialize>(value: &T) -> Result<String, Edifa
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{OwnedEdifactEvent, VecEmitter};
+    use crate::event::{EdifactEvent, VecEmitter};
     use std::borrow::Cow;
 
     /// Render a sparse-emit result to wire bytes, which is what the shape of
@@ -427,13 +431,9 @@ mod tests {
 
     impl EdifactSerialize for BgmSegment {
         fn edifact_serialize<E: EventEmitter>(&self, emitter: &mut E) -> Result<(), EdifactError> {
-            emitter.emit(EdifactEvent::StartSegment { tag: "BGM" })?;
-            emitter.emit(EdifactEvent::Element {
-                value: &self.doc_name_code,
-            })?;
-            emitter.emit(EdifactEvent::Element {
-                value: &self.pruef_id,
-            })?;
+            emitter.emit(EdifactEvent::start("BGM"))?;
+            emitter.emit(EdifactEvent::element(&self.doc_name_code))?;
+            emitter.emit(EdifactEvent::element(&self.pruef_id))?;
             self.msg_function.edifact_serialize(emitter)?;
             emitter.emit(EdifactEvent::EndSegment)?;
             Ok(())
@@ -450,13 +450,8 @@ mod tests {
         let mut emitter = VecEmitter::default();
         seg.edifact_serialize(&mut emitter).unwrap();
 
-        assert_eq!(
-            emitter.events[0],
-            OwnedEdifactEvent::StartSegment {
-                tag: "BGM".to_owned()
-            }
-        );
-        assert_eq!(emitter.events.last(), Some(&OwnedEdifactEvent::EndSegment));
+        assert_eq!(emitter.events[0], EdifactEvent::start("BGM".to_owned()));
+        assert_eq!(emitter.events.last(), Some(&EdifactEvent::EndSegment));
     }
 
     #[test]
@@ -475,12 +470,7 @@ mod tests {
         let val: Option<String> = None;
         let mut emitter = VecEmitter::default();
         val.edifact_serialize(&mut emitter).unwrap();
-        assert_eq!(
-            emitter.events[0],
-            OwnedEdifactEvent::Element {
-                value: String::new()
-            }
-        );
+        assert_eq!(emitter.events[0], EdifactEvent::element(String::new()));
     }
 
     #[test]
@@ -488,32 +478,20 @@ mod tests {
         let val: Option<String> = Some("TEST".to_owned());
         let mut emitter = VecEmitter::default();
         val.edifact_serialize(&mut emitter).unwrap();
-        assert_eq!(
-            emitter.events[0],
-            OwnedEdifactEvent::Element {
-                value: "TEST".to_owned()
-            }
-        );
+        assert_eq!(emitter.events[0], EdifactEvent::element("TEST".to_owned()));
     }
 
     #[test]
     fn integer_types_serialize_without_alloc() {
         let mut emitter = VecEmitter::default();
         42u32.edifact_serialize(&mut emitter).unwrap();
-        assert_eq!(
-            emitter.events[0],
-            OwnedEdifactEvent::Element {
-                value: "42".to_owned()
-            }
-        );
+        assert_eq!(emitter.events[0], EdifactEvent::element("42".to_owned()));
         // i128::MIN should fit exactly in the 40-byte buffer
         let mut emitter2 = VecEmitter::default();
         i128::MIN.edifact_serialize(&mut emitter2).unwrap();
         assert_eq!(
             emitter2.events[0],
-            OwnedEdifactEvent::Element {
-                value: "-170141183460469231731687303715884105728".to_owned()
-            }
+            EdifactEvent::element("-170141183460469231731687303715884105728".to_owned())
         );
     }
 
@@ -526,7 +504,7 @@ mod tests {
             .edifact_serialize(&mut emitter)
             .unwrap();
         let s = match &emitter.events[0] {
-            OwnedEdifactEvent::Element { value } => value.clone(),
+            EdifactEvent::Element { value } => value.clone(),
             _ => panic!("expected Element event"),
         };
         assert!(!s.is_empty());
@@ -535,10 +513,7 @@ mod tests {
         DecimalFloat(f32::MAX)
             .edifact_serialize(&mut emitter2)
             .unwrap();
-        assert!(matches!(
-            &emitter2.events[0],
-            OwnedEdifactEvent::Element { .. }
-        ));
+        assert!(matches!(&emitter2.events[0], EdifactEvent::Element { .. }));
     }
 
     #[test]

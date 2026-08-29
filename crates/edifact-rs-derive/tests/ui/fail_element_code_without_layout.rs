@@ -3,8 +3,7 @@ mod support;
 
 pub use support::edifact_rs::{
     EdifactDeserialize, EdifactError, EdifactEvent, EdifactSegmentTag, EdifactSerialize, Element,
-    EventEmitter, OwnedSegment, Segment, find_qualified_segment, find_segment, find_segment_owned,
-};
+    EventEmitter, Segment, find_qualified_segment, find_segment};
 
 extern crate self as edifact_rs;
 
@@ -15,7 +14,6 @@ use edifact_rs_derive::EdifactDeserialize as DeriveEdifactDeserialize;
 #[edifact(segment = "NAD")]
 struct Message {
     #[edifact(element = "3035")]
-    qualifier: String,
-}
+    qualifier: String}
 
 fn main() {}

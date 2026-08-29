@@ -1,5 +1,5 @@
 error: field `bgm`: #[edifact(required)] is only valid on segment struct element fields; to require a segment in a message struct, use a non-optional field type
-  --> tests/ui/fail_required_on_message_field.rs:35:15
+  --> tests/ui/fail_required_on_message_field.rs:32:15
    |
-35 |     #[edifact(required)]
+32 |     #[edifact(required)]
    |               ^^^^^^^^

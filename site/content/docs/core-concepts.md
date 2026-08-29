@@ -172,20 +172,52 @@ A trailing `?` at end-of-input (with no following byte) is **malformed** and cau
 
 ## Rust type mapping
 
-### `Segment<'a>` — zero-copy view
+### One segment type, borrowed or owned
+
+`edifact-rs` has a **single** segment type. `Segment<'a>` holds its text as
+`Cow<'a, str>`, which covers both parsing modes:
 
 ```text
 pub struct Segment<'a> {
-    pub tag: &'a str,       // borrows from input
-    pub span: Span,         // byte range of the whole segment
-    pub tag_span: Span,     // byte range of just the tag
+    pub tag: Cow<'a, str>,            // borrowed from the input, or owned
+    pub span: Span,                   // byte range of the whole segment
+    pub tag_span: Span,               // byte range of just the tag
     pub elements: Vec<Element<'a>>,
 }
 ```
 
-`Segment<'a>` **borrows** its tag and all element text directly from the input
-`&[u8]`. No heap allocation is needed for the values; only the `Vec<Element>` and
-the `SmallVec<[(Cow<'a, str>, Span); 4]>` per element are allocated.
+- `from_bytes` borrows straight out of the input buffer and yields
+  `Segment<'input>` — no allocation for segment data.
+- `from_reader` has no buffer to borrow from, so it yields `Segment<'static>`,
+  which is aliased as **`OwnedSegment`**.
+
+`Segment` is covariant in `'a`, so a `&[OwnedSegment]` is accepted anywhere a
+`&[Segment<'_>]` is wanted. Every function in the crate therefore takes one
+shape and works with both — there are no `_owned` twins to remember, and no
+conversion step between the two paths:
+
+```rust
+use edifact_rs::{OwnedSegment, Segment};
+
+fn count_bgm(segments: &[Segment<'_>]) -> usize {
+    segments.iter().filter(|s| s.tag == "BGM").count()
+}
+
+let borrowed: Vec<Segment<'_>> =
+    edifact_rs::from_bytes(b"BGM+220'").collect::<Result<_, _>>()?;
+let owned: Vec<OwnedSegment> =
+    edifact_rs::from_reader(std::io::Cursor::new(b"BGM+220'")).collect::<Result<_, _>>()?;
+
+assert_eq!(count_bgm(&borrowed), 1);
+assert_eq!(count_bgm(&owned), 1);   // same function, no conversion
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+To keep a segment past the buffer it was parsed from, call
+`Segment::into_owned()`.
+
+`segment.tag` compares directly against a string literal (`segment.tag == "BGM"`);
+`segment.tag()` is the `&str` for the places that need one, such as a `match`.
 
 ### `Element<'a>` — component holder
 
@@ -199,7 +231,22 @@ pub struct Element<'a> {
 
 `Cow::Borrowed` is used when the component contains no release sequences.
 `Cow::Owned` is used only when an escape was resolved (the decoded string differs
-from the raw bytes).
+from the raw bytes) or when the segment came from a reader.
+
+### Reading values
+
+Every accessor lives on `Segment`, so it is available on both parsing paths:
+
+| Method | Returns |
+|---|---|
+| `element_str(n)` | component 0 of element `n` |
+| `component_str(elem, comp)` | one specific component |
+| `get_element(n)` | the whole `Element` |
+| `optional_element(n)` / `optional_component(e, c)` | as above, but empty counts as absent |
+| `required_element(n)` / `required_component(e, c)` | `Err` when absent or empty |
+| `parsed_element::<T>(n)` | parsed into `T`, `Err` when absent or unparseable |
+| `repeated_component(elem, comp)` | one component across every occurrence |
+| `value_by_code(&layout, "3055")` | addressed by data-element identifier |
 
 ### Repeating data elements
 
@@ -210,10 +257,10 @@ syntax version 4 interchange:
 ```text
 RFF+ON:1*ON:2*ON:3'
     └──┬─┘ └──┬─┘ └──┬─┘
-       0      1      2     ← three repetitions of element 0
+       0      1      2     ← three occurrences of element 0
 ```
 
-`components` always holds repetition 0, so every positional accessor —
+`components` always holds occurrence 0, so every positional accessor —
 `element_str`, `component_str`, `value_by_code`, and the derive macros — keeps
 reading the first occurrence and behaves identically on the interchanges that do
 not use the feature. The remaining occurrences live in `repeats`:
@@ -225,43 +272,19 @@ let segments: Vec<_> = edifact_rs::from_bytes(b"UNA:+.?*'RFF+ON:1*ON:2'")
 let rff = segments[0].get_element(0).unwrap();
 
 assert_eq!(rff.repeat_count(), 2);
-assert_eq!(rff.get_component(1), Some("1"));                  // repetition 0
-assert_eq!(rff.repetition(1).unwrap()[1].0.as_ref(), "2");    // repetition 1
+assert_eq!(rff.get_component(1), Some("1"));                  // occurrence 0
+assert_eq!(rff.repetition(1).unwrap()[1].0.as_ref(), "2");    // occurrence 1
 
-let all: Vec<&str> = rff.repetitions().map(|r| r[1].0.as_ref()).collect();
+// Or read one component across every occurrence at once:
+let all: Vec<&str> = segments[0].repeated_component(0, 1).collect();
 assert_eq!(all, ["1", "2"]);
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
 Without an active separator the byte is ordinary data: `RFF+ON:1*ON:2'` in a
-syntax version 3 interchange yields the single component `1*ON`. A value that legitimately
-contains the separator is release-escaped by the writer and unescaped on the way
-back in, so `a?*b` round-trips as `a*b`.
-
-### `OwnedSegment` — heap-owned copy
-
-When parsing from a `Read` source (`from_reader`, `message_windows_from_reader`),
-the library can't borrow from the input buffer. It produces `OwnedSegment` instead:
-
-```text
-pub struct OwnedSegment {
-    pub tag: String,
-    pub elements: Vec<OwnedElement>,
-}
-```
-
-`OwnedSegment` provides two accessors that avoid extra allocation:
-
-```text
-seg.element_str(n)           // component 0 of element n → Option<&str>
-seg.component_str(elem, comp) // specific component → Option<&str>
-```
-
-To get a zero-allocation `Segment<'_>` view of an `OwnedSegment`, call:
-
-```text
-let borrowed: BorrowedSegment<'_> = seg.borrow();
-```
+syntax version 3 interchange yields the single component `1*ON`. A value that
+legitimately contains the separator is release-escaped by the writer and
+unescaped on the way back in, so `a?*b` round-trips as `a*b`.
 
 ### `Span` — byte position
 

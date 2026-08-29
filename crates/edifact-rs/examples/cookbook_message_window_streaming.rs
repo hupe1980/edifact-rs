@@ -5,7 +5,7 @@
 //!
 //! # Key APIs
 //!
-//! - [`from_bytes_windows`] — byte-slice source, produces owned windows
+//! - [`message_windows`] — byte-slice source, produces owned windows
 //! - [`message_windows_from_reader`] — reader source, lazy per-window I/O
 //! - [`deserialize_messages_from_reader`] — reader source + typed deserialisation
 //!
@@ -13,13 +13,13 @@
 //! automatically and yield only the `UNH..UNT` windows.
 
 use edifact_rs::{
-    EdifactDeserialize, EdifactSerialize, from_bytes_windows, message_windows_from_reader,
+    EdifactDeserialize, EdifactSerialize, message_windows, message_windows_from_reader,
 };
 
 // ── 1. Manual approach: inspect windows as raw segment slices ─────────────────
 
 fn count_messages_in_interchange(input: &[u8]) -> usize {
-    from_bytes_windows(input).filter_map(Result::ok).count()
+    message_windows(input).filter_map(Result::ok).count()
 }
 
 // ── 2. Typed message struct via derive macros ─────────────────────────────────
@@ -54,8 +54,8 @@ fn collect_order_ids(input: &[u8]) -> Vec<Option<String>> {
     message_windows_from_reader(reader)
         .filter_map(Result::ok)
         .map(|window| {
-            // Each window is an OwnedMessageWindow; deserialise directly from its segments.
-            OrdersMessage::edifact_deserialize_owned(&window.segments)
+            // Each window is an MessageWindow; deserialise directly from its segments.
+            OrdersMessage::edifact_deserialize(&window.segments)
                 .ok()
                 .and_then(|m| m.bgm.into_iter().next())
                 .and_then(|bgm| bgm.doc_id)
@@ -72,7 +72,7 @@ fn demonstrate_error_propagation() {
                    UNH+2+ORDERS:D:96A:UN'BGM+220+BROKEN+9'";
     // Collecting all windows: the unclosed window is surfaced as an error on
     // the final iteration, after the first complete window has already been yielded.
-    let windows: Vec<_> = from_bytes_windows(broken).collect();
+    let windows: Vec<_> = message_windows(broken).collect();
     // The first window is complete, and the second item is the EOF error.
     assert_eq!(windows.len(), 2);
     assert!(matches!(
@@ -87,7 +87,7 @@ fn demonstrate_error_propagation() {
     // A UNH-while-in-flight scenario (no UNT before next UNH) is an error:
     let double_unh = b"UNH+1+ORDERS:D:96A:UN'BGM+220+X+9'\
                        UNH+2+ORDERS:D:96A:UN'BGM+220+Y+9'UNT+3+2'";
-    let results: Vec<_> = from_bytes_windows(double_unh).collect();
+    let results: Vec<_> = message_windows(double_unh).collect();
     assert!(
         results.iter().any(|r| r.is_err()),
         "expected an error for double-UNH"
@@ -112,7 +112,7 @@ fn main() {
     assert_eq!(count, 2);
 
     // Inspect each window directly
-    for (i, window) in from_bytes_windows(interchange)
+    for (i, window) in message_windows(interchange)
         .enumerate()
         .map(|(i, r)| (i, r.unwrap()))
     {

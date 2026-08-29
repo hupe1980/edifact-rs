@@ -1,5 +1,5 @@
 error: field `numbers`: #[edifact(repeat)] repeats a data element inside one segment; #[edifact(group)] repeats the segment itself — they are different structures
-  --> tests/ui/fail_repeat_with_group.rs:16:15
+  --> tests/ui/fail_repeat_with_group.rs:15:15
    |
-16 |     #[edifact(repeat, group)]
+15 |     #[edifact(repeat, group)]
    |               ^^^^^^

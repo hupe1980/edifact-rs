@@ -11,7 +11,7 @@ use std::sync::Arc;
 /// Implement this trait to create reusable, composable profile rules for
 /// EDIFACT message validation.  Rules receive a [`ValidationRuleContext`] that
 /// provides optional typed metadata injected at validation call time via
-/// [`super::context::ValidationContext::validate_lenient_with`].
+/// [`super::context::ValidationContext::validate_with`].
 ///
 /// # Multiple issues per invocation
 ///
@@ -98,7 +98,7 @@ impl Clone for NamedRule {
 /// A group-scoped rule entry inside a [`ProfileRulePack`].
 ///
 /// Group rules are evaluated by [`ProfileRulePack`] during a segment-group tree
-/// traversal (see [`ValidationContext::validate_lenient_grouped`]).  Each rule
+/// traversal (see [`ValidationContext::validate_grouped`]).  Each rule
 /// receives the current [`SegmentGroupIndexed`] node, the full message segment
 /// slice, and the validation context.
 ///
@@ -230,20 +230,107 @@ impl ProfileRulePack {
 
     /// Cap the number of issues any single rule may emit per evaluation pass.
     ///
-    /// When a rule fires more than `limit` times in one `validate_batch` call,
-    /// the excess issues are silently discarded.  This prevents a single noisy
-    /// rule (e.g. a missing-qualifier check iterating thousands of segments)
-    /// from flooding the report.
+    /// Excess issues are discarded, keeping one noisy rule from flooding the
+    /// report.
     ///
-    /// The cap applies *per rule per call*, not globally.  Pass `None` to
-    /// remove a previously set cap and restore unlimited output.
+    /// The cap is *per rule per call* — not globally, and **not per group**: a
+    /// group rule's budget is spent across the whole tree walk rather than reset
+    /// at each occurrence, and a rule that has spent it is not called again on
+    /// that pass.
+    ///
+    /// `None` removes the cap.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity, from_bytes};
+    ///
+    /// let pack = ProfileRulePack::new("NOISY")
+    ///     .with_max_issues_per_rule(2)
+    ///     .with_rule_fn(|segments, issues| {
+    ///         for segment in segments {
+    ///             issues.push(ValidationIssue::new(
+    ///                 ValidationSeverity::Warning,
+    ///                 format!("saw {}", segment.tag()),
+    ///             ));
+    ///         }
+    ///     });
+    ///
+    /// let segments: Vec<_> = from_bytes(b"BGM+1'DTM+2'RFF+3'NAD+4'")
+    ///     .collect::<Result<Vec<_>, _>>()?;
+    /// let report = edifact_rs::ValidationContext::builder()
+    ///     .with_profile_pack(pack)
+    ///     .build()
+    ///     .validate(&segments);
+    ///
+    /// assert_eq!(report.total_issues(), 2); // four segments, capped at two
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
     pub fn with_max_issues_per_rule(mut self, limit: impl Into<Option<usize>>) -> Self {
         self.max_issues_per_rule = limit.into();
         self
     }
 
-    /// Add a context-aware rule closure.
+    /// Add a rule closure.
+    ///
+    /// The closure receives the segments and a `Vec` to push issues into.  This
+    /// is the everyday form; reach for
+    /// [`with_contextual_rule_fn`][Self::with_contextual_rule_fn] only when the
+    /// rule needs the per-call [`ValidationRuleContext`].
+    ///
+    /// The rule is anonymous, so [`merge_with_override`][Self::merge_with_override]
+    /// cannot replace it — use [`with_named_rule_fn`][Self::with_named_rule_fn]
+    /// for anything a downstream pack may need to override.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
+    ///
+    /// let pack = ProfileRulePack::new("ORDERS").with_rule_fn(|segments, issues| {
+    ///     if !segments.iter().any(|segment| segment.tag == "BGM") {
+    ///         issues.push(ValidationIssue::new(
+    ///             ValidationSeverity::Error,
+    ///             "ORDERS requires a BGM",
+    ///         ));
+    ///     }
+    /// });
+    /// assert_eq!(pack.rule_count(), 1);
+    /// ```
     pub fn with_rule_fn<F>(mut self, rule: F) -> Self
+    where
+        F: for<'a> Fn(&[Segment<'a>], &mut Vec<ValidationIssue>) + Send + Sync + 'static,
+    {
+        self.rules.push(NamedRule {
+            id: None,
+            rule: Arc::new(StatelessClosureProfileRule(rule)),
+        });
+        self
+    }
+
+    /// Add a rule closure with a stable identifier.
+    ///
+    /// The identifier is what [`merge_with_override`][Self::merge_with_override]
+    /// matches on, so name every rule a downstream pack may need to replace.
+    pub fn with_named_rule_fn<F>(mut self, id: impl Into<Arc<str>>, rule: F) -> Self
+    where
+        F: for<'a> Fn(&[Segment<'a>], &mut Vec<ValidationIssue>) + Send + Sync + 'static,
+    {
+        self.rules.push(NamedRule {
+            id: Some(id.into()),
+            rule: Arc::new(StatelessClosureProfileRule(rule)),
+        });
+        self
+    }
+
+    /// Add a rule closure that also receives the [`ValidationRuleContext`].
+    ///
+    /// The context carries the message reference, the message type, and any
+    /// typed metadata passed to
+    /// [`validate_with`][super::context::ValidationContext::validate_with].
+    /// When the rule does not need it, [`with_rule_fn`][Self::with_rule_fn] is
+    /// the shorter form.
+    pub fn with_contextual_rule_fn<F>(mut self, rule: F) -> Self
     where
         F: for<'a> Fn(&[Segment<'a>], &ValidationRuleContext<'_>, &mut Vec<ValidationIssue>)
             + Send
@@ -258,7 +345,11 @@ impl ProfileRulePack {
     }
 
     /// Add a context-aware rule closure with a stable identifier.
-    pub fn with_named_rule_fn<F>(mut self, id: impl Into<Arc<str>>, rule: F) -> Self
+    ///
+    /// [`with_contextual_rule_fn`][Self::with_contextual_rule_fn] plus the
+    /// override identifier described on
+    /// [`with_named_rule_fn`][Self::with_named_rule_fn].
+    pub fn with_named_contextual_rule_fn<F>(mut self, id: impl Into<Arc<str>>, rule: F) -> Self
     where
         F: for<'a> Fn(&[Segment<'a>], &ValidationRuleContext<'_>, &mut Vec<ValidationIssue>)
             + Send
@@ -268,30 +359,6 @@ impl ProfileRulePack {
         self.rules.push(NamedRule {
             id: Some(id.into()),
             rule: Arc::new(ClosureProfileRule(rule)),
-        });
-        self
-    }
-
-    /// Add a context-free rule closure.
-    pub fn with_stateless_rule_fn<F>(mut self, rule: F) -> Self
-    where
-        F: for<'a> Fn(&[Segment<'a>], &mut Vec<ValidationIssue>) + Send + Sync + 'static,
-    {
-        self.rules.push(NamedRule {
-            id: None,
-            rule: Arc::new(StatelessClosureProfileRule(rule)),
-        });
-        self
-    }
-
-    /// Add a context-free rule closure with a stable identifier.
-    pub fn with_named_stateless_rule_fn<F>(mut self, id: impl Into<Arc<str>>, rule: F) -> Self
-    where
-        F: for<'a> Fn(&[Segment<'a>], &mut Vec<ValidationIssue>) + Send + Sync + 'static,
-    {
-        self.rules.push(NamedRule {
-            id: Some(id.into()),
-            rule: Arc::new(StatelessClosureProfileRule(rule)),
         });
         self
     }
@@ -309,7 +376,7 @@ impl ProfileRulePack {
     /// ```
     pub fn require_segment(self, tag: &'static str, rule_id: impl Into<Arc<str>>) -> Self {
         let id: Arc<str> = rule_id.into();
-        self.with_named_stateless_rule_fn(id.clone(), move |segments, issues| {
+        self.with_named_rule_fn(id.clone(), move |segments, issues| {
             if !segments.iter().any(|s| s.tag == tag) {
                 issues.push(
                     ValidationIssue::new(
@@ -328,7 +395,7 @@ impl ProfileRulePack {
     /// Emits an `Error`-severity issue for each occurrence found.
     pub fn forbid_segment(self, tag: &'static str, rule_id: impl Into<Arc<str>>) -> Self {
         let id: Arc<str> = rule_id.into();
-        self.with_named_stateless_rule_fn(id.clone(), move |segments, issues| {
+        self.with_named_rule_fn(id.clone(), move |segments, issues| {
             for (occ, s) in segments.iter().filter(|s| s.tag == tag).enumerate() {
                 issues.push(
                     ValidationIssue::new(
@@ -355,7 +422,7 @@ impl ProfileRulePack {
         rule_id: impl Into<Arc<str>>,
     ) -> Self {
         let id: Arc<str> = rule_id.into();
-        self.with_named_stateless_rule_fn(id.clone(), move |segments, issues| {
+        self.with_named_rule_fn(id.clone(), move |segments, issues| {
             for (occ, s) in segments.iter().filter(|s| s.tag == tag).enumerate() {
                 let actual = s
                     .get_element(element as usize)
@@ -624,30 +691,39 @@ impl ProfileRulePack {
     /// Recursively walk the segment-group tree and evaluate group-scoped rules.
     ///
     /// Called internally by [`Validator::validate_group_batch`].
+    ///
+    /// `budget[i]` is how many further issues group rule `i` may still emit on
+    /// this call.  It is threaded through the recursion rather than reset per
+    /// group: [`with_max_issues_per_rule`][Self::with_max_issues_per_rule] caps
+    /// *per rule per call*, and a group rule fires once per group occurrence.
     fn walk_group_tree(
         &self,
         group: &SegmentGroupIndexed<'_>,
         all_segments: &[Segment<'_>],
         report: &mut ValidationReport,
         context: &ValidationRuleContext<'_>,
+        budget: &mut [usize],
     ) {
         let group_segs = all_segments.get(group.total_span.clone()).unwrap_or(&[]);
         let mut rule_issues: Vec<ValidationIssue> = Vec::new();
 
-        for named in &self.group_rules {
+        for (index, named) in self.group_rules.iter().enumerate() {
             // Skip if this rule is scoped to a different group name.
             if let Some(scope) = &named.group_scope {
                 if group.definition != scope.as_ref() {
                     continue;
                 }
             }
+            // Skip the call rather than discard its output: a rule that has
+            // spent its budget should not cost time it cannot report.
+            if self.max_issues_per_rule.is_some() && budget[index] == 0 {
+                continue;
+            }
             let errors_before = report.errors.len();
             (named.rule)(group, group_segs, context, &mut rule_issues);
-            // Apply the same per-rule cap as the flat path.  Group rules fire
-            // once per group occurrence, so they are the most likely to flood a
-            // report — exactly what `max_issues_per_rule` exists to prevent.
-            if let Some(limit) = self.max_issues_per_rule {
-                rule_issues.truncate(limit);
+            if self.max_issues_per_rule.is_some() {
+                rule_issues.truncate(budget[index]);
+                budget[index] -= rule_issues.len();
             }
             for mut issue in rule_issues.drain(..) {
                 // Auto-stamp the group name if the rule didn't set it explicitly.
@@ -673,7 +749,7 @@ impl ProfileRulePack {
 
         for child in &group.children {
             let errors_before_child = report.errors.len();
-            self.walk_group_tree(child, all_segments, report, context);
+            self.walk_group_tree(child, all_segments, report, context, budget);
             if self.bail_on_first_error && report.errors.len() > errors_before_child {
                 return;
             }
@@ -717,11 +793,11 @@ impl ProfileRulePack {
     ///
     /// ```rust,ignore
     /// let base = ProfileRulePack::new("MIG-BASE")
-    ///     .with_stateless_rule_fn(/* mandatory segment rules */);
+    ///     .with_rule_fn(/* mandatory segment rules */);
     ///
     /// let profile_4711 = ProfileRulePack::new("PROFILE-4711")
     ///     .extend_from(&base)?
-    ///     .with_stateless_rule_fn(/* 4711-specific rules */);
+    ///     .with_rule_fn(/* 4711-specific rules */);
     /// ```
     ///
     /// When your base pack is wrapped in an [`Arc`] you can dereference it:
@@ -730,12 +806,12 @@ impl ProfileRulePack {
     /// use std::sync::Arc;
     ///
     /// let base: Arc<ProfileRulePack> = Arc::new(
-    ///     ProfileRulePack::new("BASE").with_stateless_rule_fn(/* … */),
+    ///     ProfileRulePack::new("BASE").with_rule_fn(/* … */),
     /// );
     ///
     /// let derived = ProfileRulePack::new("DERIVED")
     ///     .extend_from(&*base)?          // deref Arc<T> to &T
-    ///     .with_stateless_rule_fn(/* … */);
+    ///     .with_rule_fn(/* … */);
     /// ```
     pub fn extend_from(mut self, base: &ProfileRulePack) -> Result<Self, EdifactError> {
         let mut combined = base.rules.clone();
@@ -773,10 +849,10 @@ impl ProfileRulePack {
     ///
     /// ```rust,ignore
     /// let base = ProfileRulePack::new("MIG-5.4")
-    ///     .with_named_stateless_rule_fn("PROFILE-4711-BGM-M", |segs, _issues| { /* old */ });
+    ///     .with_named_rule_fn("PROFILE-4711-BGM-M", |segs, _issues| { /* old */ });
     ///
     /// let delta = ProfileRulePack::new("MIG-5.5-delta")
-    ///     .with_named_stateless_rule_fn("PROFILE-4711-BGM-M", |segs, _issues| { /* updated */ });
+    ///     .with_named_rule_fn("PROFILE-4711-BGM-M", |segs, _issues| { /* updated */ });
     ///
     /// // `result` runs the updated BGM-M rule only once:
     /// let result = base.merge_with_override(delta)?;
@@ -928,7 +1004,10 @@ impl Validator for ProfileRulePack {
             return;
         }
 
-        self.walk_group_tree(root, all_segments, report, context);
+        // One budget slot per group rule, spent across the whole tree walk.
+        let mut budget =
+            vec![self.max_issues_per_rule.unwrap_or(usize::MAX); self.group_rules.len()];
+        self.walk_group_tree(root, all_segments, report, context, &mut budget);
     }
 
     fn has_group_rules(&self) -> bool {

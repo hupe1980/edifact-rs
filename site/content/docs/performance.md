@@ -53,18 +53,18 @@ for seg in from_reader(f) {
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-It holds at most one `OwnedSegment` in memory at a time. Use `from_reader`
-instead of `from_reader_collect` when processing interchanges that
-are larger than available RAM.
+It holds at most one `OwnedSegment` in memory at a time. Iterate rather than
+`.collect()` when processing interchanges larger than available RAM.
 
 ---
 
-## `edifact_deserialize_owned` — zero-batch typed extraction
+## Typed extraction without a whole-interchange buffer
 
 `deserialize_messages_from_reader::<T, R>` never materializes a `Vec<Segment<'_>>`
-for the whole interchange. It uses `edifact_deserialize_owned` internally to
-deserialize each `UNH..UNT` window as a typed value, then immediately drops the
-window segments:
+for the whole interchange. It deserializes each `UNH..UNT` window as a typed value
+and immediately drops the window's segments. Because `OwnedSegment` *is*
+`Segment<'static>`, the window goes straight into `T::edifact_deserialize` with no
+conversion between the reader and slice representations:
 
 ```rust,no_run
 use edifact_rs::{deserialize_messages_from_reader, EdifactDeserialize};
@@ -94,9 +94,9 @@ use edifact_rs::{EdifactEvent, EventEmitter, WriterEmitter};
 
 let mut out = Vec::<u8>::new();
 let mut emitter = WriterEmitter::new(&mut out);
-emitter.emit(EdifactEvent::StartSegment { tag: "BGM" })?;
-emitter.emit(EdifactEvent::Element { value: "220" })?;
-emitter.emit(EdifactEvent::Element { value: "PO-4711" })?;
+emitter.emit(EdifactEvent::start("BGM"))?;
+emitter.emit(EdifactEvent::element("220"))?;
+emitter.emit(EdifactEvent::element("PO-4711"))?;
 emitter.emit(EdifactEvent::EndSegment)?;
 assert_eq!(out, b"BGM+220+PO-4711'");
 # Ok::<(), edifact_rs::EdifactError>(())
@@ -112,9 +112,8 @@ that you want to pipe directly to a file or socket.
 | API | Input | Peak memory | Notes |
 |---|---|---|---|
 | `from_bytes` | `&[u8]` | O(1) — zero copy | Fastest; requires full buffer |
-| `from_reader_collect` | `impl Read` | O(n) segments | Eagerly collects all segments into `Vec` |
 | `from_reader` | `impl Read` | O(1) | Lazy iterator — one segment at a time |
-| `from_bytes_windows` | `&[u8]` | O(window) | One UNH..UNT window at a time |
+| `message_windows` | `&[u8]` | O(window) | One UNH..UNT window at a time |
 | `message_windows_from_reader` | `impl Read` | O(window) | Reader-based windows |
 | `deserialize_messages_from_reader` | `impl Read` | O(1) typed | Zero raw-segment buffer |
 
@@ -143,7 +142,7 @@ Criterion outputs are saved to `target/criterion/`. Open
 | `tokenizer/1mb` | Tokenization throughput on a 1 MB interchange |
 | `parser/small` | Parse + collect on a single message |
 | `parser/1mb` | Parse + collect on 1 MB |
-| `reader/1mb` | `from_reader_collect` on 1 MB (reader overhead) |
+| `reader/1mb` | `from_reader` collected over 1 MB (reader overhead) |
 | `reader/parse_reader_chunked` | Reader path across read-buffer boundaries |
 | `writer/sample_message` | Serialize a message back to wire format |
 | `validation/validate_structure_orders` | Directory structure validation |
@@ -202,12 +201,12 @@ heaptrack_gui heaptrack.*.gz
 The reader-based APIs accept a `ReaderConfig` that controls the DOS guard:
 
 ```rust
-use edifact_rs::{from_bufread_stream_with_config, ReaderConfig};
+use edifact_rs::{ReaderConfig, from_bufread_with_config};
 
 // The builder methods leave every budget you do not name at its default.
 let config = ReaderConfig::default().max_segment_bytes(256 * 1024);
 let cursor = std::io::Cursor::new(b"...");
-let _iter = from_bufread_stream_with_config(cursor, config);
+let _iter = from_bufread_with_config(cursor, config);
 ```
 
 Setting `max_segment_bytes` too low will cause `E020 SegmentTooLong` on large but

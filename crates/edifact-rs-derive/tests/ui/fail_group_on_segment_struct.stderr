@@ -1,5 +1,5 @@
 error: field `parties`: #[edifact(group)] is only valid on message structs
-  --> tests/ui/fail_group_on_segment_struct.rs:16:15
+  --> tests/ui/fail_group_on_segment_struct.rs:15:15
    |
-16 |     #[edifact(group)]
+15 |     #[edifact(group)]
    |               ^^^^^

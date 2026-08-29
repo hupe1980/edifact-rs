@@ -77,13 +77,14 @@ kilobytes — enough to find the `UNB` — reads the repertoire out of it, and
 streams the rest:
 
 ```rust
-use edifact_rs::{decode_reader, from_reader_collect};
+use edifact_rs::{decode_reader, from_reader};
 
 let mut raw = b"UNB+UNOC:3+S+R+260101:0900+IC1'NAD+BY+M".to_vec();
 raw.push(0xFC);
 raw.extend_from_slice(b"ller'UNZ+0+IC1'");
 
-let segments = from_reader_collect(decode_reader(std::io::Cursor::new(raw))?)?;
+let segments: Vec<_> = from_reader(decode_reader(std::io::Cursor::new(raw))?)
+    .collect::<Result<_, _>>()?;
 
 assert_eq!(segments[1].element_str(1), Some("Müller"));
 # Ok::<(), edifact_rs::EdifactError>(())
@@ -96,13 +97,13 @@ When the repertoire is already known — from the trading-partner agreement, say
 `Charset::decoding_reader` skips the probe:
 
 ```rust
-use edifact_rs::{Charset, from_reader_collect};
+use edifact_rs::{Charset, from_reader};
 
 # let mut raw = b"UNB+UNOC:3+S+R+260101:0900+IC1'NAD+BY+M".to_vec();
 # raw.push(0xFC);
 # raw.extend_from_slice(b"ller'UNZ+0+IC1'");
 let reader = Charset::UnoC.decoding_reader(std::io::Cursor::new(raw));
-let segments = from_reader_collect(reader)?;
+let segments: Vec<_> = from_reader(reader).collect::<Result<_, _>>()?;
 # assert_eq!(segments[1].element_str(1), Some("Müller"));
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
@@ -158,7 +159,7 @@ let segments: Vec<_> =
 let report = ValidationContext::builder()
     .with_charset_validation()   // reads the repertoire from UNB S001
     .build()
-    .validate_lenient(&segments);
+    .validate(&segments);
 
 let issue = report.errors().iter().find(|i| i.error_code() == Some("E038")).unwrap();
 assert_eq!(issue.segment_tag.as_deref(), Some("NAD"));

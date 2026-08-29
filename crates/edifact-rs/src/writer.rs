@@ -202,6 +202,20 @@ macro_rules! elements {
 /// Wraps any [`Write`] implementation and serializes segments one at a time.
 /// Call [`Writer::finish`] to flush and get the underlying writer back.
 ///
+/// # What it will not write
+///
+/// Everything the writer emits reparses. Two cases are refused before a byte
+/// reaches the sink, so a rejected segment leaves nothing half-written:
+///
+/// - A segment tag that is not three ASCII uppercase letters
+///   ([`EdifactError::InvalidSegmentTag`]). A tag is written verbatim — EDIFACT
+///   has no way to escape one — so `bgm`, `BGMX`, or `B+M` would produce bytes
+///   that do not read back as the segment they came from.
+/// - A repeating data element when no repetition separator is declared
+///   ([`EdifactError::RepetitionSeparatorNotDeclared`]).
+///
+/// Delimiters *inside a value* are not a problem: those are release-escaped.
+///
 /// # Wrap unbuffered sinks
 ///
 /// `Writer` issues a separate write for each tag, delimiter, and value chunk, so
@@ -220,7 +234,7 @@ macro_rules! elements {
 ///
 /// let sink = Vec::new(); // stands in for a File or TcpStream
 /// let mut writer = Writer::new(BufWriter::new(sink));
-/// writer.write_raw("BGM", &["220"])?;
+/// writer.write_simple("BGM", &["220"])?;
 /// // `finish` flushes the `Writer` and hands the `BufWriter` back.
 /// let buffered = writer.finish()?;
 /// assert_eq!(buffered.into_inner().unwrap(), b"BGM+220'".to_vec());
@@ -268,6 +282,23 @@ fn find_escape(ssa: &ServiceStringAdvice, hay: &[u8]) -> Option<usize> {
 }
 
 impl<W: Write> Writer<W> {
+    /// Write the segment tag, refusing one the parser would not read back.
+    ///
+    /// A tag is emitted verbatim — EDIFACT has no way to escape it — so a
+    /// lowercase, mis-sized, or delimiter-bearing tag produces bytes that do not
+    /// reparse as the segment they came from. Checked *before* the first byte
+    /// reaches the sink, so a refused segment leaves nothing behind it.
+    ///
+    /// Applies the same predicate as the parser, so the two cannot drift.
+    #[inline]
+    fn write_tag(&mut self, tag: &str) -> Result<(), EdifactError> {
+        if !crate::tokenizer::is_valid_segment_tag(tag) {
+            return Err(EdifactError::InvalidSegmentTag(tag.to_owned()));
+        }
+        self.inner.write_all(tag.as_bytes())?;
+        Ok(())
+    }
+
     /// Create a new writer with default EDIFACT delimiters.
     pub fn new(inner: W) -> Self {
         Self {
@@ -326,7 +357,63 @@ impl<W: Write> Writer<W> {
         self.charset
     }
 
-    /// Create a writer with custom delimiters and write a UNA segment first.
+    /// Create a writer that uses `ssa`'s delimiters **without** emitting a `UNA`.
+    ///
+    /// For replying on an inbound interchange's delimiters, or round-tripping a
+    /// syntax-version-4 interchange that has repeating elements but no `UNA`:
+    /// the writer needs the repetition separator, and
+    /// [`with_una`][Self::with_una] would add a header the original lacked.
+    ///
+    /// # Errors
+    ///
+    /// [`EdifactError::InvalidUna`] when the service characters are not mutually
+    /// distinct printable non-alphanumeric ASCII — see
+    /// [`ServiceStringAdvice::is_valid`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::{ServiceStringAdvice, Writer, from_bytes};
+    ///
+    /// // Version 4: `*` separates RFF's two occurrences, with no UNA to say so.
+    /// let input = b"UNB+UNOC:4+S+R+260101:0900+I'RFF+ON:1*ON:2'UNZ+0+I'";
+    /// let segments: Vec<_> = from_bytes(input).collect::<Result<Vec<_>, _>>()?;
+    ///
+    /// let ssa = ServiceStringAdvice::for_syntax_version(Some(4));
+    /// let mut writer = Writer::with_service_string_advice(Vec::new(), ssa)?;
+    /// for segment in &segments {
+    ///     writer.write_segment(segment)?;
+    /// }
+    /// // Byte-for-byte the input, with no UNA invented.
+    /// assert_eq!(writer.finish()?, input.to_vec());
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    pub fn with_service_string_advice(
+        inner: W,
+        ssa: ServiceStringAdvice,
+    ) -> Result<Self, EdifactError> {
+        if !ssa.is_valid() {
+            return Err(EdifactError::InvalidUna);
+        }
+        Ok(Self {
+            inner,
+            ssa,
+            segment_count: 0,
+            message_start_count: 0,
+            open_segment_is_unh: false,
+            charset: None,
+        })
+    }
+
+    /// Create a writer with custom delimiters and write a `UNA` segment first.
+    ///
+    /// [`with_service_string_advice`][Self::with_service_string_advice] is the
+    /// same thing without the header.
+    ///
+    /// # Errors
+    ///
+    /// As [`with_service_string_advice`][Self::with_service_string_advice], plus
+    /// any write failure.
     pub fn with_una(mut inner: W, ssa: ServiceStringAdvice) -> Result<Self, EdifactError> {
         // All five active service characters must be mutually distinct, non-whitespace,
         // and within the ASCII range so they never bisect multi-byte UTF-8 sequences.
@@ -358,10 +445,9 @@ impl<W: Write> Writer<W> {
 
     /// Record the end of a segment: terminator, count, and `UNH` bookkeeping.
     ///
-    /// Every emit path funnels through here.  Two of them used to forget the
-    /// `UNH` marker, so [`finish_unt`][Self::finish_unt] derived DE 0074 from
-    /// the writer-lifetime total whenever a message header happened to be
-    /// written with [`write_segment`][Self::write_segment].
+    /// Every emit path funnels through here, so
+    /// [`finish_unt`][Self::finish_unt] derives DE 0074 from the current
+    /// message rather than the writer-lifetime total.
     #[inline]
     fn end_segment(&mut self, tag: &str) -> Result<(), EdifactError> {
         self.inner.write_all(&[self.ssa.segment_term])?;
@@ -392,7 +478,7 @@ impl<W: Write> Writer<W> {
             return Err(EdifactError::RepetitionSeparatorNotDeclared);
         }
 
-        self.inner.write_all(seg.tag.as_bytes())?;
+        self.write_tag(seg.tag())?;
 
         for element in &seg.elements {
             self.inner.write_all(&[self.ssa.element_sep])?;
@@ -409,114 +495,96 @@ impl<W: Write> Writer<W> {
             }
         }
 
-        self.end_segment(seg.tag)
+        self.end_segment(seg.tag())
     }
 
-    /// Write a raw segment from tag + element string slices.
+    /// Write a segment whose data elements are all **simple** — one value each.
     ///
-    /// Each element string is split on the **active component-separator byte** from the
-    /// configured [`ServiceStringAdvice`][crate::ServiceStringAdvice] to identify component
-    /// boundaries.  The default component separator is `:` (0x3A), but this can differ when a
-    /// non-default `UNA` string was used to construct the writer.
+    /// The shorthand for the commonest segment shape. Each string is one whole
+    /// data element: a component separator inside a value is escaped as data,
+    /// not promoted to a component boundary, so the output is correct whatever
+    /// delimiters the writer uses.
     ///
-    /// # Delimiter dependency
-    ///
-    /// Callers that embed the literal `:` character in element strings rely on `:` being
-    /// the component separator.  When the writer uses a non-default delimiter set, `:` will
-    /// **not** be treated as a component boundary and the segment will be written incorrectly.
-    ///
-    /// **UTF-8 safety**: EDIFACT syntax requires all delimiter bytes to be single-byte ASCII
-    /// characters (values 0x00–0x7F).  Non-ASCII delimiter bytes would bisect multi-byte UTF-8
-    /// sequences in data values and produce malformed output.  All fields of
-    /// [`ServiceStringAdvice`][crate::ServiceStringAdvice] must therefore hold ASCII byte values.
-    ///
-    /// To produce correct output regardless of the active delimiter, prefer
-    /// [`Self::write_elements`] — it takes component boundaries explicitly and
-    /// handles the mixed simple/composite shape that most real segments have.
-    /// [`Self::write_segment_parts`] is the equivalent for owned data.
-    pub fn write_raw(&mut self, tag: &str, elements: &[&str]) -> Result<(), EdifactError> {
-        self.inner.write_all(tag.as_bytes())?;
-        let comp_sep = self.ssa.component_sep;
-        for el in elements {
-            self.inner.write_all(&[self.ssa.element_sep])?;
-            // Byte-level split: EDIFACT delimiters are always single bytes.
-            let mut parts = el.as_bytes().split(|&b| b == comp_sep);
-            if let Some(first) = parts.next() {
-                // INVARIANT: input is valid UTF-8 and we split on a single-byte ASCII
-                // delimiter, so each part remains a valid UTF-8 slice.
-                self.write_escaped(
-                    std::str::from_utf8(first).map_err(|_| EdifactError::InvalidUtf8)?,
-                )?;
-            }
-            for part in parts {
-                self.inner.write_all(&[comp_sep])?;
-                self.write_escaped(
-                    std::str::from_utf8(part).map_err(|_| EdifactError::InvalidUtf8)?,
-                )?;
-            }
-        }
-        self.end_segment(tag)
-    }
-
-    /// Write a segment from a tag and pre-split element/component data.
-    ///
-    /// `elements` is a slice of elements; each element is a sequence of component strings.
-    /// This avoids the lifetime constraints of [`Self::write_segment`] when building
-    /// segments from runtime-owned data (e.g. inside [`crate::WriterEmitter`]).
-    pub fn write_segment_parts<E>(&mut self, tag: &str, elements: &[E]) -> Result<(), EdifactError>
-    where
-        E: AsRef<[String]>,
-    {
-        self.inner.write_all(tag.as_bytes())?;
-        for element in elements {
-            self.inner.write_all(&[self.ssa.element_sep])?;
-            let mut first = true;
-            for comp in element.as_ref() {
-                if !first {
-                    self.inner.write_all(&[self.ssa.component_sep])?;
-                }
-                first = false;
-                self.write_escaped(comp.as_str())?;
-            }
-        }
-        self.end_segment(tag)
-    }
-
-    /// Write a segment from a tag and borrowed element/component slices.
-    ///
-    /// Unlike [`Self::write_raw`], component boundaries are given explicitly
-    /// rather than inferred by splitting on the active component separator, so
-    /// values containing a literal separator byte are escaped instead of being
-    /// silently reinterpreted as a composite boundary.  Unlike
-    /// [`Self::write_segment_parts`], no `String` allocation is required.
+    /// Reach for [`write_composites`][Self::write_composites] when the elements
+    /// have components, or [`write_elements`][Self::write_elements] when the
+    /// segment mixes the two shapes.
     ///
     /// # Example
     ///
     /// ```
     /// use edifact_rs::Writer;
+    ///
     /// let mut w = Writer::new(Vec::new());
-    /// // The `:` inside the sender id stays part of the value.
-    /// w.write_composites("NAD", &[&["MS"][..], &["ACME:INC"][..]])?;
-    /// assert_eq!(w.finish()?, b"NAD+MS+ACME?:INC'".to_vec());
+    /// w.write_simple("BGM", &["220", "PO-4711", "9"])?;
+    /// // A literal `:` stays inside the value it belongs to.
+    /// w.write_simple("FTX", &["AAA", "ACME:INC"])?;
+    /// assert_eq!(w.finish()?, b"BGM+220+PO-4711+9'FTX+AAA+ACME?:INC'".to_vec());
     /// # Ok::<(), edifact_rs::EdifactError>(())
     /// ```
     ///
     /// # Errors
     ///
-    /// Returns [`EdifactError`] if the underlying writer fails.
-    pub fn write_composites(
+    /// Returns [`EdifactError`] if the underlying writer fails, or if a value
+    /// cannot be encoded in this writer's [`Charset`].
+    pub fn write_simple<S: AsRef<str>>(
         &mut self,
         tag: &str,
-        elements: &[&[&str]],
+        elements: &[S],
     ) -> Result<(), EdifactError> {
-        self.inner.write_all(tag.as_bytes())?;
+        self.write_tag(tag)?;
         for element in elements {
             self.inner.write_all(&[self.ssa.element_sep])?;
-            for (i, comp) in element.iter().enumerate() {
+            self.write_escaped(element.as_ref())?;
+        }
+        self.end_segment(tag)
+    }
+
+    /// Write a segment whose data elements are all **composite** — a list of
+    /// components each.
+    ///
+    /// Component boundaries are given explicitly rather than inferred by
+    /// splitting, so a value containing the active component separator is
+    /// escaped instead of being silently reinterpreted as a boundary.
+    ///
+    /// The bounds accept borrowed and owned data alike — `&[&[&str]]`,
+    /// `&[Vec<String>]`, `&[[String; 3]]` — so runtime-built segments need no
+    /// conversion. A one-component element is a simple data element, which is
+    /// what makes this the general all-elements form;
+    /// [`write_elements`][Self::write_elements] is the shorthand for the mixed
+    /// shape and [`write_simple`][Self::write_simple] for the all-simple one.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::Writer;
+    ///
+    /// let mut w = Writer::new(Vec::new());
+    /// // Borrowed literals …
+    /// w.write_composites("NAD", &[&["MS"][..], &["ACME:INC"][..]])?;
+    /// // … and owned, runtime-built data, through the same call.
+    /// let dtm = vec![vec!["137".to_string(), "20260101".to_string()]];
+    /// w.write_composites("DTM", &dtm)?;
+    /// assert_eq!(w.finish()?, b"NAD+MS+ACME?:INC'DTM+137:20260101'".to_vec());
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError`] if the underlying writer fails, or if a value
+    /// cannot be encoded in this writer's [`Charset`].
+    pub fn write_composites<E, S>(&mut self, tag: &str, elements: &[E]) -> Result<(), EdifactError>
+    where
+        E: AsRef<[S]>,
+        S: AsRef<str>,
+    {
+        self.write_tag(tag)?;
+        for element in elements {
+            self.inner.write_all(&[self.ssa.element_sep])?;
+            for (i, comp) in element.as_ref().iter().enumerate() {
                 if i > 0 {
                     self.inner.write_all(&[self.ssa.component_sep])?;
                 }
-                self.write_escaped(comp)?;
+                self.write_escaped(comp.as_ref())?;
             }
         }
         self.end_segment(tag)
@@ -527,10 +595,9 @@ impl<W: Write> Writer<W> {
     /// This is the general form of segment emission and the one that matches
     /// how EDIFACT segments are actually specified: `NAD` takes a simple
     /// qualifier followed by a composite party identification, `DTM` takes a
-    /// single composite.  [`write_raw`][Self::write_raw] (all-simple, with
-    /// separators inferred by splitting) and
-    /// [`write_composites`][Self::write_composites] (all-composite) are the two
-    /// special cases.
+    /// single composite.  [`write_simple`][Self::write_simple] and
+    /// [`write_composites`][Self::write_composites] are the uniform special
+    /// cases.
     ///
     /// Component boundaries are explicit, so a value containing the active
     /// component separator is escaped rather than silently promoted to a
@@ -564,7 +631,7 @@ impl<W: Write> Writer<W> {
         tag: &str,
         elements: &[DataElement<'_>],
     ) -> Result<(), EdifactError> {
-        self.inner.write_all(tag.as_bytes())?;
+        self.write_tag(tag)?;
         for element in elements {
             self.inner.write_all(&[self.ssa.element_sep])?;
             for (i, comp) in element.components().iter().enumerate() {
@@ -595,7 +662,7 @@ impl<W: Write> Writer<W> {
     ///
     /// # Errors
     ///
-    /// Returns an error if writing fails.  Do **not** call [`write_raw`][Self::write_raw] or
+    /// Returns an error if writing fails.  Do **not** call [`write_simple`][Self::write_simple] or
     /// [`write_segment`][Self::write_segment] after `finish_unt` — the writer is consumed.
     pub fn finish_unt(mut self, message_ref: &str) -> Result<W, EdifactError> {
         // DE 0074 counts UNH + content + UNT.  `message_start_count` is the
@@ -662,7 +729,7 @@ impl<W: Write> Writer<W> {
     /// Used by [`crate::WriterEmitter`] for eager, zero-allocation event writing.
     #[inline]
     pub(crate) fn write_tag_only(&mut self, tag: &str) -> Result<(), EdifactError> {
-        self.inner.write_all(tag.as_bytes())?;
+        self.write_tag(tag)?;
         self.open_segment_is_unh = tag == "UNH";
         Ok(())
     }
@@ -799,11 +866,11 @@ impl<W: Write> Writer<W> {
         self.write_composites(
             "UNB",
             &[
-                &[syntax_id, syntax_version],
-                &[sender],
-                &[recipient],
-                &[date, time],
-                &[control_ref],
+                &[syntax_id, syntax_version][..],
+                &[sender][..],
+                &[recipient][..],
+                &[date, time][..],
+                &[control_ref][..],
             ],
         )
     }
@@ -833,13 +900,13 @@ impl<W: Write> Writer<W> {
         controlling_agency: &str,
     ) -> Result<MessageWriter<'w, W>, EdifactError> {
         // Build S009 as an explicit composite.  Formatting it with a literal `:`
-        // and handing it to `write_raw` produced a single collapsed component
+        // and handing it to `write_simple` produced a single collapsed component
         // whenever the writer used a non-default component separator.
         self.write_composites(
             "UNH",
             &[
-                &[message_ref],
-                &[message_type, version, release, controlling_agency],
+                &[message_ref][..],
+                &[message_type, version, release, controlling_agency][..],
             ],
         )?;
         // Capture `segment_count` after writing UNH so `MessageWriter` knows
@@ -895,7 +962,7 @@ impl<W: Write> Writer<W> {
 /// writer.begin_interchange("UNOA", "1", "SENDER", "RECEIVER", "200101", "0900", "1")?;
 /// {
 ///     let mut msg = writer.begin_message("1", "ORDERS", "D", "96A", "UN")?;
-///     msg.write_raw("BGM", &["220", "PO001", "9"])?;
+///     msg.write_simple("BGM", &["220", "PO001", "9"])?;
 ///     msg.finish()?;
 /// }
 /// writer.end_interchange(1, "1")?;
@@ -913,18 +980,39 @@ pub struct MessageWriter<'w, W: Write> {
 }
 
 impl<W: Write> MessageWriter<'_, W> {
-    /// Write a segment within this message.
+    /// Write an all-simple segment within this message.
     ///
-    /// Delegates to [`Writer::write_raw`].
-    pub fn write_raw(&mut self, tag: &str, elements: &[&str]) -> Result<(), EdifactError> {
-        self.writer.write_raw(tag, elements)
+    /// Delegates to [`Writer::write_simple`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError`] if the underlying writer fails.
+    pub fn write_simple<S: AsRef<str>>(
+        &mut self,
+        tag: &str,
+        elements: &[S],
+    ) -> Result<(), EdifactError> {
+        self.writer.write_simple(tag, elements)
+    }
+
+    /// Write an all-composite segment within this message.
+    ///
+    /// Delegates to [`Writer::write_composites`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EdifactError`] if the underlying writer fails.
+    pub fn write_composites<E, S>(&mut self, tag: &str, elements: &[E]) -> Result<(), EdifactError>
+    where
+        E: AsRef<[S]>,
+        S: AsRef<str>,
+    {
+        self.writer.write_composites(tag, elements)
     }
 
     /// Write a segment mixing simple and composite data elements within this message.
     ///
-    /// Delegates to [`Writer::write_elements`] — the general form, and the one
-    /// to reach for when a segment is not uniformly simple or uniformly
-    /// composite.
+    /// Delegates to [`Writer::write_elements`].
     ///
     /// # Errors
     ///
@@ -935,35 +1023,6 @@ impl<W: Write> MessageWriter<'_, W> {
         elements: &[DataElement<'_>],
     ) -> Result<(), EdifactError> {
         self.writer.write_elements(tag, elements)
-    }
-
-    /// Write a segment from borrowed element/component slices within this message.
-    ///
-    /// Delegates to [`Writer::write_composites`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EdifactError`] if the underlying writer fails.
-    pub fn write_composites(
-        &mut self,
-        tag: &str,
-        elements: &[&[&str]],
-    ) -> Result<(), EdifactError> {
-        self.writer.write_composites(tag, elements)
-    }
-
-    /// Write a segment from pre-split, owned element/component data within this message.
-    ///
-    /// Delegates to [`Writer::write_segment_parts`].
-    ///
-    /// # Errors
-    ///
-    /// Returns [`EdifactError`] if the underlying writer fails.
-    pub fn write_segment_parts<E>(&mut self, tag: &str, elements: &[E]) -> Result<(), EdifactError>
-    where
-        E: AsRef<[String]>,
-    {
-        self.writer.write_segment_parts(tag, elements)
     }
 
     /// Write a fully-typed segment within this message.
@@ -1027,8 +1086,8 @@ mod tests {
 
     #[test]
     fn unh_composite_uses_the_active_component_separator() {
-        // `begin_message` used to `format!` the S009 composite with a literal
-        // `:`, collapsing it into one component under a custom UNA.
+        // S009 must be built as a real composite: a literal `:` in a
+        // `format!` collapses into one component under a custom UNA.
         let mut buf = Vec::new();
         {
             let mut w = Writer::with_una(&mut buf, exotic_ssa()).unwrap();
@@ -1053,7 +1112,7 @@ mod tests {
             w.begin_interchange("UNOA", "1", "SENDER", "RECEIVER", "200101", "0900", "IC1")
                 .unwrap();
             let mut msg = w.begin_message("1", "ORDERS", "D", "96A", "UN").unwrap();
-            msg.write_raw("BGM", &["220"]).unwrap();
+            msg.write_simple("BGM", &["220"]).unwrap();
             msg.finish().unwrap();
             w.end_interchange(1, "IC1").unwrap();
         }
@@ -1075,9 +1134,9 @@ mod tests {
             let mut w = Writer::new(&mut buf);
             w.begin_interchange("UNOA", "1", "S", "R", "200101", "0900", "IC1")
                 .unwrap();
-            w.write_composites("UNH", &[&["1"], &["ORDERS", "D", "96A", "UN"]])
+            w.write_composites("UNH", &[&["1"][..], &["ORDERS", "D", "96A", "UN"][..]])
                 .unwrap();
-            w.write_raw("BGM", &["220"]).unwrap();
+            w.write_simple("BGM", &["220"]).unwrap();
             w.finish_unt("1").unwrap();
         }
         let out = String::from_utf8(buf).unwrap();
@@ -1258,7 +1317,7 @@ mod tests {
 
     #[test]
     fn write_segment_records_unh_for_the_unt_count() {
-        // `write_segment` and `write_segment_parts` did not record the UNH
+        // `write_segment` and `write_composites` did not record the UNH
         // marker, so `finish_unt` fell back to the writer-lifetime total and
         // DE 0074 came out inflated by every preceding interchange segment.
         let mut buf = Vec::new();
@@ -1284,13 +1343,13 @@ mod tests {
     }
 
     #[test]
-    fn write_segment_parts_records_unh_for_the_unt_count() {
+    fn write_composites_records_unh_for_the_unt_count() {
         let mut buf = Vec::new();
         {
             let mut w = Writer::new(&mut buf);
             w.begin_interchange("UNOA", "1", "S", "R", "200101", "0900", "IC1")
                 .unwrap();
-            w.write_segment_parts(
+            w.write_composites(
                 "UNH",
                 &[
                     vec!["1".to_owned()],
@@ -1303,7 +1362,7 @@ mod tests {
                 ],
             )
             .unwrap();
-            w.write_raw("BGM", &["220"]).unwrap();
+            w.write_simple("BGM", &["220"]).unwrap();
             w.finish_unt("1").unwrap();
         }
         let out = String::from_utf8(buf).unwrap();
@@ -1333,6 +1392,74 @@ mod tests {
     }
 
     #[test]
+    fn a_tag_the_parser_would_reject_is_never_written() {
+        // A tag is emitted verbatim — EDIFACT cannot escape one — so writing an
+        // invalid tag produces bytes that do not reparse as the segment they
+        // came from.  Every write path must refuse before the first byte.
+        for tag in ["bgm", "BGMX", "BG", "", "B+M", "B'M", "BG1", "BGÜ"] {
+            let mut writer = Writer::new(Vec::new());
+            let err = writer
+                .write_simple(tag, &["220"])
+                .expect_err("an invalid tag must be refused");
+            assert!(
+                matches!(err, EdifactError::InvalidSegmentTag(ref t) if t == tag),
+                "expected InvalidSegmentTag({tag:?}), got {err:?}",
+            );
+            // Nothing reached the sink.
+            assert!(
+                writer.finish().expect("finish").is_empty(),
+                "a refused segment must leave the sink untouched",
+            );
+        }
+    }
+
+    #[test]
+    fn every_write_path_validates_the_tag() {
+        let bad = "bgm";
+        macro_rules! refused {
+            ($call:expr) => {
+                assert!(
+                    matches!($call, Err(EdifactError::InvalidSegmentTag(_))),
+                    "a write path accepted an invalid tag",
+                );
+            };
+        }
+
+        let mut w = Writer::new(Vec::new());
+        refused!(w.write_simple(bad, &["1"]));
+        refused!(w.write_composites(bad, &[&["1"][..]]));
+        refused!(w.write_elements(bad, elements!["1"]));
+        refused!(w.write_segment(&Segment::new(bad, vec![Element::of(&["1"])])));
+    }
+
+    #[test]
+    fn whatever_the_writer_emits_the_parser_reads_back() {
+        // The round-trip property the tag check exists to preserve.
+        let segments = vec![
+            Segment::new(
+                "UNB",
+                vec![Element::of(&["UNOA", "1"]), Element::of(&["S"])],
+            ),
+            Segment::new(
+                "BGM",
+                vec![Element::of(&["220"]), Element::of(&["PO?+1'X"])],
+            ),
+            Segment::new("UNZ", vec![Element::of(&["0"]), Element::of(&["1"])]),
+        ];
+        let bytes = crate::segments_to_bytes(&segments).expect("write");
+        let reparsed: Vec<_> = crate::from_bytes(&bytes)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("everything the writer emits must reparse");
+
+        assert_eq!(
+            reparsed.iter().map(Segment::tag).collect::<Vec<_>>(),
+            ["UNB", "BGM", "UNZ"],
+        );
+        // Delimiters inside a *value* survive, because a value can be escaped.
+        assert_eq!(reparsed[1].element_str(1), Some("PO?+1'X"));
+    }
+
+    #[test]
     fn release_char_escaped() {
         let segs: Vec<Segment<'static>> = vec![Segment::new(
             "FTX",
@@ -1358,15 +1485,16 @@ mod tests {
             Segment::new("UNZ", vec![Element::of(&["0"]), Element::of(&["1"])]),
         ];
         let bytes = crate::segments_to_bytes(&segs).unwrap();
-        let rt: Vec<crate::OwnedSegment> = crate::parser::from_reader(std::io::Cursor::new(&bytes))
+        let rt: Vec<crate::OwnedSegment> = crate::from_reader(std::io::Cursor::new(&bytes))
+            .collect::<Result<Vec<_>, _>>()
             .expect("round-trip parse failed");
         assert_eq!(rt[0].tag, "UNB");
-        assert_eq!(rt[0].as_borrowed().element_str(0), Some("UNOA"));
+        assert_eq!(rt[0].element_str(0), Some("UNOA"));
         assert_eq!(rt[1].tag, "UNZ");
     }
 
     /// Verify that `Writer::with_una` uses the configured delimiters throughout,
-    /// and that `write_segment_parts` (the delimiter-agnostic API) produces correct
+    /// and that `write_composites` (the delimiter-agnostic API) produces correct
     /// component separators even with a non-default UNA.
     #[test]
     fn with_una_non_default_delimiters() {
@@ -1385,9 +1513,9 @@ mod tests {
         let buf = Vec::new();
         let mut writer = Writer::with_una(buf, ssa).expect("writer creation failed");
 
-        // write_segment_parts: pre-split; no hard-coded `:` in element strings
+        // write_composites: pre-split; no hard-coded `:` in element strings
         writer
-            .write_segment_parts(
+            .write_composites(
                 "BGM",
                 &[
                     vec!["220".to_owned(), "SUB1".to_owned()],

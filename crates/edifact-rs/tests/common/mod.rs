@@ -8,7 +8,7 @@ pub fn demo_orders_profile_pack() -> edifact_rs::ProfileRulePack {
 
     ProfileRulePack::new("ORDERS-DEMO")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments, issues| {
+        .with_rule_fn(|segments, issues| {
             issues.extend((|| -> Option<ValidationIssue> {
                 let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
                 let document_code = bgm.get_element(0)?.get_component(0)?;
@@ -24,7 +24,7 @@ pub fn demo_orders_profile_pack() -> edifact_rs::ProfileRulePack {
                 })
             })());
         })
-        .with_stateless_rule_fn(|segments, issues| {
+        .with_rule_fn(|segments, issues| {
             issues.extend((|| -> Option<ValidationIssue> {
                 let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
                 let reference = bgm.get_element(1)?.get_component(0)?;

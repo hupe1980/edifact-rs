@@ -25,7 +25,7 @@ use std::any::Any;
 ///
 /// ```rust,ignore
 /// let pack = ProfileRulePack::new("PROFILE-4711")
-///     .with_rule_fn(|segs, ctx, issues| {
+///     .with_contextual_rule_fn(|segs, ctx, issues| {
 ///         let Some(process_id) = ctx.metadata::<ProcessId>() else { return };
 ///         let msg_ref = ctx.message_ref.unwrap_or("<unknown>");
 ///     });
@@ -126,7 +126,7 @@ pub trait Validator: Send + Sync {
 
     /// Validate a segment-group tree and append issues to `report`.
     ///
-    /// Called by [`ValidationContext::validate_lenient_grouped`] in addition to
+    /// Called by [`ValidationContext::validate_grouped`] in addition to
     /// [`validate_batch`](Validator::validate_batch).  Validators that only perform
     /// flat segment checks (e.g. [`EnvelopeValidator`]) can leave this as the
     /// default no-op; only validators with group-scoped rules (typically
@@ -165,7 +165,7 @@ pub trait Validator: Send + Sync {
     /// Return `None` for validators that cannot be forked (e.g. stateful validators
     /// without `Clone`).  Returning `None` causes the validator to be silently
     /// **excluded** from forked contexts — forking is used by
-    /// [`crate::ValidationContext::validate_lenient_grouped`] to validate
+    /// [`crate::ValidationContext::validate_grouped`] to validate
     /// each group in isolation, so omitting a non-forkable validator from the
     /// forked context is safer than panicking.
     fn fork(&self) -> Option<Box<dyn Validator + Send + Sync>> {
@@ -217,7 +217,7 @@ impl Validator for EnvelopeValidator {
     ) {
         // Use the lenient path so a single report surfaces every envelope
         // violation.  The strict path stops at the first, which made
-        // `ValidationContext::validate_lenient` — whose whole purpose is
+        // `ValidationContext::validate` — whose whole purpose is
         // exhaustive reporting — yield at most one envelope issue per batch.
         for e in crate::envelope::validate_envelope_lenient(segments).errors {
             report_error(report, e);
@@ -262,7 +262,7 @@ impl Validator for EnvelopeValidator {
 /// let report = ValidationContext::builder()
 ///     .with_syntax_validation()
 ///     .build()
-///     .validate_lenient(&segments);
+///     .validate(&segments);
 ///
 /// assert_eq!(report.errors()[0].error_code(), Some("E046")); // DTM has no data element
 /// assert_eq!(report.warnings()[0].error_code(), Some("E045")); // FTX value is only spaces
@@ -287,7 +287,7 @@ impl Validator for SyntaxValidator {
                 report_error(
                     report,
                     EdifactError::SegmentWithoutDataElements {
-                        tag: segment.tag.to_owned(),
+                        tag: segment.tag().to_owned(),
                         span: segment.span,
                     },
                 );
@@ -305,7 +305,7 @@ impl Validator for SyntaxValidator {
                 report_error(
                     report,
                     EdifactError::TrailingSeparator {
-                        tag: segment.tag.to_owned(),
+                        tag: segment.tag().to_owned(),
                         element_index: None,
                         span: segment.span,
                     },
@@ -322,7 +322,7 @@ impl Validator for SyntaxValidator {
                     report_error(
                         report,
                         EdifactError::TrailingSeparator {
-                            tag: segment.tag.to_owned(),
+                            tag: segment.tag().to_owned(),
                             element_index: Some(element_index),
                             span: element.span,
                         },
@@ -338,7 +338,7 @@ impl Validator for SyntaxValidator {
                             report_error(
                                 report,
                                 EdifactError::BlankDataElementValue {
-                                    tag: segment.tag.to_owned(),
+                                    tag: segment.tag().to_owned(),
                                     element_index,
                                     component_index,
                                     span: *span,
@@ -387,7 +387,7 @@ impl Validator for SyntaxValidator {
 /// let report = ValidationContext::builder()
 ///     .with_charset_validation()
 ///     .build()
-///     .validate_lenient(&segments);
+///     .validate(&segments);
 ///
 /// let issue = report.errors().iter().find(|i| i.error_code() == Some("E038")).unwrap();
 /// assert_eq!(issue.segment_tag.as_deref(), Some("NAD"));
@@ -470,7 +470,7 @@ impl Validator for CharsetValidator {
                             }
                             .stable_code(),
                         )
-                        .with_segment(segment.tag)
+                        .with_segment(segment.tag())
                         .with_span(*span)
                         .with_suggestion(
                             "Transliterate the value, or declare a wider repertoire in UNB S001 \
@@ -688,7 +688,7 @@ mod tests {
     fn demo_orders_profile_pack() -> ProfileRulePack {
         ProfileRulePack::new("ORDERS-DEMO")
             .for_message_type("ORDERS")
-            .with_stateless_rule_fn(|segments, issues| {
+            .with_rule_fn(|segments, issues| {
                 issues.extend((|| -> Option<ValidationIssue> {
                     let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
                     let document_code = bgm.get_element(0)?.get_component(0)?;
@@ -704,7 +704,7 @@ mod tests {
                     })
                 })());
             })
-            .with_stateless_rule_fn(|segments, issues| {
+            .with_rule_fn(|segments, issues| {
                 issues.extend((|| -> Option<ValidationIssue> {
                     let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
                     let reference = bgm.get_element(1)?.get_component(0)?;
@@ -770,12 +770,7 @@ mod tests {
     }
 
     fn test_segment(tag: &'static str) -> Segment<'static> {
-        Segment {
-            tag,
-            span: crate::Span::new(0, 0),
-            tag_span: crate::Span::new(0, 0),
-            elements: vec![Element::of(&["x"])],
-        }
+        Segment::new(tag, vec![Element::of(&["x"])])
     }
 
     #[test]
@@ -805,7 +800,7 @@ mod tests {
             .with_validator(ValidationLayer::CodeList, WarnBgm)
             .build();
 
-        let report = ctx.validate_lenient(&segments);
+        let report = ctx.validate(&segments);
         assert!(!report.has_errors());
         assert_eq!(report.warnings().len(), 1);
     }
@@ -819,7 +814,7 @@ mod tests {
             .build();
 
         assert_eq!(ctx.message_type(), Some("ORDERS"));
-        let result = ctx.validate_strict(&segments);
+        let result = ctx.validate(&segments).result();
         assert!(result.is_err());
         assert!(result.unwrap_err().has_errors());
     }
@@ -874,7 +869,7 @@ mod tests {
             .with_profile_pack(demo_orders_profile_pack())
             .build();
 
-        let report = ctx.validate_lenient(&segments);
+        let report = ctx.validate(&segments);
         assert!(report.has_errors());
         assert!(
             report
@@ -900,7 +895,7 @@ mod tests {
         let ctx = ValidationContext::builder()
             .with_profile_pack(demo_orders_profile_pack())
             .build();
-        let result = ctx.validate_strict(&segments);
+        let result = ctx.validate(&segments).result();
         assert!(result.is_err());
         assert!(result.unwrap_err().has_errors());
     }
@@ -910,7 +905,7 @@ mod tests {
     /// A rule that emits two error-severity issues (one per DTM segment).
     fn two_dtm_errors_rule() -> ProfileRulePack {
         ProfileRulePack::new("TEST-BAIL")
-            .with_stateless_rule_fn(|segments, issues| {
+            .with_rule_fn(|segments, issues| {
                 // Rule A: emits one error per DTM segment.
                 for seg in segments.iter().filter(|s| s.tag == "DTM") {
                     issues.push(
@@ -923,13 +918,13 @@ mod tests {
                     );
                 }
             })
-            .with_stateless_rule_fn(|segments, issues| {
+            .with_rule_fn(|segments, issues| {
                 // Rule B: never fires; used to verify bail skips this rule.
                 for seg in segments.iter().filter(|s| s.tag == "BGM") {
                     issues.push(
                         ValidationIssue::new(ValidationSeverity::Error, "BGM error")
                             .with_rule_id("BAIL-R2")
-                            .with_segment(seg.tag),
+                            .with_segment(seg.tag()),
                     );
                 }
             })
@@ -949,7 +944,7 @@ mod tests {
         let ctx = ValidationContext::builder()
             .with_profile_pack(pack_with_bail)
             .build();
-        let report = ctx.validate_lenient(&segments);
+        let report = ctx.validate(&segments);
 
         // Rule A fires: both DTM errors are in the report (the whole rule invocation
         // runs to completion before bail is checked).
@@ -985,7 +980,7 @@ mod tests {
         let ctx = ValidationContext::builder()
             .with_profile_pack(pack_no_bail)
             .build();
-        let report = ctx.validate_lenient(&segments);
+        let report = ctx.validate(&segments);
 
         // Both rules run: one DTM error from Rule A, one BGM error from Rule B.
         assert_eq!(
@@ -1015,24 +1010,25 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()
             .expect("parse failed");
 
-        let pack = ProfileRulePack::new("MSG-REF-TEST").with_rule_fn(|_segs, ctx, issues| {
-            if let Some(mref) = ctx.message_ref {
-                issues.push(
-                    ValidationIssue::new(
-                        ValidationSeverity::Info,
-                        format!("validating message {mref}"),
-                    )
-                    .with_rule_id("CTX-REF"),
-                );
-            }
-        });
+        let pack =
+            ProfileRulePack::new("MSG-REF-TEST").with_contextual_rule_fn(|_segs, ctx, issues| {
+                if let Some(mref) = ctx.message_ref {
+                    issues.push(
+                        ValidationIssue::new(
+                            ValidationSeverity::Info,
+                            format!("validating message {mref}"),
+                        )
+                        .with_rule_id("CTX-REF"),
+                    );
+                }
+            });
 
         let ctx = ValidationContext::builder()
             .with_profile_pack(pack)
             .with_message_ref("MSG001")
             .build();
 
-        let report = ctx.validate_lenient(&segments);
+        let report = ctx.validate(&segments);
         let info = report
             .infos()
             .iter()

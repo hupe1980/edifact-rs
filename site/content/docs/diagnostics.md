@@ -71,7 +71,7 @@ fn validate(input: &[u8]) {
     match from_bytes(input).collect::<Result<Vec<_>, _>>() {
         Ok(segs) => {
             let ctx = ValidationContext::builder().build();
-            let report = ctx.validate_lenient(&segs);
+            let report = ctx.validate(&segs);
             println!("{}", report.render_deterministic());
         }
         Err(err) => {
@@ -115,7 +115,7 @@ let ctx = ValidationContext::builder()
     .with_validator(ValidationLayer::Structure, DemoValidator)
     .build();
 
-let report = ctx.validate_lenient(&segs);
+let report = ctx.validate(&segs);
 let rendered = report.render_deterministic();
 
 // Use in snapshot tests (insta, expect-test, etc.)

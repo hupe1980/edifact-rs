@@ -1,13 +1,14 @@
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use edifact_rs::{
     ProfileRulePack, ServiceStringAdvice, Tokenizer, ValidationContext, ValidationIssue,
     ValidationLayer, ValidationReport, ValidationRuleContext, ValidationSeverity, Validator,
-    from_bytes, from_reader_collect, segments_to_bytes,
+    from_bytes, segments_to_bytes,
 };
+use std::hint::black_box;
 use std::io::{Cursor, Read};
 
 mod bench_data;
-use bench_data::{one_mb, sample_msg, sample_segments};
+use bench_data::{one_mb, one_mb_interchange, sample_msg, sample_segments};
 
 fn bench_tokenizer(c: &mut Criterion) {
     let mut group = c.benchmark_group("tokenizer");
@@ -71,8 +72,9 @@ fn bench_reader(c: &mut Criterion) {
     group.bench_function("1mb", |b| {
         b.iter(|| {
             let cursor = std::io::Cursor::new(data);
-            let segments =
-                from_reader_collect(cursor).expect("bench fixture must be valid EDIFACT");
+            let segments = edifact_rs::from_reader(cursor)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("bench fixture must be valid EDIFACT");
             black_box(segments);
         });
     });
@@ -80,8 +82,9 @@ fn bench_reader(c: &mut Criterion) {
     group.bench_function("parse_reader_chunked", |b| {
         b.iter(|| {
             let reader = ChunkedReader::new(data, 4 * 1024);
-            let segments =
-                from_reader_collect(reader).expect("bench fixture must be valid EDIFACT");
+            let segments = edifact_rs::from_reader(reader)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("bench fixture must be valid EDIFACT");
             black_box(segments);
         });
     });
@@ -131,7 +134,7 @@ fn bench_validation(c: &mut Criterion) {
         .build();
     let custom_pack = ProfileRulePack::new("bench-custom-pack")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments, issues| {
+        .with_rule_fn(|segments, issues| {
             if !segments.iter().any(|seg| seg.tag == "BGM") {
                 issues.push(
                     ValidationIssue::new(
@@ -150,7 +153,7 @@ fn bench_validation(c: &mut Criterion) {
 
     let pack_a = ProfileRulePack::new("bench-pack-a")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments, issues| {
+        .with_rule_fn(|segments, issues| {
             if !segments.iter().any(|seg| seg.tag == "DTM") {
                 issues.push(
                     ValidationIssue::new(
@@ -163,7 +166,7 @@ fn bench_validation(c: &mut Criterion) {
         });
     let pack_b = ProfileRulePack::new("bench-pack-b")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments, issues| {
+        .with_rule_fn(|segments, issues| {
             if !segments.iter().any(|seg| seg.tag == "NAD") {
                 issues.push(
                     ValidationIssue::new(
@@ -184,34 +187,56 @@ fn bench_validation(c: &mut Criterion) {
         )
         .build();
 
-    group.bench_function("validate_structure_orders", |b| {
+    // Deliberately a `NoopValidator`: the *floor* — what a `ValidationContext`
+    // costs before any rule runs — so a regression in dispatch, message-type
+    // extraction, or report allocation shows up here rather than hiding inside
+    // a rule's own cost.
+    group.bench_function("context_dispatch_floor", |b| {
         b.iter(|| {
-            let report = structure_context.validate_lenient(black_box(&segments));
+            let report = structure_context.validate(black_box(&segments));
             black_box(report);
         });
     });
 
     group.bench_function("validate_profile_custom_pack", |b| {
         b.iter(|| {
-            let report = profile_context.validate_lenient(black_box(&segments));
+            let report = profile_context.validate(black_box(&segments));
             black_box(report);
         });
     });
 
     group.bench_function("validate_profile_composed_packs", |b| {
         b.iter(|| {
-            let report = composed_profile_context.validate_lenient(black_box(&segments));
+            let report = composed_profile_context.validate(black_box(&segments));
             black_box(report);
         });
     });
 
-    let large_data = one_mb();
+    let large_data = one_mb_interchange();
     let large_segments = from_bytes(large_data)
         .collect::<Result<Vec<_>, _>>()
         .expect("bench fixture must be valid EDIFACT");
+    // The large-input context must run work that scales with the input —
+    // envelope checks plus a pack rule that scans every segment — or the
+    // throughput figure below describes an empty function call.
+    let large_pack = ProfileRulePack::new("bench-large-pack")
+        .for_message_type("ORDERS")
+        .with_rule_fn(|segments, issues| {
+            let lines = segments.iter().filter(|seg| seg.tag == "NAD").count();
+            if lines == 0 {
+                issues.push(
+                    ValidationIssue::new(
+                        ValidationSeverity::Error,
+                        "NAD segment missing in ORDERS message",
+                    )
+                    .with_rule_id("bench.large.nad_required"),
+                );
+            }
+        });
     let large_context = ValidationContext::builder()
         .with_message_type("ORDERS")
-        .with_validator(ValidationLayer::Structure, NoopValidator)
+        .with_envelope_validation()
+        .with_profile_pack(large_pack)
         .build();
     group.throughput(Throughput::Bytes(large_data.len() as u64));
     group.bench_function("parse_large_message", |b| {
@@ -219,14 +244,14 @@ fn bench_validation(c: &mut Criterion) {
             let parsed = from_bytes(black_box(large_data))
                 .collect::<Result<Vec<_>, _>>()
                 .expect("bench fixture must be valid EDIFACT");
-            let report = large_context.validate_lenient(black_box(&parsed));
+            let report = large_context.validate(black_box(&parsed));
             black_box(report);
         });
     });
 
     group.bench_function("validate_large_message", |b| {
         b.iter(|| {
-            let report = large_context.validate_lenient(black_box(&large_segments));
+            let report = large_context.validate(black_box(&large_segments));
             black_box(report);
         });
     });

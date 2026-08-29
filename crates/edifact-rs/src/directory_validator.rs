@@ -740,8 +740,7 @@ const fn const_str_eq(a: &str, b: &str) -> bool {
 /// The resolved position of a UN/EDIFACT data element within a segment.
 ///
 /// Produced by [`SegmentLayout::resolve_code`] and consumed by the `*_at`
-/// accessors on [`crate::Segment`], [`crate::BorrowedSegment`] and
-/// [`crate::OwnedSegment`].
+/// accessors on [`Segment`] — and therefore on `OwnedSegment` too.
 ///
 /// Both indices are **zero-based**, matching the positional accessors — the
 /// one-based positions used in directory definitions are converted during
@@ -1103,8 +1102,8 @@ where
 {
     let mut seen: Vec<&str> = Vec::new();
     for segment in segments {
-        if !seen.contains(&segment.tag) {
-            seen.push(segment.tag);
+        if !seen.contains(&segment.tag()) {
+            seen.push(segment.tag());
         }
     }
     seen.into_iter()
@@ -2567,10 +2566,10 @@ impl DirectoryValidator {
         for idx in 0..seg.elements.len() {
             let actual = Self::effective_component_count(seg, idx).unwrap_or(0);
             // The `expected_components` hook is an exact count and wins when set.
-            if let Some(expected) = (self.expected_components)(seg.tag, idx) {
+            if let Some(expected) = (self.expected_components)(seg.tag(), idx) {
                 if actual != expected {
                     out.push(EdifactError::InvalidComponentCount {
-                        tag: seg.tag.to_owned(),
+                        tag: seg.tag().to_owned(),
                         element_index: idx,
                         expected,
                         actual,
@@ -2585,7 +2584,7 @@ impl DirectoryValidator {
             if let Some(declared) = def.declared_component_count(idx) {
                 if actual > declared {
                     out.push(EdifactError::InvalidComponentCount {
-                        tag: seg.tag.to_owned(),
+                        tag: seg.tag().to_owned(),
                         element_index: idx,
                         expected: declared,
                         actual,
@@ -2620,7 +2619,7 @@ impl DirectoryValidator {
             let actual = element.repeat_count();
             if actual > usize::from(max) {
                 out.push(EdifactError::TooManyRepetitions {
-                    tag: seg.tag.to_owned(),
+                    tag: seg.tag().to_owned(),
                     element_index: index,
                     max,
                     actual,
@@ -2656,7 +2655,7 @@ impl DirectoryValidator {
                     };
                     if !repr.permits_characters(value) {
                         out.push(EdifactError::InvalidCharacterType {
-                            tag: seg.tag.to_owned(),
+                            tag: seg.tag().to_owned(),
                             element_index,
                             component_index,
                             repr: repr.to_string(),
@@ -2683,7 +2682,7 @@ impl DirectoryValidator {
                     let actual = repr.measure(value);
                     out.push(if repr.is_too_short(value) {
                         EdifactError::DataElementTooShort {
-                            tag: seg.tag.to_owned(),
+                            tag: seg.tag().to_owned(),
                             element_index,
                             component_index,
                             repr: repr.to_string(),
@@ -2692,7 +2691,7 @@ impl DirectoryValidator {
                         }
                     } else {
                         EdifactError::DataElementTooLong {
-                            tag: seg.tag.to_owned(),
+                            tag: seg.tag().to_owned(),
                             element_index,
                             component_index,
                             repr: repr.to_string(),
@@ -2746,7 +2745,7 @@ impl DirectoryValidator {
             }
         };
         out.push(EdifactError::InsignificantCharacters {
-            tag: seg.tag.to_owned(),
+            tag: seg.tag().to_owned(),
             element_index,
             component_index,
             kind,
@@ -2755,7 +2754,7 @@ impl DirectoryValidator {
     }
 
     fn collect_code_list_issues(&self, seg: &Segment<'_>, out: &mut Vec<EdifactError>) {
-        for (elem_idx, comp_idx, de) in (self.code_list_rules)(seg.tag) {
+        for (elem_idx, comp_idx, de) in (self.code_list_rules)(seg.tag()) {
             let value = seg
                 .get_element(*elem_idx)
                 .and_then(|e| e.get_component(*comp_idx))
@@ -2769,7 +2768,7 @@ impl DirectoryValidator {
                     .and_then(|e| e.component_span(*comp_idx))
                     .unwrap_or(seg.span);
                 out.push(EdifactError::InvalidCodeValue {
-                    tag: seg.tag.to_owned(),
+                    tag: seg.tag().to_owned(),
                     element_index: *elem_idx,
                     value: value.to_owned(),
                     code_list: (*de).to_owned(),
@@ -2808,10 +2807,10 @@ impl DirectoryValidator {
             return;
         }
 
-        let Some(def) = self.resolve_def(seg.tag) else {
+        let Some(def) = self.resolve_def(seg.tag()) else {
             if self.structure_checks && self.enforce_known_tags {
                 out.push(EdifactError::InvalidSegmentForMessage {
-                    tag: seg.tag.to_owned(),
+                    tag: seg.tag().to_owned(),
                     message_type: self
                         .message_type
                         .clone()
@@ -2829,7 +2828,7 @@ impl DirectoryValidator {
             let actual = seg.elements.len();
             if actual < min_elements || actual > max_elements {
                 out.push(EdifactError::InvalidElementCount {
-                    tag: seg.tag.to_owned(),
+                    tag: seg.tag().to_owned(),
                     min: min_elements,
                     max: max_elements,
                     actual,
@@ -2843,7 +2842,7 @@ impl DirectoryValidator {
                 });
                 if !is_present {
                     out.push(EdifactError::MissingRequiredElement {
-                        tag: seg.tag.to_owned(),
+                        tag: seg.tag().to_owned(),
                         element_index: idx,
                     });
                 }
@@ -2865,7 +2864,7 @@ impl DirectoryValidator {
                         .is_some_and(|value| !value.is_empty());
                     if !present {
                         out.push(EdifactError::MissingRequiredComponent {
-                            tag: seg.tag.to_owned(),
+                            tag: seg.tag().to_owned(),
                             element_index: elem_idx,
                             component_index: comp_idx,
                         });
@@ -2923,7 +2922,7 @@ impl Validator for DirectoryValidator {
                 let mut first_index: std::collections::HashMap<&str, usize> =
                     std::collections::HashMap::with_capacity(segments.len());
                 for (i, seg) in segments.iter().enumerate() {
-                    first_index.entry(seg.tag).or_insert(i);
+                    first_index.entry(seg.tag()).or_insert(i);
                 }
 
                 let required = (self.required_segments)(&message_type);
@@ -3096,7 +3095,8 @@ mod tests {
     // ── effective_component_count (ISO 9735-1 §8.7.2 trailing-empty-component trim) ──
 
     fn parse_single(input: &[u8]) -> crate::OwnedSegment {
-        crate::from_reader_collect(std::io::Cursor::new(input))
+        crate::from_reader(std::io::Cursor::new(input))
+            .collect::<Result<Vec<_>, _>>()
             .expect("parse should succeed")
             .into_iter()
             .next()
@@ -3109,8 +3109,8 @@ mod tests {
         // ISO 9735-1 §8.7.2 says trailing empty components may be omitted,
         // so effective count should be 2.
         let owned = parse_single(b"DTM+137:20200101:'");
-        let seg = owned.as_borrowed();
-        let count = DirectoryValidator::effective_component_count(&seg, 0);
+        let seg = &owned;
+        let count = DirectoryValidator::effective_component_count(seg, 0);
         assert_eq!(
             count,
             Some(2),
@@ -3122,8 +3122,8 @@ mod tests {
     fn all_empty_components_result_in_zero() {
         // NAD+MS++: → element 2 is ":" with two empty components → effective=0
         let owned = parse_single(b"NAD+MS++:'");
-        let seg = owned.as_borrowed();
-        let count = DirectoryValidator::effective_component_count(&seg, 2);
+        let seg = &owned;
+        let count = DirectoryValidator::effective_component_count(seg, 2);
         assert_eq!(
             count,
             Some(0),
@@ -3135,8 +3135,8 @@ mod tests {
     fn non_empty_component_not_stripped() {
         // DTM+137:20200101:102 — all three components are non-empty
         let owned = parse_single(b"DTM+137:20200101:102'");
-        let seg = owned.as_borrowed();
-        let count = DirectoryValidator::effective_component_count(&seg, 0);
+        let seg = &owned;
+        let count = DirectoryValidator::effective_component_count(seg, 0);
         assert_eq!(
             count,
             Some(3),

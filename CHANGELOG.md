@@ -7,140 +7,192 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [0.17.0]
+
+A deliberate hard cut. The crate had grown a *borrowed* and an *owned* copy of
+nearly every API, and a second and third way to do several other things. Nothing
+here changes what is accepted on the wire except where listed under **Fixed**.
+
+### Changed — breaking
+
+- **One segment type.** `Segment<'a>` holds its text as `Cow<'a, str>`, so
+  `from_bytes` yields `Segment<'input>` and `from_reader` yields
+  `Segment<'static>` — aliased as `OwnedSegment`. Covariance means
+  `&[OwnedSegment]` is accepted wherever `&[Segment<'_>]` is, so every API takes
+  one shape. Use `Segment::into_owned()` to detach from the input buffer, and
+  `segment.tag()` where a `&str` is needed (`segment.tag == "BGM"` still works).
+  - Removed: `BorrowedSegment`, `BorrowedElement`, `as_borrowed`, `borrow`,
+    `offset_in_place`.
+  - Removed as redundant: `validate_envelope_from_owned`,
+    `validate_envelope_owned`, `validate_envelope_lenient_from_owned`,
+    `validate_envelope_lenient_owned`, `segments_to_bytes_owned`,
+    `find_segment_owned`, `find_qualified_segment_owned`,
+    `repeated_components_owned`, `group_owned_segments_indexed`,
+    `ValidationContext::validate_{lenient,strict}_{,grouped_}owned`,
+    `EdifactDeserialize::edifact_deserialize_owned`,
+    `EdifactSegmentTag::matches_owned_segment`.
+  - The derive no longer emits a second body per type, roughly halving its output.
+- **`ValidationContext` has three validate methods, not ten**: `validate`,
+  `validate_with`, `validate_grouped`. Each returns a `ValidationReport`; call
+  `.result()` for the `Result` the old `validate_strict*` methods returned.
+- **`EdifactEvent` carries `Cow`**; `OwnedEdifactEvent` is removed and
+  `VecEmitter` collects `EdifactEvent<'static>`. Build events with
+  `EdifactEvent::{start, element, component, repeat}`.
+- **`DecimalFloatDisplay` merged into `DecimalFloat`**, now generic over
+  `Display`, with non-finite values refused for every inner type.
+- **Writer: five segment methods became four.** `write_raw` → `write_simple`,
+  which treats each string as one whole data element instead of splitting it on
+  the component separator. `write_segment_parts` is absorbed into
+  `write_composites`, now generic over `AsRef<[S]>` / `AsRef<str>`.
+- **`MessageDispatch` and `DispatchedMessage` removed** — type-erased dispatch
+  through `Box<dyn Any>`. Match on `window.message_type` and call
+  `T::edifact_deserialize(window.body())`. `EdifactError::UnexpectedMessageType`
+  goes with it; code `E022` is retired.
+- **`SegmentAccessor` removed**; its methods are inherent on `Segment` as
+  `required_element`, `optional_element`, `required_component`,
+  `optional_component` and `parsed_element` (was `code_element`). The free
+  functions that wrapped them are gone.
+- **Symmetric parse entry points**: `from_bytes`, `from_reader`, `from_bufread`,
+  `from_bytes_decoded`, `from_reader_decoded`, each with a `_with_config`
+  sibling, all returning lazy iterators. Removed `from_reader_collect`,
+  `from_bytes_owned{,_with_config}`; `from_bufread_stream{,_with_config}` →
+  `from_bufread{,_with_config}`, which now stream rather than collect.
+- **Typed streaming is two functions, not four**: `deserialize_each` and
+  `deserialize_each_from_reader` are lazy, so "first" is `.next()` and "all" is
+  `.collect()`. Removed the four `deserialize_{first,all}_*` entry points.
+- **`ProfileRulePack` rule methods renamed** on the one axis that distinguishes
+  them — whether the closure takes the `ValidationRuleContext`:
+  `with_stateless_rule_fn` → `with_rule_fn`, `with_named_stateless_rule_fn` →
+  `with_named_rule_fn`, `with_rule_fn` → `with_contextual_rule_fn`,
+  `with_named_rule_fn` → `with_named_contextual_rule_fn`.
+- **Renames**: `message_windows_bytes` / `from_bytes_windows` →
+  `message_windows`; `deserialize_messages_bytes` → `deserialize_messages`;
+  `find_segments_iter` → `find_segments`; `contiguous_groups_iter` →
+  `contiguous_groups`; `MessageWindowsIter` / `MessageWindowsSliceIter` → one
+  `MessageWindows<I>`; `OwnedMessageWindow` is `MessageWindow<'static>`. Removed
+  `contiguous_groups_by_qualifier`, `groups_are_contiguous_by_qualifier`,
+  `find_segment_typed`.
+- **`SegmentLayout` gains a required `slots` method** and **`LayoutSlot` gains
+  `element_status`**, without which §8.6's "if the composite is present" cannot
+  be evaluated. External implementors must add them.
 
 ### Added
 
-- **`SegmentLayout::audit`** — check a hand-written layout against real messages.
-  Authoring a `SegmentDefinition` has a silent failure mode: a layout that
-  disagrees with the wire resolves `value_by_code` to the *wrong component*,
-  returns a plausible value, and every test passes, because the definition is the
-  only thing in the program that says what the positions mean. Pointing it at a
-  corpus is what breaks that circle.
-  Findings separate **disproof** from **absence of evidence**:
-  `UndeclaredElement` / `UndeclaredComponent` mean the wire carries a value the
-  layout has no slot for, `MandatoryNeverPopulated` means a mandatory slot is
-  empty everywhere, and `NeverObserved` means the corpus never reaches the slot
-  at all. `has_contradictions` deliberately excludes the last one — a corpus that
-  cannot confirm a position says nothing about whether it is right — and
-  `unconfirmed()` lists exactly which positions still need a human or a fixture.
-  Findings are deduplicated per position, so hundreds of fixtures report each
-  disagreement once. `LayoutAudit` implements `Display` for a pasteable report.
-- **`SegmentLayout::slots`**, the flattened position list `audit` is built on, so
-  downstream tooling can walk either a compile-time or a runtime layout without
-  knowing which it holds.
-- **`from_bytes_decoded`, `from_reader_decoded`, and their `_with_config` forms** —
-  parse while decoding from the repertoire the interchange's own `UNB` declares,
-  in one call a caller cannot forget to make. Forgetting is the failure mode
-  worth designing against: a `UNOC` corpus stored as UTF-8 parses fine, so the
-  tests pass and the first *conformant* counterparty message is the one rejected.
-  `from_reader_decoded` stays a **plain `Iterator`**: the repertoire sniff happens
-  on the first `next()`, so a decode failure arrives as the first item instead of
-  forcing the whole pipeline eager through a `Result` at construction.
-
-- **Data element representations — `Repr` and `ReprKind`.** Every UN/EDIFACT
-  directory prints `an..35` / `n8` / `a1` beside each data element, and it is
-  what partners actually reject on; nothing in the crate could express it, so
-  nothing could check it. `ComponentRef::with_repr` and `ElementRef::with_repr`
-  attach one, and `DirectoryValidator` then checks character class (`E048`),
-  maximum length (`E049`) and fixed length (`E050`). Positions with no declared
-  representation are not checked, so a partial table stays useful.
-  Length follows the standard rather than the obvious reading: ISO 9735-1 §6
-  counts **characters, not bytes**, so a `UNOC` `ü` counts once; §10 excludes a
-  numeric value's sign, decimal mark and exponent, so `-123.45` is five
-  characters. `n` admits exactly the ISO 6093 forms §10 leaves — no space, no
-  plus sign, and at least one digit after a decimal mark.
-- **The shipped service tables now carry their representations** from
-  ISO 9735-1 Annex C, so `UNZ+abc+IC1'` and an over-long `UNB` DE 0020 are
-  rejected with no directory involved.
-- **Version-dependent representations — `with_repr_by_syntax_version`.** `S004`
-  DE 0017 is the only position in the service directory where syntax version 4
-  is not a superset of version 3: version 3 transfers `YYMMDD` (`n6`), version 4
-  `CCYYMMDD` (`n8`). Declaring both keeps each version checked exactly. The
-  obvious compromise — a single `n..8` — validates *neither*: it accepts a
-  six-digit date in a version 4 interchange and a seven-digit one in either. The
-  checker reads the version from `UNB` S001 DE 0002, and accepts either form only
-  when there is no `UNB` to read, since guessing would reject conformant data.
-
-- **ISO 9735-1 §8.7.1 / §8.7.2 trailing separators** (`E051`, warning) and
-  **§9.1 insignificant characters** (`E053`, warning). `BGM+220+'` and
-  `DTM+137:20260101:'` end in separators the standard requires to be omitted;
-  `007` in a variable-length numeric field and `"ACME "` in a text one carry
-  characters §9.1 requires the sender to suppress. Both are fingerprints of a
-  fixed-width source record copied into a variable-length field, and both make a
-  receiver's equality comparison fail. The narrow cases are honoured: an
-  *interior* omission must keep its separator (§8.7.1 Figure 1), `BGM+'` is how
-  §8.4 spells a mandatory segment with no data, "a single zero before a decimal
-  mark is allowed", and a *fixed*-length element is exempt from §9.1 entirely.
-- **`audit_directory`** — audit every layout a corpus exercises in one call,
-  rather than looping over `SegmentLayout::audit`. Only tags present in the
-  corpus are audited, so definitions the fixtures never reach cannot bury the
-  findings that matter.
+- **`Writer::with_service_string_advice`** — set the writer's delimiters without
+  emitting a `UNA`, so a syntax-version-4 interchange with repeating elements and
+  no `UNA` round-trips without inventing a header.
+- **`Segment::repeated_component(element, component)`** — one component across
+  every occurrence of a repeating data element.
+- **`Segment::into_owned` / `Element::into_owned`** — detach from the input buffer.
+- **`SegmentGroupIndexed::segments`, `descendants`, `find`** — resolve a group
+  against its slice, walk the subtree in document order, and find every group
+  with a given name at any depth.
+- **`SegmentLayout::audit` and `audit_directory`** — check a hand-written layout
+  against real messages. Findings separate disproof (`UndeclaredElement`,
+  `UndeclaredComponent`, `MandatoryNeverPopulated`) from absence of evidence
+  (`NeverObserved`), which `has_contradictions` excludes and `unconfirmed()`
+  lists. Deduplicated per position; `LayoutAudit` implements `Display`.
+- **`SegmentLayout::slots`** — the flattened position list `audit` is built on.
+- **`from_bytes_decoded`, `from_reader_decoded`** (+ `_with_config`) — parse while
+  decoding from the repertoire the `UNB` declares, in one call.
+  `from_reader_decoded` stays a plain `Iterator`: the sniff happens on the first
+  `next()`, so a decode failure arrives as the first item.
+- **Data element representations — `Repr` and `ReprKind`.** `ComponentRef::with_repr`
+  and `ElementRef::with_repr` attach `an..35` / `n8` / `a1`, and
+  `DirectoryValidator` checks character class (`E048`), maximum length (`E049`)
+  and fixed length (`E050`). Length follows ISO 9735-1 §6 (characters, not bytes)
+  and §10 (a numeric value excludes its sign, decimal mark and exponent).
+  Positions with no declared representation are not checked.
+- **`with_repr_by_syntax_version`** — `S004` DE 0017 is `n6` in syntax version 3
+  and `n8` in version 4; declaring both checks each exactly, where a single
+  `n..8` would validate neither. The version is read from `UNB` S001 DE 0002.
+- **The shipped service tables carry their representations** from ISO 9735-1
+  Annex C, so `UNZ+abc+IC1'` is rejected with no directory involved.
+- **Trailing separators (§8.7.1 / §8.7.2, `E051`) and insignificant characters
+  (§9.1, `E053`)**, both warnings. Interior omissions keep their separator,
+  `BGM+'` stays legal, a leading zero before a decimal mark is allowed, and
+  fixed-length elements are exempt from §9.1.
 
 ### Fixed
 
+- **The writer could emit segments the parser rejects.** A tag is written
+  verbatim and cannot be escaped, but no write path checked it — `bgm`, `BGMX`,
+  `BG1`, `B+M` and an empty tag were all written out and none read back. Every
+  path now validates before the first byte reaches the sink, using the predicate
+  the tokenizer applies.
+- **A nested group sharing a trigger with an outer group was unreachable.**
+  `group_segments_indexed` tested an ancestor's sibling triggers before its own
+  children, so a child definition whose trigger also triggers a group further out
+  could not be produced from any input — `UTILMD` triggers both SG2 and SG12 on
+  `NAD`. The traversal now consults the current level's children first: a group
+  ends at the first segment the current branch cannot consume.
+- **A segment with no terminator is rejected on the slice path too.**
+  `from_bytes` accepted a truncated final segment while `from_reader` reported
+  `UnexpectedEof`, so a file cut off mid-transfer could pass as complete.
+- **A UTF-8 byte order mark no longer hides the first segment**, nor does
+  whitespace before a `UNA`; both paths agree.
+- **`with_max_issues_per_rule` did not cap group rules.** The group walk reset
+  the budget at every occurrence, so a rule firing in twenty groups emitted
+  twenty times the limit. The budget is now spent across the whole tree walk.
+- **`DecimalFloat` refuses non-finite values for every inner type** — the
+  `Display`-generic wrapper emitted `NaN` and `inf` verbatim.
+- **Envelope validation distinguishes an absent element from an absent
+  component**: a `UNB` that stops before DE 0020 is `MissingRequiredElement`
+  (`E008`), not `MissingRequiredComponent` (`E021`). Both map to `CONTRL`
+  `Missing`, so acknowledgements are unchanged.
 - **`SegmentLayout::audit` flagged mandatory components of absent conditional
-  composites.** ISO 9735-1 §8.6 makes a mandatory component required "if the
-  composite data element is present", not unconditionally — so the audit
-  condemned every optional composite in a definition. `UNB` S005 component 1
-  (DE 0022) is mandatory inside a conditional composite, which meant a
-  conformant `UNB` with no recipient password was reported as violating its own
-  shipped layout. Such a slot is now `NeverObserved`, and becomes a contradiction
-  again once the composite is present. `LayoutSlot` gained `element_status` to
-  carry the distinction.
-- **"Groups and messages mixed" was reported with the general code.** The
-  envelope validator already detected it (§7.1), but raised
-  `InvalidSegmentForMessage`, which maps to `CONTRL` 15 — "not supported in this
-  position". Code 30 exists for exactly this condition, and §5.3.3 asks for the
-  precise code over the general one. It is now `E052` and maps to 30.
-- **`ElementRef::max_repeat` was never enforced.** It had been carried on every
-  element since the type existed and exposed by a getter, and no validator read
-  it — so a definition stating "this element occurs once" constrained nothing,
-  while the caller who wrote it believed otherwise. `DirectoryValidator` now
-  raises `E047` when a repeating data element exceeds its declared maximum.
-- **Seven `CONTRL` codes were unreachable.** `SyntaxError` shipped
-  `InvalidCharacterType` (37), `DataElementTooLong` (39), `DataElementTooShort`
-  (40), `TooManyRepetitions` (35), `TrailingSeparator` (45) and
-  `GroupsAndMessagesMixed` (30), and nothing in the crate could ever produce a
-  finding that mapped to them. The representation, occurrence and suppression
-  checks above close all of them. The codes that remain caller-supplied —
-  "unknown interchange sender", "too old", "no agreement" — are partner policy
-  the crate cannot know, and stay available through
-  `Contrl::with_interchange_error`.
+  composites.** §8.6 makes them required only "if the composite is present", so
+  a conformant `UNB` with no recipient password was reported as violating its own
+  shipped layout. Such a slot is now `NeverObserved`.
+- **"Groups and messages mixed" now uses `CONTRL` code 30** (`E052`) rather than
+  the general "not supported in this position" (15).
+- **`ElementRef::max_repeat` was never enforced**; `DirectoryValidator` now
+  raises `E047` when a repeating element exceeds its declared maximum.
+- **Seven `CONTRL` codes were unreachable** — 35, 37, 39, 40, 45 and 30 had no
+  producer. The representation, occurrence and suppression checks close them.
 
-### Changed
+### Internal
 
-- **Breaking:** `SegmentLayout` gains a required `slots` method. External
-  implementors must add it; the two shipped implementations already have it.
-- **Breaking:** `LayoutSlot` gains an `element_status` field, without which
-  §8.6's "if the composite is present" cannot be evaluated.
+- **`edifact-rs-derive` moved to `syn` 3 and dropped `features = ["full"]`.**
+  `thiserror` already pulls syn 3 in, so the pin meant compiling syn twice; a
+  derive macro only inspects a `DeriveInput`, so `full` bought nothing.
+- **The workspace moved to `resolver = "3"`**, which is MSRV-aware — resolver 2
+  let a plain `cargo update` pull `trybuild` past the declared MSRV.
+- **`criterion` 0.5 → 0.7**, with `black_box` from `std::hint`. Not 0.8: it
+  requires rustc 1.86, above this crate's MSRV.
+- **Fuzz targets assert output contracts, not just the absence of a panic.**
+  Three ran the code and discarded the result, and the reader/slice differential
+  compared only when *both* paths succeeded — skipping the case where one accepts
+  and the other rejects, which is what the truncation and BOM bugs were. Targets
+  now check span bounds and tag validity, report-bucket consistency,
+  `is_valid()` against what the writer accepts, and full agreement between the
+  two parse paths.
+- **The character-repertoire tables are proved bijective** — exhaustively in both
+  directions across all eleven single-byte repertoires, rather than one
+  representative character each.
+- **Every shipped service layout is audited against a corpus that fills it** —
+  all 16 definitions in `service::ALL`, confirmed position-for-position. A
+  definition added without a fixture that exercises it now fails the test.
+- **A validation benchmark measured nothing**: `validate_large_message` ran
+  against a no-op validator and reported ~39 TB/s. It now runs envelope
+  validation plus a pack rule; `validate_structure_orders` is renamed
+  `context_dispatch_floor`.
+- **`one_mb_interchange()`** — a conformant 1 MB fixture for benchmarks that
+  validate, since `validate_envelope` aborts at the second `UNB` in the
+  repeated-interchange fixture. Four stale baselines pruned.
+- **`bench_large_message_memory` failed on its own input**, repeating a fragment
+  including its `UNA`. It now builds one well-formed interchange.
+- **The site template used Zola's `slice` filter**, removed in Zola 0.23; the CI
+  pin moves to 0.23.4.
+- **The guides' API-reference test reads the public API out of `src/lib.rs`**
+  rather than mirroring it in a hand-kept list.
 
 ### Documentation
 
-- **Three redundant intra-doc link targets removed** from the `service` module
-  docs. They failed the `docsrs-check` CI job, which builds on nightly where
-  `rustdoc::redundant_explicit_links` exists — stable does not carry it, so a
-  green `cargo doc` said nothing about whether docs.rs would build. Module
-  documentation resolves links in the **crate-root** scope, so a label like
-  `Segment::value_by_code` already resolves through the root re-export and an
-  explicit `[…][crate::Segment::value_by_code]` target duplicates it. `lookup`
-  is not re-exported at the root and still needs its path.
-
-- **Why directory composites are not shipped, stated rather than implied.** The
-  [UN UNTDID licence](https://service.unece.org/trade/untdid/license.htm) grants
-  use of the Directory only in the country where it was acquired, requires the
-  copyright notice on every partial copy, and states that it may not be modified
-  and distributed. Transcribing it into `const` tables and publishing that is
-  precisely what it forbids, so no "stable subset" of composites can ship either.
-  `element = "code"` is turnkey for the service segments and authoring work for
-  everything else — the guides now say so where the feature is introduced.
-- **Decoding a stream without making it eager** — a streaming-guide section on
-  why `decode_reader` returns a `Result`, and what `from_reader_decoded` does
-  instead.
-- **`GroupDef` in return position** — `static SCHEMA: &[GroupDef]` compiles
-  unchanged, but a trait method returning one needs
-  `&'static [GroupDef<'static>]`, because an elided lifetime in return position
-  binds to `&self`.
+- The UN UNTDID licence terms are stated where directory composites are
+  introduced, rather than implied.
+- New sections: how a tag resolves to a segment group, reading groups back,
+  decoding a stream without making it eager, and what the writer will not write.
 
 ---
 
@@ -1237,16 +1289,16 @@ Addresses feedback from downstream profile crates built on this library.
               issues: &mut Vec<ValidationIssue>) { … }
   ```
 
-- **`with_rule_fn` and `with_stateless_rule_fn` closure signatures changed.**  Closures
+- **`with_contextual_rule_fn` and `with_rule_fn` closure signatures changed.**  Closures
   must now accept an extra `&mut Vec<ValidationIssue>` parameter and push issues into it
   instead of returning `Option<ValidationIssue>`.
 
   ```rust
   // Before:
-  .with_stateless_rule_fn(|segments| { … Some(issue) })
+  .with_rule_fn(|segments| { … Some(issue) })
 
   // After:
-  .with_stateless_rule_fn(|segments, issues| { issues.push(issue); })
+  .with_rule_fn(|segments, issues| { issues.push(issue); })
   ```
 
 - **`ValidationFailed` (E018) replaced by `ValidationErrors` (E030).**  The lossy
@@ -1508,7 +1560,7 @@ Initial public release.  See commit history for full details.
 
 ---
 
-[Unreleased]: https://github.com/hupe1980/edifact-rs/compare/v0.16.0...HEAD
+[0.17.0]: https://github.com/hupe1980/edifact-rs/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/hupe1980/edifact-rs/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/hupe1980/edifact-rs/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/hupe1980/edifact-rs/compare/v0.10.0...v0.14.0

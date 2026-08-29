@@ -172,17 +172,18 @@ fn span_by_code_points_at_the_addressed_value() {
 #[test]
 fn owned_and_borrowed_segments_resolve_identically() {
     let input = b"NAD+MS+9900112233445::293'";
-    let owned: Vec<edifact_rs::OwnedSegment> =
-        edifact_rs::from_reader_collect(std::io::Cursor::new(input)).expect("fixture must parse");
+    let owned: Vec<edifact_rs::OwnedSegment> = edifact_rs::from_reader(std::io::Cursor::new(input))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("fixture must parse");
 
     assert_eq!(owned[0].value_by_code(&NAD, "3055").unwrap(), Some("293"));
     assert_eq!(
-        owned[0].borrow().value_by_code(&NAD, "3039").unwrap(),
+        owned[0].value_by_code(&NAD, "3039").unwrap(),
         Some("9900112233445")
     );
     assert_eq!(
         owned[0].span_by_code(&NAD, "3055").unwrap(),
-        owned[0].borrow().span_by_code(&NAD, "3055").unwrap(),
+        owned[0].span_by_code(&NAD, "3055").unwrap(),
     );
 }
 
@@ -249,12 +250,13 @@ fn code_addressed_derive_round_trips() {
 #[test]
 fn code_addressed_derive_matches_the_owned_path() {
     let input = b"NAD+MS+9900112233445::293'";
-    let owned: Vec<edifact_rs::OwnedSegment> =
-        edifact_rs::from_reader_collect(std::io::Cursor::new(input)).expect("parse");
+    let owned: Vec<edifact_rs::OwnedSegment> = edifact_rs::from_reader(std::io::Cursor::new(input))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parse");
     let borrowed = parse(input);
 
     assert_eq!(
-        SenderParty::edifact_deserialize_owned(&owned).expect("owned"),
+        SenderParty::edifact_deserialize(&owned).expect("owned"),
         SenderParty::edifact_deserialize(&borrowed).expect("borrowed"),
     );
 }
@@ -287,11 +289,12 @@ fn required_reports_the_variant_matching_what_the_field_addresses() {
 #[test]
 fn required_variant_agrees_across_borrowed_and_owned_paths() {
     let input = b"NAD++9900112233445::293'";
-    let owned: Vec<edifact_rs::OwnedSegment> =
-        edifact_rs::from_reader_collect(std::io::Cursor::new(input)).expect("parse");
+    let owned: Vec<edifact_rs::OwnedSegment> = edifact_rs::from_reader(std::io::Cursor::new(input))
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parse");
     let borrowed = parse(input);
 
-    let from_owned = RequiredShapes::edifact_deserialize_owned(&owned).unwrap_err();
+    let from_owned = RequiredShapes::edifact_deserialize(&owned).unwrap_err();
     let from_borrowed = RequiredShapes::edifact_deserialize(&borrowed).unwrap_err();
     assert_eq!(from_owned.stable_code(), from_borrowed.stable_code());
     assert_eq!(from_owned, from_borrowed);
@@ -413,7 +416,7 @@ fn a_repeated_composite_is_not_capped_at_its_entry_count() {
     let report = edifact_rs::ValidationContext::builder()
         .with_validator(edifact_rs::ValidationLayer::Structure, validator)
         .build()
-        .validate_lenient(&segments);
+        .validate(&segments);
 
     assert!(
         !report
@@ -602,6 +605,72 @@ mod layout_audit {
         // A tag the corpus does not contain is not audited at all, rather than
         // returning nothing but `NeverObserved` noise.
         assert!(!audits.iter().any(|a| a.tag() == "UNG"));
+    }
+
+    /// Audit **every shipped service definition** against a corpus that fills it.
+    ///
+    /// The directory-wide audit above runs over four nearly-empty envelope
+    /// segments, where almost every position is `NeverObserved` — and
+    /// `has_contradictions` deliberately ignores those, so it would pass against
+    /// a layout with a transposed index. These tables are the ones users trust
+    /// most (`value_by_code(&service::UNB, "0020")`) and the ones `Contrl`
+    /// writes through, and a wrong index in either reads or writes a different,
+    /// still-plausible value with no error anywhere.
+    ///
+    /// Filling every declared position turns the audit from "nothing disproved
+    /// it" into "the wire confirmed it", and asserting against `service::ALL`
+    /// means a definition cannot be added without a fixture that exercises it.
+    #[test]
+    fn every_shipped_service_layout_is_confirmed_by_a_corpus_that_fills_it() {
+        use edifact_rs::service;
+
+        // Every service segment the module ships, each populated to the full
+        // width its definition declares.  Not a valid interchange, and not
+        // meant to be: the audit reads segments, not envelopes.
+        let input: &[u8] = b"\
+UNB+UNOA:4:SCD:XML+SENDER:14:REV:SUB+RECIPIENT:14:FWD:SUB+20260101:0900+IC4711+PW:AA+APPREF+A+1+COMMS+1'\
+UNG+ORDERS+APPSND:14+APPRCV:14+20260101:0900+GRP1+UN+D:96A:EAN008+APPPW'\
+UNH+MSG1+ORDERS:D:96A:UN:EAN008:CLD1:SUB+CAR+1:C+SUBSET:1:0:UN+GUIDE:1:0:UN+SCEN:1:0:UN'\
+UNS+D'\
+UGH+SG12'\
+UGT+SG12'\
+UNT+4+MSG1'\
+UNE+1+GRP1'\
+UNO+PKG1+AAB:REF1+OBJ:ATTRID:ATTR:UN+1024:3:1:C'\
+UNP+1024+PKG1'\
+UCI+IC4711+SENDER:14:REV:SUB+RECIPIENT:14:FWD:SUB+4+13+UNB+3:2:1+SEC1+2'\
+UCF+GRP1+APPSND:14+APPRCV:14+4+13+UNG+3:2:1+SEC1+2'\
+UCM+MSG1+ORDERS:D:96A:UN:EAN008:CLD1:SUB+4+13+UNH+3:2:1+PKG1+AAB:REF1+SEC1+2'\
+UCS+7+13'\
+UCD+13+3:2:1'\
+UNZ+1+IC4711'";
+        let segments = corpus(input);
+
+        for definition in service::ALL {
+            let audit = definition.audit(&segments);
+            assert!(
+                audit.segments_examined() > 0,
+                "{} is shipped but the fixture never exercises it — add it rather \
+                 than letting the audit skip it silently",
+                definition.tag,
+            );
+            assert!(
+                !audit.has_contradictions(),
+                "{} disagrees with the wire:\n{audit}",
+                definition.tag,
+            );
+            let unconfirmed: Vec<String> = audit
+                .unconfirmed()
+                .map(|slot| slot.data_element.clone())
+                .collect();
+            assert!(
+                unconfirmed.is_empty(),
+                "{} has positions the corpus never reached — either the fixture \
+                 does not fill them or the layout declares something that is not \
+                 there: {unconfirmed:?}",
+                definition.tag,
+            );
+        }
     }
 
     #[test]

@@ -236,14 +236,15 @@ fn qualified_group_deserializes_identically_borrowed_and_owned() {
     let borrowed_segs: Vec<edifact_rs::Segment<'_>> = edifact_rs::from_bytes(raw)
         .collect::<Result<_, _>>()
         .unwrap();
-    let owned_segs: Vec<edifact_rs::OwnedSegment> = edifact_rs::from_bytes_owned(raw)
+    let owned_segs: Vec<edifact_rs::OwnedSegment> = from_bytes(raw)
+        .map(|r| r.map(|s| s.into_owned()))
         .collect::<Result<_, _>>()
         .unwrap();
 
     let borrowed =
         ParityMessage::edifact_deserialize(&borrowed_segs).expect("borrowed path must deserialize");
     let owned =
-        ParityMessage::edifact_deserialize_owned(&owned_segs).expect("owned path must deserialize");
+        ParityMessage::edifact_deserialize(&owned_segs).expect("owned path must deserialize");
 
     assert_eq!(borrowed, owned);
     assert_eq!(

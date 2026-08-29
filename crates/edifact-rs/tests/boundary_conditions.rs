@@ -7,7 +7,7 @@
 
 use edifact_rs::{
     EdifactError, ReaderConfig, ServiceStringAdvice, Writer, from_bytes, from_bytes_with_config,
-    from_reader_collect, segments_to_bytes, validate_envelope,
+    segments_to_bytes, validate_envelope,
 };
 
 fn parse(input: &[u8]) -> Result<Vec<edifact_rs::Segment<'_>>, EdifactError> {
@@ -20,7 +20,8 @@ fn parse(input: &[u8]) -> Result<Vec<edifact_rs::Segment<'_>>, EdifactError> {
 fn empty_input_yields_no_segments() {
     assert_eq!(parse(b"").expect("empty input is not an error").len(), 0);
     assert_eq!(
-        from_reader_collect(std::io::Cursor::new(b"".as_slice()))
+        edifact_rs::from_reader(std::io::Cursor::new(b"".as_slice()))
+            .collect::<Result<Vec<_>, _>>()
             .expect("empty reader is not an error")
             .len(),
         0
@@ -47,13 +48,20 @@ fn una_only_input_yields_no_segments() {
 fn truncated_una_is_not_treated_as_a_service_string_header() {
     // A UNA header is exactly 9 bytes.  Anything shorter is not a header, so the
     // default delimiters stay in force and the bytes are read as an ordinary
-    // (element-less) segment tag.
-    let segs = parse(b"UNA").expect("a bare 3-letter tag is syntactically a segment");
+    // segment tag — one that here has no terminator, and is rejected as the
+    // truncation it is rather than accepted as a complete segment.
+    assert!(matches!(
+        parse(b"UNA").unwrap_err(),
+        EdifactError::UnexpectedEof { .. }
+    ));
+
+    // Terminated, it is an ordinary element-less segment …
+    let segs = parse(b"UNA'").expect("a terminated 3-letter tag is a segment");
     assert_eq!(segs.len(), 1);
     assert_eq!(segs[0].tag, "UNA");
     assert!(segs[0].elements.is_empty());
 
-    // Default delimiters remain active, so `+` still splits elements.
+    // … and the default delimiters remain active, so `+` still splits elements.
     let segs = parse(b"UNA+X'").expect("default delimiters still apply");
     assert_eq!(segs[0].element_str(0), Some("X"));
 }
@@ -93,7 +101,7 @@ fn inter_segment_whitespace_is_skipped() {
     // segments — pretty-printed interchanges are common in practice.
     let segs = parse(b"BGM+220'\r\n  RFF+ON:1'\n").expect("whitespace is skipped");
     assert_eq!(
-        segs.iter().map(|s| s.tag).collect::<Vec<_>>(),
+        segs.iter().map(|s| s.tag()).collect::<Vec<_>>(),
         vec!["BGM", "RFF"]
     );
 }
@@ -102,7 +110,7 @@ fn inter_segment_whitespace_is_skipped() {
 fn segment_without_elements_parses() {
     let segs = parse(b"UNZ'UNB+A'").expect("element-less segments are legal syntax");
     assert_eq!(
-        segs.iter().map(|s| s.tag).collect::<Vec<_>>(),
+        segs.iter().map(|s| s.tag()).collect::<Vec<_>>(),
         vec!["UNZ", "UNB"]
     );
     assert!(segs[0].elements.is_empty());
@@ -196,7 +204,8 @@ fn utf8_split_across_a_reader_chunk_boundary_is_handled() {
     let input = "FTX+Grüße北京'".as_bytes();
     for capacity in 1..=input.len() {
         let reader = std::io::BufReader::with_capacity(capacity, std::io::Cursor::new(input));
-        let segs = from_reader_collect(reader)
+        let segs = edifact_rs::from_reader(reader)
+            .collect::<Result<Vec<_>, _>>()
             .unwrap_or_else(|e| panic!("failed at buffer capacity {capacity}: {e}"));
         assert_eq!(segs[0].elements[0].components[0].0, "Grüße北京");
     }
@@ -246,7 +255,7 @@ fn slice_and_reader_paths_agree_at_the_limit_boundary() {
         let slice_ok = from_bytes_with_config(&input, cfg)
             .collect::<Result<Vec<_>, _>>()
             .is_ok();
-        let reader_ok = edifact_rs::from_bufread_stream_with_config(
+        let reader_ok = edifact_rs::from_bufread_with_config(
             std::io::BufReader::with_capacity(64, std::io::Cursor::new(&input)),
             cfg,
         )

@@ -3,17 +3,14 @@ mod support;
 
 pub use support::edifact_rs::{
     Element, EdifactDeserialize, EdifactError, EdifactEvent, EdifactSegmentTag,
-    EdifactSerialize, EventEmitter, OwnedSegment, Segment, find_qualified_segment,
-    find_qualified_segment_owned, find_segment, find_segment_owned,
-};
+    EdifactSerialize, EventEmitter, Segment, find_qualified_segment, find_segment};
 
 extern crate self as edifact_rs;
 pub use support::edifact_rs::helpers;
 
 use edifact_rs_derive::{
     EdifactDeserialize as DeriveEdifactDeserialize,
-    EdifactSerialize as DeriveEdifactSerialize,
-};
+    EdifactSerialize as DeriveEdifactSerialize};
 
 #[derive(DeriveEdifactSerialize, DeriveEdifactDeserialize)]
 #[edifact(segment = "BGM")]
@@ -23,8 +20,7 @@ struct BgmSegment {
     #[edifact(element = 1)]
     doc_id: String,
     #[edifact(element = 2)]
-    msg_function: Option<String>,
-}
+    msg_function: Option<String>}
 
 fn main() {
     let _ = std::any::type_name::<BgmSegment>();

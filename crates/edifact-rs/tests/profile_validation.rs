@@ -13,7 +13,7 @@ fn custom_profile_pack_reports_rule_ids_for_orders_fixture() {
         .with_profile_pack(common::demo_orders_profile_pack())
         .build();
 
-    let report = ctx.validate_lenient(&segments);
+    let report = ctx.validate(&segments);
     assert!(report.has_errors(), "expected profile errors");
     assert!(
         report
@@ -40,7 +40,7 @@ fn custom_profile_pack_is_skipped_for_other_message_types() {
         .with_profile_pack(common::demo_orders_profile_pack())
         .build();
 
-    let report = ctx.validate_lenient(&segments);
+    let report = ctx.validate(&segments);
     assert!(
         report.is_valid(),
         "expected scoped pack to be skipped: {report}"
@@ -57,7 +57,7 @@ fn custom_profile_pack_strict_mode_fails_for_error_level_issues() {
         .with_profile_pack(common::demo_orders_profile_pack())
         .build();
 
-    let result = ctx.validate_strict(&segments);
+    let result = ctx.validate(&segments).result();
     assert!(result.is_err(), "strict profile validation should fail");
     assert!(result.unwrap_err().has_errors());
 }
@@ -85,8 +85,8 @@ fn profile_pack_message_type_set_before_pack_matches_set_after() {
         .with_message_type("ORDERS")
         .build();
 
-    let report_before = ctx_before.validate_lenient(&segments);
-    let report_after = ctx_after.validate_lenient(&segments);
+    let report_before = ctx_before.validate(&segments);
+    let report_after = ctx_after.validate(&segments);
 
     // Both configurations must produce the same number of errors and warnings.
     assert_eq!(

@@ -1,5 +1,5 @@
 error: field `lines`: #[edifact(group)] cannot be combined with element/component positioning
-  --> tests/ui/fail_group_with_positioning.rs:15:15
+  --> tests/ui/fail_group_with_positioning.rs:14:15
    |
-15 |     #[edifact(group, element = 0)]
+14 |     #[edifact(group, element = 0)]
    |               ^^^^^

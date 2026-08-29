@@ -7,8 +7,7 @@
 //! therefore unparseable by a UTF-8-only reader.
 
 use edifact_rs::{
-    Charset, EdifactError, ValidationContext, Writer, decode_interchange, from_bytes,
-    from_reader_collect, sniff_charset,
+    Charset, EdifactError, ValidationContext, Writer, decode_interchange, from_bytes, sniff_charset,
 };
 
 /// `UNB+UNOC:3+…+NAD+BY+Müller` with `ü` as the raw Latin-1 byte `0xFC`.
@@ -98,29 +97,90 @@ fn stateful_and_multibyte_repertoires_are_refused_rather_than_mis_decoded() {
 }
 
 #[test]
-fn every_supported_repertoire_round_trips_its_own_characters() {
-    // One representative non-ASCII character per single-byte repertoire.
-    let cases = [
-        (Charset::UnoC, 'ü'),
-        (Charset::UnoD, 'ř'),
-        (Charset::UnoE, 'Я'),
-        (Charset::UnoF, 'π'),
-        (Charset::UnoG, 'ġ'),
-        (Charset::UnoH, 'ā'),
-        (Charset::UnoI, 'ب'),
-        (Charset::UnoJ, 'א'),
-        (Charset::UnoK, 'ğ'),
+fn every_byte_of_every_repertoire_round_trips_exactly() {
+    // Exhaustive rather than one representative character per repertoire: a
+    // single transposed table entry is a silent mojibake bug, and it only shows
+    // up on the one counterparty message that happens to use that character.
+    //
+    // Two directions, both required for a value to survive a decode/encode pass:
+    //   byte -> char -> byte   for every byte the repertoire defines
+    //   char -> byte -> char   for every character it permits
+    let repertoires = [
+        Charset::UnoA,
+        Charset::UnoB,
+        Charset::UnoC,
+        Charset::UnoD,
+        Charset::UnoE,
+        Charset::UnoF,
+        Charset::UnoG,
+        Charset::UnoH,
+        Charset::UnoI,
+        Charset::UnoJ,
+        Charset::UnoK,
     ];
-    for (charset, ch) in cases {
-        let text = format!("A{ch}Z");
-        assert!(charset.permits(ch), "{charset} should permit {ch:?}");
 
-        let encoded = charset.encode(&text).expect("encode");
-        assert_eq!(encoded.len(), 3, "{charset}: expected one byte per char");
+    for charset in repertoires {
+        let mut defined = 0usize;
+        for byte in 0u8..=0xFF {
+            let single = [byte];
+            let Ok(decoded) = charset.decode(&single) else {
+                continue; // the repertoire leaves this slot undefined
+            };
+            defined += 1;
+            let mut chars = decoded.chars();
+            let ch = chars.next().expect("one byte decodes to one character");
+            assert!(
+                chars.next().is_none(),
+                "{charset}: 0x{byte:02X} decoded to >1 char"
+            );
 
-        let decoded = charset.decode(&encoded).expect("decode");
-        assert_eq!(decoded, text, "{charset} round-trip");
+            let reencoded = charset
+                .encode(&decoded)
+                .unwrap_or_else(|e| panic!("{charset}: decoded 0x{byte:02X} to {ch:?}, which it then refused to encode: {e}"));
+            assert_eq!(
+                reencoded.as_ref(),
+                &single[..],
+                "{charset}: 0x{byte:02X} -> {ch:?} -> {reencoded:02X?}, not a round trip",
+            );
+        }
+
+        // ASCII is common to every repertoire; a single-byte one adds at most 128 more.
+        assert!(
+            defined >= 128,
+            "{charset}: only {defined} byte values decode, expected at least the ASCII range",
+        );
+
+        // The other direction, over every character the repertoire admits.
+        for code in 0u32..=0xFFFF {
+            let Some(ch) = char::from_u32(code) else {
+                continue;
+            };
+            if !charset.permits(ch) {
+                continue;
+            }
+            let text = ch.to_string();
+            let encoded = charset.encode(&text).unwrap_or_else(|e| {
+                panic!("{charset} permits {ch:?} but refuses to encode it: {e}")
+            });
+            let decoded = charset.decode(&encoded).unwrap_or_else(|e| {
+                panic!("{charset}: encoded {ch:?} to bytes it cannot decode: {e}")
+            });
+            assert_eq!(
+                decoded, text,
+                "{charset}: {ch:?} did not survive encode/decode"
+            );
+        }
     }
+}
+
+#[test]
+fn utf8_is_the_identity_transform() {
+    // `UNOY` must neither transcode nor reject: it is already UTF-8.
+    let text = "Grüße — Ω 漢字 🦀";
+    let encoded = Charset::UnoY.encode(text).expect("encode");
+    assert_eq!(encoded.as_ref(), text.as_bytes());
+    assert_eq!(Charset::UnoY.decode(&encoded).expect("decode"), text);
+    assert!(text.chars().all(|c| Charset::UnoY.permits(c)));
 }
 
 #[test]
@@ -179,8 +239,10 @@ fn the_decoding_reader_matches_whole_slice_decoding() {
 #[test]
 fn the_decoding_reader_feeds_the_streaming_parser() {
     let raw = unoc_interchange();
-    let segments = from_reader_collect(Charset::UnoC.decoding_reader(std::io::Cursor::new(raw)))
-        .expect("parse");
+    let segments =
+        edifact_rs::from_reader(Charset::UnoC.decoding_reader(std::io::Cursor::new(raw)))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
     assert_eq!(segments[1].element_str(1), Some("Müller"));
 }
 
@@ -282,7 +344,7 @@ fn the_validator_reports_values_outside_the_declared_repertoire() {
     let report = ValidationContext::builder()
         .with_charset_validation()
         .build()
-        .validate_lenient(&segments);
+        .validate(&segments);
 
     let issue = report
         .errors()
@@ -308,7 +370,7 @@ fn a_conformant_interchange_produces_no_repertoire_findings() {
     let report = ValidationContext::builder()
         .with_charset_validation()
         .build()
-        .validate_lenient(&segments);
+        .validate(&segments);
 
     assert!(
         !report
@@ -330,7 +392,7 @@ fn a_pinned_repertoire_applies_to_message_level_slices() {
     let unchecked = ValidationContext::builder()
         .with_charset_validation()
         .build()
-        .validate_lenient(&segments);
+        .validate(&segments);
     assert!(
         !unchecked
             .errors()
@@ -341,7 +403,7 @@ fn a_pinned_repertoire_applies_to_message_level_slices() {
     let pinned = ValidationContext::builder()
         .with_charset_validation_for(Charset::UnoA)
         .build()
-        .validate_lenient(&segments);
+        .validate(&segments);
     assert!(
         pinned
             .errors()
@@ -361,7 +423,7 @@ fn repetitions_are_checked_too() {
     let report = ValidationContext::builder()
         .with_charset_validation()
         .build()
-        .validate_lenient(&segments);
+        .validate(&segments);
 
     assert!(
         report
@@ -414,8 +476,9 @@ fn a_utf8_payload_survives_the_decoding_reader() {
     // ones that need no decoding at all.
     let raw = "UNB+UNOY:4+S+R+260101:0900+IC1'NAD+BY+Müller'UNZ+0+IC1'".as_bytes();
     for charset in [Charset::UnoY, Charset::UnoA, Charset::UnoB] {
-        let segments =
-            from_reader_collect(charset.decoding_reader(std::io::Cursor::new(raw))).expect("parse");
+        let segments = edifact_rs::from_reader(charset.decoding_reader(std::io::Cursor::new(raw)))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
         assert_eq!(segments[1].element_str(1), Some("Müller"), "{charset}");
     }
 }
@@ -425,20 +488,25 @@ fn decode_reader_discovers_the_repertoire_from_the_stream() {
     use edifact_rs::decode_reader;
 
     let raw = unoc_interchange();
-    let segments = from_reader_collect(decode_reader(std::io::Cursor::new(raw)).expect("sniff"))
-        .expect("parse");
+    let segments =
+        edifact_rs::from_reader(decode_reader(std::io::Cursor::new(raw)).expect("sniff"))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
     assert_eq!(segments[1].element_str(1), Some("Müller"));
 
     // A UTF-8 interchange goes through untouched …
     let utf8 = "UNB+UNOY:4+S+R+260101:0900+IC1'NAD+BY+Müller'UNZ+0+IC1'".as_bytes();
-    let segments = from_reader_collect(decode_reader(std::io::Cursor::new(utf8)).expect("sniff"))
-        .expect("parse");
+    let segments =
+        edifact_rs::from_reader(decode_reader(std::io::Cursor::new(utf8)).expect("sniff"))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
     assert_eq!(segments[1].element_str(1), Some("Müller"));
 
     // … and so does a bare message with no UNB to sniff.
     let bare = b"UNH+1+ORDERS:D:96A:UN'BGM+220'UNT+3+1'";
     let segments =
-        from_reader_collect(decode_reader(std::io::Cursor::new(&bare[..])).expect("sniff"))
+        edifact_rs::from_reader(decode_reader(std::io::Cursor::new(&bare[..])).expect("sniff"))
+            .collect::<Result<Vec<_>, _>>()
             .expect("parse");
     assert_eq!(segments.len(), 3);
 }
@@ -459,9 +527,10 @@ fn decode_reader_handles_a_stream_that_returns_one_byte_at_a_time() {
         }
     }
 
-    let segments = from_reader_collect(
+    let segments = edifact_rs::from_reader(
         decode_reader(Trickle(std::io::Cursor::new(unoc_interchange()))).expect("sniff"),
     )
+    .collect::<Result<Vec<_>, _>>()
     .expect("parse");
     assert_eq!(segments[1].element_str(1), Some("Müller"));
 }
@@ -536,7 +605,8 @@ fn decoding_entry_points_pass_reader_config_through() {
 #[test]
 fn an_ascii_interchange_decodes_to_the_same_segments() {
     let raw = b"UNB+UNOA:3+S+R+260101:0900+IC1'BGM+220'UNZ+0+IC1'";
-    let plain: Vec<_> = edifact_rs::from_bytes_owned(raw)
+    let plain: Vec<_> = from_bytes(raw)
+        .map(|r| r.map(|s| s.into_owned()))
         .collect::<Result<Vec<_>, _>>()
         .expect("plain");
     let decoded = edifact_rs::from_bytes_decoded(raw).expect("decoded");

@@ -1,5 +1,5 @@
 error: put the data element identifier in `element`: `#[edifact(element = "3055")]` resolves both the element and the component position from the directory
-  --> tests/ui/fail_component_code_string.rs:17:40
+  --> tests/ui/fail_component_code_string.rs:16:40
    |
-17 |     #[edifact(element = 1, component = "3055")]
+16 |     #[edifact(element = 1, component = "3055")]
    |                                        ^^^^^^

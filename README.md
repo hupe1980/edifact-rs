@@ -114,6 +114,7 @@ of the places that usually goes wrong:
 
 | | |
 |---|---|
+| **One segment type, borrowed or owned** | `Segment<'a>` holds its text as `Cow`, so `from_bytes` borrows from your buffer and `from_reader` owns (`OwnedSegment` is `Segment<'static>`). Covariance means a `&[OwnedSegment]` goes anywhere a `&[Segment<'_>]` does: one function per job, no `_owned` twin to remember, and no conversion step between the two paths. |
 | **Zero-copy by default** | Tags and values borrow from the input slice. The only per-segment allocation is the element vector; an owned string appears solely where a release escape had to be resolved. |
 | **Constant-memory streaming** | Reader iterators yield one segment at a time; message windows group them into `UNH`…`UNT` units. A multi-gigabyte interchange costs one message of peak memory. |
 | **Identifiers, not indices** | Address a field by its UN/EDIFACT data element identifier. The derive resolves it during const evaluation, so a stale identifier fails the build instead of reading the element next door. |
@@ -178,7 +179,7 @@ none of it can drift from the crate.
 | [Profile Packs](https://hupe1980.github.io/edifact-rs/docs/profile-packs/) | Authoring, composing, and filtering business rules |
 | [Diagnostics](https://hupe1980.github.io/edifact-rs/docs/diagnostics/) | `miette` integration |
 | [Async Integration](https://hupe1980.github.io/edifact-rs/docs/async-integration/) | Bridging to `tokio` |
-| [Error Reference](https://hupe1980.github.io/edifact-rs/docs/error-reference/) | Every stable code `E001`–`E046` |
+| [Error Reference](https://hupe1980.github.io/edifact-rs/docs/error-reference/) | Every stable code `E001`–`E053` |
 | [Performance](https://hupe1980.github.io/edifact-rs/docs/performance/) | Allocation budgets, benchmarks, tuning |
 
 Runnable cookbooks live in

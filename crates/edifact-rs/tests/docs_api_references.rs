@@ -2,17 +2,11 @@
 //!
 //! Guides carry a mix of runnable examples (compiled as doctests) and
 //! illustrative fragments marked `rust,ignore`.  Only the former are checked by
-//! the compiler, so a rename could still leave a stale name in an ignored
-//! snippet — which is exactly how several guides came to reference private
-//! module paths and methods that had never existed.
+//! the compiler, so this covers the ignored snippets too: it extracts every
+//! item imported from `edifact_rs` across the guides and asserts each is public.
 //!
-//! This test extracts the item names imported from `edifact_rs` across all
-//! guides and asserts each one is in the crate's public API, covering ignored
-//! snippets too.
-//!
-//! When this fails, either the guide is stale or the export was removed on
-//! purpose — update whichever is wrong; do not add the name to the allow-list
-//! unless it is genuinely re-exported.
+//! The public API is read out of `src/lib.rs` rather than mirrored in a list
+//! here, so it cannot go stale in either direction.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -25,188 +19,110 @@ fn docs_dir() -> PathBuf {
         .expect("site/content/docs must exist under the workspace root")
 }
 
-/// Every name re-exported from the crate root, plus the public modules.
+/// Every name reachable as `edifact_rs::<name>`, parsed out of `src/lib.rs`.
 ///
-/// Kept as an explicit list rather than derived at runtime because Rust has no
-/// stable reflection over a crate's exports.  `cargo doc` is the source of
-/// truth; this mirrors it.
-const PUBLIC_API: &[&str] = &[
-    // modules
-    "contrl",
-    "de",
-    "directory_validator",
-    "group",
-    "report",
-    "ser",
-    // core model
-    "Components",
-    "OwnedComponents",
-    "BorrowedElement",
-    "BorrowedSegment",
-    "Element",
-    "OwnedElement",
-    "OwnedSegment",
-    "Segment",
-    "Span",
-    // errors
-    "EdifactError",
-    "IoError",
-    // character repertoires
-    "Charset",
-    "CharsetValidator",
-    "SyntaxValidator",
-    "severity_for_error",
-    // layout auditing
-    "LayoutAudit",
-    "LayoutFinding",
-    "LayoutSlot",
-    "audit_directory",
-    "Insignificant",
-    // data element representations
-    "Repr",
-    "ReprKind",
-    "DecodingReader",
-    "charset",
-    "decode_interchange",
-    "decode_reader",
-    "sniff_charset",
-    "DecodingSegmentStream",
-    "from_bytes_decoded",
-    "from_bytes_decoded_with_config",
-    "from_reader_decoded",
-    "from_reader_decoded_with_config",
-    // CONTRL acknowledgements (ISO 9735-4)
-    "Action",
-    "Contrl",
-    "ReportingLevel",
-    "SyntaxError",
-    // ISO 9735 service-segment layouts
-    "service",
-    // envelope
-    "FunctionalGroupEnvelope",
-    "GroupIdentifier",
-    "InterchangeEnvelope",
-    "LenientResult",
-    "MessageEnvelope",
-    "MessageIdentifier",
-    "ValidatedInterchange",
-    "parse_ung",
-    "parse_unh",
-    "validate_envelope",
-    "validate_envelope_from_owned",
-    "validate_envelope_lenient",
-    "validate_envelope_lenient_from_owned",
-    "validate_envelope_owned",
-    "validate_envelope_lenient_owned",
-    // grouping
-    "GroupDef",
-    "SegmentGroupIndexed",
-    "group_owned_segments_indexed",
-    "group_segments_indexed",
-    // parser / tokenizer
-    "OwnedSegmentStream",
-    "Parser",
-    "ReaderConfig",
-    "ServiceStringAdvice",
-    "Token",
-    "Tokenizer",
-    "from_bufread",
-    "from_bufread_stream",
-    "from_bufread_stream_with_config",
-    "from_bytes",
-    "from_bytes_owned",
-    "from_bytes_owned_with_config",
-    "from_bytes_windows",
-    "from_bytes_with_config",
-    "from_reader",
-    "from_reader_collect",
-    "from_reader_with_config",
-    // writer / events
-    "AsDataElement",
-    "DataElement",
-    "EdifactEvent",
-    "EventEmitter",
-    "MessageWriter",
-    "OwnedEdifactEvent",
-    "VecEmitter",
-    "Writer",
-    "WriterEmitter",
-    "elements",
-    "emit_sparse_segment",
-    "segments_to_bytes",
-    "segments_to_bytes_owned",
-    "to_writer",
-    // validation
-    "EnvelopeValidator",
-    "ProfileRule",
-    "ProfileRulePack",
-    "ValidationContext",
-    "ValidationContextBuilder",
-    "ValidationIssue",
-    "ValidationLayer",
-    "ValidationReport",
-    "ValidationRuleContext",
-    "ValidationSeverity",
-    "Validator",
-    "validate_each",
-    // directory validation
-    "ComponentRef",
-    "DirectoryValidator",
-    "DirectoryValidatorBuilder",
-    "ElementPath",
-    "ElementRef",
-    "OwnedComponentRef",
-    "OwnedElementRef",
-    "OwnedSegmentDef",
-    "SegmentDefinition",
-    "SegmentLayout",
-    "Status",
-    // serde layer
-    "CompositeElement",
-    "DecimalFloat",
-    "DecimalFloatDisplay",
-    "DispatchedMessage",
-    "EdifactCompositeDeserialize",
-    "EdifactCompositeSerialize",
-    "EdifactDeserialize",
-    "EdifactSegmentTag",
-    "EdifactSerialize",
-    "MessageDispatch",
-    "MessageWindow",
-    "MessageWindowsIter",
-    "MessageWindowsSliceIter",
-    "OwnedMessageWindow",
-    "SegmentAccessor",
-    "composite_element",
-    "contiguous_groups_by_qualifier",
-    "contiguous_groups_iter",
-    "deserialize",
-    "deserialize_all_from_reader",
-    "deserialize_all_streaming",
-    "deserialize_first_from_reader",
-    "deserialize_first_streaming",
-    "deserialize_messages_bytes",
-    "deserialize_messages_from_reader",
-    "deserialize_str",
-    "element_str",
-    "find_qualified_segment",
-    "find_qualified_segment_owned",
-    "find_segment",
-    "find_segment_owned",
-    "find_segment_typed",
-    "find_segments_iter",
-    "find_segments_typed",
-    "get_components_iter",
-    "groups_are_contiguous_by_qualifier",
-    "message_windows_from_reader",
-    "optional_component",
-    "optional_element",
-    "qualifier_matches_pattern",
-    "required_component",
-    "required_element",
-    "to_bytes",
-    "to_edifact_string",
-];
+/// Covers the three ways an item reaches the crate root: a `pub use` re-export
+/// (braced or single), a `pub mod` declaration, and an item defined at the root
+/// itself.  `#[macro_export]` macros land at the root too and are picked up from
+/// their definition.
+fn public_api() -> BTreeSet<String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let lib = std::fs::read_to_string(root.join("lib.rs")).expect("src/lib.rs must be readable");
+    let mut api = BTreeSet::new();
+
+    // `pub use path::{A, B as C, d};` and `pub use path::Item;`
+    let mut rest = lib.as_str();
+    while let Some(pos) = rest.find("pub use ") {
+        rest = &rest[pos + "pub use ".len()..];
+        let Some(end) = rest.find(';') else { break };
+        let stmt = &rest[..end];
+        rest = &rest[end + 1..];
+        match stmt.find('{') {
+            Some(brace) => {
+                let body = stmt[brace + 1..].trim_end().trim_end_matches('}');
+                for part in body.split(',') {
+                    // `X as Y` re-exports under `Y`.
+                    let name = part.split_whitespace().last().unwrap_or("");
+                    if !name.is_empty() {
+                        api.insert(name.trim_end_matches('}').to_owned());
+                    }
+                }
+            }
+            None => {
+                if let Some(name) = stmt.rsplit("::").next() {
+                    let name = name.split_whitespace().last().unwrap_or("").trim();
+                    if !name.is_empty() {
+                        api.insert(name.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    // `pub mod name;` and root-level `pub fn` / `pub struct` / `pub enum` / `pub trait`.
+    for line in lib.lines() {
+        let line = line.trim_start();
+        for (prefix, terminators) in [
+            ("pub mod ", &[';'][..]),
+            ("pub fn ", &['(', '<'][..]),
+            ("pub struct ", &['<', '{', '(', ';'][..]),
+            ("pub enum ", &['<', '{'][..]),
+            ("pub trait ", &['<', '{', ':'][..]),
+        ] {
+            if let Some(tail) = line.strip_prefix(prefix) {
+                let name: String = tail
+                    .chars()
+                    .take_while(|c| !terminators.contains(c) && !c.is_whitespace())
+                    .collect();
+                if !name.is_empty() {
+                    api.insert(name);
+                }
+            }
+        }
+    }
+
+    // `#[macro_export]` macros are addressable at the crate root wherever they
+    // are defined, so scan the whole module tree for them.
+    for entry in walk(&root) {
+        let text = std::fs::read_to_string(&entry).expect("module must be readable");
+        let mut rest = text.as_str();
+        while let Some(pos) = rest.find("#[macro_export]") {
+            rest = &rest[pos + "#[macro_export]".len()..];
+            if let Some(decl) = rest.find("macro_rules! ") {
+                let tail = &rest[decl + "macro_rules! ".len()..];
+                let name: String = tail.chars().take_while(|c| !c.is_whitespace()).collect();
+                if !name.is_empty() {
+                    api.insert(name);
+                }
+            }
+        }
+    }
+
+    assert!(
+        api.len() > 80,
+        "parsed only {} public items from lib.rs — the parser is out of step \
+         with how the crate declares its exports",
+        api.len(),
+    );
+    api
+}
+
+/// Every `.rs` file under `dir`, recursively.
+fn walk(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+    out
+}
 
 /// Extract every item named in a `use edifact_rs::...;` statement.
 ///
@@ -258,7 +174,7 @@ fn imported_names(source: &str) -> BTreeSet<String> {
 
 #[test]
 fn guides_only_reference_public_api_items() {
-    let api: BTreeSet<&str> = PUBLIC_API.iter().copied().collect();
+    let api = public_api();
     let mut problems: Vec<String> = Vec::new();
 
     let mut sources: Vec<(String, String)> = Vec::new();
@@ -289,28 +205,6 @@ fn guides_only_reference_public_api_items() {
         "guides reference items that are not part of the public API:\n  {}",
         problems.join("\n  ")
     );
-}
-
-#[test]
-fn public_api_list_is_accurate() {
-    // Guard against the list above drifting into fiction: spot-check that a
-    // representative sample really is importable at the crate root.
-    #[allow(unused_imports)]
-    use edifact_rs::{
-        Action, Contrl, LayoutAudit, LayoutFinding, LayoutSlot, ReportingLevel, SyntaxError,
-        SyntaxValidator, from_bytes_decoded, from_reader_decoded,
-    };
-    #[allow(unused_imports)]
-    use edifact_rs::{
-        AsDataElement, ComponentRef, DataElement, DirectoryValidator, EdifactError, Element,
-        ElementPath, EventEmitter, LenientResult, OwnedComponentRef, OwnedSegment,
-        OwnedSegmentStream, ProfileRulePack, ReaderConfig, Segment, SegmentLayout,
-        ServiceStringAdvice, Span, Token, Tokenizer, ValidationContext, ValidationIssue,
-        ValidationReport, Writer, WriterEmitter, emit_sparse_segment, from_bytes,
-        to_edifact_string, validate_envelope, validate_envelope_lenient,
-    };
-    #[allow(unused_imports)]
-    use edifact_rs::{Insignificant, Repr, ReprKind, audit_directory};
 }
 
 /// Every `EdifactError` variant must have an entry in the error reference guide.

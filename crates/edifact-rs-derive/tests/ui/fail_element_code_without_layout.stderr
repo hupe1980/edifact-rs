@@ -1,5 +1,5 @@
 error: field `qualifier`: `element = "3035"` addresses a UN/EDIFACT data element identifier, which needs a directory to resolve against; add #[edifact(layout = path::to::SEGMENT_DEFINITION)] to the struct
-  --> tests/ui/fail_element_code_without_layout.rs:17:15
+  --> tests/ui/fail_element_code_without_layout.rs:16:15
    |
-17 |     #[edifact(element = "3035")]
+16 |     #[edifact(element = "3035")]
    |               ^^^^^^^

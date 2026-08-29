@@ -1,5 +1,5 @@
 error: field `rff`: #[edifact(composite)] is only valid on segment structs
-  --> tests/ui/fail_composite_on_message.rs:27:15
+  --> tests/ui/fail_composite_on_message.rs:24:15
    |
-27 |     #[edifact(composite)]
+24 |     #[edifact(composite)]
    |               ^^^^^^^^^

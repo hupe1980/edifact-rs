@@ -1,5 +1,5 @@
 error: EdifactSerialize/EdifactDeserialize only support structs with named fields
-  --> tests/ui/fail_tuple_struct.rs:14:1
+  --> tests/ui/fail_tuple_struct.rs:13:1
    |
-14 | struct Tuple(String);
+13 | struct Tuple(String);
    | ^^^^^^

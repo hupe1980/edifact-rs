@@ -1,5 +1,5 @@
 error: field `second` maps to element 1 component 0, which is already claimed by field `first`; give each field a distinct `#[edifact(element = ..., component = ...)]` slot
   --> tests/ui/fail_duplicate_element_slot.rs:17:5
    |
-17 |     second: String,
+17 |     second: String}
    |     ^^^^^^

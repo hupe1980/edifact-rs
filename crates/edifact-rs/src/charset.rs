@@ -398,14 +398,14 @@ impl Charset {
     /// # Example
     ///
     /// ```
-    /// use edifact_rs::{Charset, from_reader_collect};
+    /// use edifact_rs::{Charset, from_reader};
     ///
     /// let mut raw = b"UNB+UNOC:3+S+R+200101:0900+1'NAD+BY+M".to_vec();
     /// raw.push(0xFC);
     /// raw.extend_from_slice(b"ller'UNZ+0+1'");
     ///
     /// let reader = Charset::UnoC.decoding_reader(std::io::Cursor::new(raw));
-    /// let segments = from_reader_collect(reader)?;
+    /// let segments = from_reader(reader).collect::<Result<Vec<_>, _>>()?;
     /// assert_eq!(segments[1].element_str(1), Some("Müller"));
     /// # Ok::<(), edifact_rs::EdifactError>(())
     /// ```
@@ -580,14 +580,15 @@ const SNIFF_PROBE_BYTES: usize = 4096;
 /// # Example
 ///
 /// ```
-/// use edifact_rs::{decode_reader, from_reader_collect};
+/// use edifact_rs::{decode_reader, from_reader};
 ///
 /// let mut raw = b"UNB+UNOC:3+S+R+260101:0900+IC1'NAD+BY+M".to_vec();
 /// raw.push(0xFC); // `ü` in ISO 8859-1
 /// raw.extend_from_slice(b"ller'UNZ+0+IC1'");
 ///
 /// // The repertoire is discovered, not declared by the caller.
-/// let segments = from_reader_collect(decode_reader(std::io::Cursor::new(raw))?)?;
+/// let segments: Vec<_> = from_reader(decode_reader(std::io::Cursor::new(raw))?)
+///     .collect::<Result<_, _>>()?;
 /// assert_eq!(segments[1].element_str(1), Some("Müller"));
 /// # Ok::<(), edifact_rs::EdifactError>(())
 /// ```

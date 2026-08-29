@@ -25,7 +25,7 @@ use crate::model::Span;
 /// [`QualifierMismatch`][crate::EdifactError::QualifierMismatch] is deliberately
 /// *not* a warning: it is only ever raised for `UNZ`/`UNE`/`UNT` control-reference
 /// mismatches, which are hard ISO 9735-1 violations. Downgrading it let a spliced
-/// or truncated interchange pass `validate_strict`.
+/// or truncated interchange pass `validate(..).result()`.
 #[must_use]
 pub fn severity_for_error(error: &crate::EdifactError) -> ValidationSeverity {
     use crate::EdifactError as E;
@@ -602,7 +602,7 @@ impl ValidationReport {
     /// # Example
     ///
     /// ```rust,ignore
-    /// let mut report = ctx.validate_lenient(&segments);
+    /// let mut report = ctx.validate(&segments);
     /// let advisory = ValidationReport::from_issues(
     ///     vec![],
     ///     vec![ValidationIssue::new(ValidationSeverity::Warning, "profile layer skipped")

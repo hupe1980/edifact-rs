@@ -4,7 +4,7 @@ use super::pack::ProfileRulePack;
 use super::{
     CharsetValidator, EnvelopeValidator, ValidationLayer, ValidationRuleContext, Validator,
 };
-use crate::{OwnedSegment, Segment, ValidationReport, ValidationSeverity};
+use crate::{Segment, ValidationReport, ValidationSeverity};
 use std::any::Any;
 use std::sync::Arc;
 
@@ -13,60 +13,29 @@ pub(super) struct LayeredValidator {
     pub(super) validator: Box<dyn Validator + Send + Sync>,
 }
 
-/// Runtime validation context for progressive layered validation.
+/// Runs the four validation layers over one segment slice, collecting every
+/// issue into a single [`ValidationReport`].
 ///
-/// # Architecture
+/// | Layer | [`ValidationLayer`] | Default | Checks | Provided by |
+/// |---|---|---|---|---|
+/// | Envelope | `Envelope` | off | `UNB`/`UNH`/`UNT`/`UNZ` structure and counts | [`EnvelopeValidator`] |
+/// | Structure | `Structure` | on | segment presence, order, arity | `DirectoryValidator` |
+/// | Code-list | `CodeList` | on | DE values against the directory's code lists | `DirectoryValidator` |
+/// | Profile | `Profile` | on | partner and industry business rules | [`ProfileRulePack`] |
 ///
-/// `edifact-rs` validation is organized into **four independent layers**, each
-/// responsible for a distinct class of checks.  All layers run against the same
-/// segment slice; their issues are collected into a single [`ValidationReport`].
+/// Validators run in registration order within a layer; layers have no ordering
+/// beyond that. With the envelope layer on, `UNB`/`UNZ`/`UNG`/`UNE` are excluded
+/// from the slice later layers see.
 ///
-/// | Layer | [`ValidationLayer`] variant | Default | Type |
-/// |---|---|---|---|
-/// | **Envelope** | `Envelope` | disabled | [`EnvelopeValidator`] |
-/// | **Structure** | `Structure` | enabled | external (e.g. `DirectoryValidator`) |
-/// | **Code-list** | `CodeList` | enabled | external |
-/// | **Profile** | `Profile` | enabled | [`ProfileRulePack`] / `Arc<ProfileRulePack>` |
+/// A pack can be scoped by message type (`for_message_type`) and
+/// association-assigned code (`for_release`).
 ///
-/// Validators are run in registration order within each enabled layer.  Layers
-/// themselves have no enforced ordering beyond the order in which they are added
-/// via the builder.
+/// # Group-aware validation
 ///
-/// ## Envelope layer
-///
-/// Checks `UNB`/`UNH`/`UNT`/`UNZ` structural invariants: presence, message
-/// count, and segment count.  Enabled by calling
-/// [`ValidationContextBuilder::with_envelope_validation`].  When enabled, the
-/// envelope segments (`UNB`, `UNZ`, `UNG`, `UNE`) are *excluded* from the slice
-/// passed to validators in subsequent layers.
-///
-/// ## Structure layer
-///
-/// Validates segment presence, order, and arity against an EDIFACT directory.
-/// Implemented by `DirectoryValidator` (registered as a `Structure`-layer
-/// validator via [`ValidationContextBuilder::with_validator`]).
-///
-/// ## Code-list layer
-///
-/// Validates DE values against EDIFACT code lists from the directory.  Also
-/// implemented by `DirectoryValidator`.
-///
-/// ## Profile layer
-///
-/// Applies downstream business rules (partner or industry profile rules,
-/// custom constraints)
-/// via [`ProfileRulePack`].  A pack can be scoped to specific EDIFACT message
-/// types (`for_message_type`) and association-assigned codes (`for_release`).
-///
-/// ## Group-aware validation
-///
-/// Validators that implement [`Validator::validate_group_batch`] can additionally
-/// enforce rules scoped to specific segment groups (e.g. "DTM must appear in every
-/// SG5 occurrence").  Call [`validate_lenient_grouped`] with a pre-built
-/// [`SegmentGroupIndexed`] tree to activate both the flat and group passes.
-///
-/// [`SegmentGroupIndexed`]: crate::SegmentGroupIndexed
-/// [`validate_lenient_grouped`]: ValidationContext::validate_lenient_grouped
+/// [`validate_grouped`][Self::validate_grouped] runs the flat pass and then a
+/// group pass over a [`SegmentGroupIndexed`][crate::SegmentGroupIndexed] tree,
+/// so rules scoped to a segment group — "DTM must appear in every SG5" — can
+/// fire.
 ///
 /// # Example — building a context
 ///
@@ -88,7 +57,7 @@ pub(super) struct LayeredValidator {
 ///     .with_profile_pack_arc(Arc::clone(&*ORDERS_PACK))
 ///     .build();
 ///
-/// let report = ctx.validate_lenient(&segments);
+/// let report = ctx.validate(&segments);
 /// ```
 pub struct ValidationContext {
     pub(super) validators: Vec<LayeredValidator>,
@@ -184,12 +153,15 @@ impl ValidationContextBuilder {
         self
     }
 
-    /// Stop all validation as soon as the first `Critical`-severity issue is produced.
+    /// Stop validating once a `Critical`-severity issue has appeared.
     ///
-    /// When set, [`ValidationContext::validate_lenient`] returns immediately after the
-    /// first `Critical` issue from any validator, skipping all remaining packs and layers.
+    /// The check happens **between validators**, not between issues: the
+    /// validator that raised the `Critical` still finishes and contributes
+    /// everything it found, and every validator after it — in any layer — is
+    /// skipped. Bailing mid-validator would mean a report whose contents depend
+    /// on the order rules happen to run in.
     ///
-    /// Default: `false` (collect all issues across all layers).
+    /// Default: `false` (run every enabled layer and collect all issues).
     pub fn bail_on_first_critical(mut self, bail: bool) -> Self {
         self.inner.bail_on_first_critical = bail;
         self
@@ -331,7 +303,7 @@ impl ValidationContextBuilder {
     }
 
     /// Finalize builder and create context.
-    #[must_use = "call `.validate_lenient()` or `.validate_strict()` on the resulting context"]
+    #[must_use = "call `.validate()` on the resulting context"]
     pub fn build(self) -> ValidationContext {
         self.inner
     }
@@ -344,14 +316,14 @@ impl ValidationContext {
     }
 
     /// Execute validators in lenient mode for enabled layers.
-    pub fn validate_lenient(&self, segments: &[Segment<'_>]) -> ValidationReport {
+    pub fn validate(&self, segments: &[Segment<'_>]) -> ValidationReport {
         self.validate_with_context(segments, &self.build_rule_context())
     }
 
     /// Execute flat + group-aware validators in lenient mode.
     ///
     /// This method runs the full flat validation pass (same as
-    /// [`validate_lenient`](Self::validate_lenient)) **and** then runs the
+    /// [`validate_lenient`](Self::validate)) **and** then runs the
     /// group-aware pass by calling [`Validator::validate_group_batch`] on every
     /// validator.  Validators without group rules treat `validate_group_batch`
     /// as a no-op, so this is safe to call for any context.
@@ -360,7 +332,7 @@ impl ValidationContext {
     ///
     /// Use this method when you have already grouped your segments with
     /// [`group_segments_indexed`][crate::group_segments_indexed] or
-    /// [`group_owned_segments_indexed`][crate::group_owned_segments_indexed] and
+    /// [`group_segments_indexed`][crate::group_segments_indexed] and
     /// want group-presence or cross-group rules (via
     /// [`ProfileRulePack::with_scoped_group_rule_fn`][crate::ProfileRulePack::with_scoped_group_rule_fn])
     /// to fire.
@@ -378,9 +350,9 @@ impl ValidationContext {
     ///     .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
     /// let ctx = ValidationContext::builder().with_profile_pack(pack).build();
     ///
-    /// let report = ctx.validate_lenient_grouped(&tree, &segments);
+    /// let report = ctx.validate_grouped(&tree, &segments);
     /// ```
-    pub fn validate_lenient_grouped(
+    pub fn validate_grouped(
         &self,
         root: &crate::group::SegmentGroupIndexed<'_>,
         segments: &[Segment<'_>],
@@ -407,63 +379,6 @@ impl ValidationContext {
         };
         self.run_group_pass(root, segments, &mut report, group_ctx);
         report
-    }
-
-    /// Execute flat + group-aware validators in strict mode.
-    pub fn validate_strict_grouped(
-        &self,
-        root: &crate::group::SegmentGroupIndexed<'_>,
-        segments: &[Segment<'_>],
-    ) -> Result<ValidationReport, ValidationReport> {
-        self.validate_lenient_grouped(root, segments).result()
-    }
-
-    /// Execute flat + group-aware validators against owned segments in lenient mode.
-    pub fn validate_lenient_grouped_owned(
-        &self,
-        root: &crate::group::SegmentGroupIndexed<'_>,
-        segments: &[crate::OwnedSegment],
-    ) -> ValidationReport {
-        let base_ctx = self.build_rule_context();
-        // Phase 1: flat validation.
-        let mut report = self.validate_with_context_owned(segments, &base_ctx);
-        // Phase 2: group-aware validation — skip early if no validator has group
-        // rules, avoiding the O(n) borrowed-segment allocation entirely.
-        if !self
-            .validators
-            .iter()
-            .any(|lv| self.layer_enabled(lv.layer) && lv.validator.has_group_rules())
-        {
-            return report;
-        }
-        let borrowed: Vec<Segment<'_>> = segments.iter().map(|s| s.as_borrowed()).collect();
-        let unh_mt = borrowed
-            .iter()
-            .find(|s| s.tag == "UNH")
-            .and_then(|s| s.get_element(1))
-            .and_then(|e| e.get_component(0));
-        let ctx_with_type;
-        let group_ctx: &ValidationRuleContext<'_> = if let Some(mt) = unh_mt {
-            ctx_with_type = ValidationRuleContext {
-                metadata: base_ctx.metadata,
-                message_ref: base_ctx.message_ref,
-                message_type: Some(mt),
-            };
-            &ctx_with_type
-        } else {
-            &base_ctx
-        };
-        self.run_group_pass(root, &borrowed, &mut report, group_ctx);
-        report
-    }
-
-    /// Execute flat + group-aware validators against owned segments in strict mode.
-    pub fn validate_strict_grouped_owned(
-        &self,
-        root: &crate::group::SegmentGroupIndexed<'_>,
-        segments: &[crate::OwnedSegment],
-    ) -> Result<ValidationReport, ValidationReport> {
-        self.validate_lenient_grouped_owned(root, segments).result()
     }
 
     /// Phase-2 group pass: call `validate_group_batch` on each enabled validator.
@@ -502,7 +417,7 @@ impl ValidationContext {
     /// `message_type` is set to `None` here; the concrete validation method
     /// (`validate_with_context`) re-extracts the message type from the `UNH`
     /// segment, so there is no information loss.
-    pub fn validate_lenient_with<T: Any + Send + Sync>(
+    pub fn validate_with<T: Any + Send + Sync>(
         &self,
         segments: &[Segment<'_>],
         value: &T,
@@ -513,28 +428,6 @@ impl ValidationContext {
             message_type: None,
         };
         self.validate_with_context(segments, &ctx)
-    }
-
-    /// Execute validators in strict mode for enabled layers.
-    pub fn validate_strict(
-        &self,
-        segments: &[Segment<'_>],
-    ) -> Result<ValidationReport, ValidationReport> {
-        self.validate_lenient(segments).result()
-    }
-
-    /// Execute validators in strict mode with per-call typed metadata.
-    pub fn validate_strict_with<T: Any + Send + Sync>(
-        &self,
-        segments: &[Segment<'_>],
-        value: &T,
-    ) -> Result<ValidationReport, ValidationReport> {
-        self.validate_lenient_with(segments, value).result()
-    }
-
-    /// Execute validators in lenient mode against an owned-segment slice.
-    pub fn validate_lenient_owned(&self, segments: &[OwnedSegment]) -> ValidationReport {
-        self.validate_with_context_owned(segments, &self.build_rule_context())
     }
 
     fn build_rule_context(&self) -> ValidationRuleContext<'_> {
@@ -550,103 +443,6 @@ impl ValidationContext {
                 message_ref: self.message_ref.as_deref(),
                 message_type: None,
             })
-    }
-
-    fn validate_with_context_owned(
-        &self,
-        segments: &[OwnedSegment],
-        context: &ValidationRuleContext<'_>,
-    ) -> ValidationReport {
-        let mut report = ValidationReport::default();
-        // Pre-extract UNH message type once (F-017).
-        let unh_message_type: Option<String> = segments
-            .iter()
-            .find(|s| s.tag == "UNH")
-            .and_then(|s| s.component_str(1, 0))
-            .map(str::to_owned);
-        let ctx_with_type;
-        let effective_ctx: &ValidationRuleContext<'_> = if let Some(ref mt) = unh_message_type {
-            ctx_with_type = ValidationRuleContext {
-                metadata: context.metadata,
-                message_ref: context.message_ref,
-                message_type: Some(mt.as_str()),
-            };
-            &ctx_with_type
-        } else {
-            context
-        };
-        let mut full_borrowed: Option<Vec<Segment<'_>>> = None;
-        let mut filtered_borrowed: Option<Vec<Segment<'_>>> = None;
-        // Decided once, up front.  Deriving this from a flag flipped as the loop
-        // walks `self.validators` made the filtering depend on *registration*
-        // order, so moving `.with_envelope_validation()` in the builder chain
-        // silently changed which segments later layers saw.
-        let envelope_active = self.envelope_layer_active();
-
-        for lv in &self.validators {
-            if !self.layer_enabled(lv.layer) {
-                continue;
-            }
-            if lv.layer == ValidationLayer::Envelope {
-                let active = full_borrowed
-                    .get_or_insert_with(|| segments.iter().map(|s| s.as_borrowed()).collect());
-                lv.validator
-                    .validate_batch(active, &mut report, effective_ctx);
-            } else if envelope_active {
-                let active = filtered_borrowed.get_or_insert_with(|| {
-                    segments
-                        .iter()
-                        .filter(|s| !matches!(s.tag.as_str(), "UNB" | "UNZ" | "UNG" | "UNE"))
-                        .map(|s| s.as_borrowed())
-                        .collect()
-                });
-                lv.validator
-                    .validate_batch(active, &mut report, effective_ctx);
-            } else {
-                let active = full_borrowed
-                    .get_or_insert_with(|| segments.iter().map(|s| s.as_borrowed()).collect());
-                lv.validator
-                    .validate_batch(active, &mut report, effective_ctx);
-            }
-            if self.bail_on_first_critical && report.has_critical_errors() {
-                break;
-            }
-        }
-
-        if let Some(ref msg_ref) = self.message_ref {
-            for issue in report
-                .errors
-                .iter_mut()
-                .chain(report.warnings.iter_mut())
-                .chain(report.infos.iter_mut())
-            {
-                if issue.message_ref.is_none() {
-                    issue.message_ref = Some(msg_ref.clone());
-                }
-            }
-        }
-        for issue in &self.static_issues {
-            match issue.severity {
-                ValidationSeverity::Critical | ValidationSeverity::Error => {
-                    report.add_error(issue.clone());
-                }
-                ValidationSeverity::Warning => {
-                    report.warnings.push(issue.clone());
-                }
-                ValidationSeverity::Info => {
-                    report.infos.push(issue.clone());
-                }
-            }
-        }
-        report
-    }
-
-    /// Execute validators in strict mode against an owned-segment slice.
-    pub fn validate_strict_owned(
-        &self,
-        segments: &[OwnedSegment],
-    ) -> Result<ValidationReport, ValidationReport> {
-        self.validate_lenient_owned(segments).result()
     }
 
     fn validate_with_context(
@@ -694,7 +490,7 @@ impl ValidationContext {
                         None => filtered.get_or_insert_with(|| {
                             segments
                                 .iter()
-                                .filter(|s| !matches!(s.tag, "UNB" | "UNZ" | "UNG" | "UNE"))
+                                .filter(|s| !matches!(s.tag(), "UNB" | "UNZ" | "UNG" | "UNE"))
                                 .cloned()
                                 .collect()
                         }),
@@ -765,7 +561,7 @@ impl ValidationContext {
     ///
     /// for (ref_no, message_segments) in messages {
     ///     let child = base_ctx.fork_with_message_ref(&ref_no);
-    ///     let report = child.validate_lenient(&message_segments);
+    ///     let report = child.validate(&message_segments);
     /// }
     /// ```
     pub fn fork_with_message_ref(&self, message_ref: impl Into<String>) -> Self {
@@ -847,7 +643,7 @@ fn envelope_interior<'s, 'a>(segments: &'s [Segment<'a>]) -> Option<&'s [Segment
     let interior = &segments[1..segments.len() - 1];
     if interior
         .iter()
-        .any(|s| matches!(s.tag, "UNB" | "UNZ" | "UNG" | "UNE"))
+        .any(|s| matches!(s.tag(), "UNB" | "UNZ" | "UNG" | "UNE"))
     {
         return None;
     }

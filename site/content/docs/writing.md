@@ -16,12 +16,40 @@ raw segment construction and custom delimiter configuration.
 | `to_edifact_string(value)` | Quick serialization of a single derived struct |
 | `ser::to_bytes(segments)` | Round-trip a parsed `Vec<Segment<'_>>` |
 | `to_bytes(segments)` | Free function alias for `ser::to_bytes` |
-| `Writer::write_segment(seg)` | Streaming segment-by-segment output |
+| `Writer::write_segment(seg)` | Round-tripping a parsed or hand-built `Segment` |
 | `Writer::write_elements(tag, elements)` | **The general form** — segments mixing simple and composite data elements |
-| `Writer::write_composites(tag, elements)` | Segments whose every element is a composite |
-| `Writer::write_raw(tag, elements)` | All-simple segments, component boundaries inferred by splitting |
-| `Writer::write_segment_parts(tag, elements)` | Same as `write_elements`, for owned `String` data |
-| `Writer::with_una(w, ssa)` | Output with custom UNA service string |
+| `Writer::write_composites(tag, elements)` | Every element is a list of components; borrowed *or* owned data |
+| `Writer::write_simple(tag, elements)` | Every element is one value — the commonest shape |
+| `Writer::with_service_string_advice(w, ssa)` | Custom delimiters, **no** `UNA` emitted |
+| `Writer::with_una(w, ssa)` | Custom delimiters, `UNA` written first |
+
+Component boundaries are always **explicit**: no write method infers them by
+splitting a string, so a value containing the active component separator is
+release-escaped rather than silently promoted to a boundary.
+
+## What the writer will not write
+
+Everything the writer emits reparses. Two cases are refused before a byte
+reaches the sink, so a rejected segment leaves nothing half-written:
+
+| Refused | Error |
+|---|---|
+| A tag that is not three ASCII uppercase letters | `InvalidSegmentTag` |
+| A repeating data element with no repetition separator declared | `RepetitionSeparatorNotDeclared` |
+
+A tag is written verbatim — EDIFACT has no way to escape one — so `bgm`,
+`BGMX` or `B+M` would produce bytes that do not read back as the segment they
+came from:
+
+```rust
+use edifact_rs::{EdifactError, Writer};
+
+let mut writer = Writer::new(Vec::new());
+let err = writer.write_simple("bgm", &["220"]).unwrap_err();
+assert!(matches!(err, EdifactError::InvalidSegmentTag(_)));
+```
+
+Delimiters *inside a value* are not a problem — those are release-escaped.
 
 ---
 
@@ -152,7 +180,7 @@ segment's count field:
 // ... write body segments ...
 
 let count = writer.segment_count() + 2; // +2 for UNH and UNT themselves
-writer.write_raw("UNT", &[&count.to_string(), "1"])?;
+writer.write_simple("UNT", &[count.to_string().as_str(), "1"])?;
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
@@ -231,16 +259,19 @@ assert_eq!(String::from_utf8(buf).unwrap(), "NAD+MS+ACME?:INC'");
 ```
 
 `MessageWriter` — the `UNH`/`UNT` guard from `Writer::begin_message` — carries
-the same methods (`write_elements`, `write_composites`, `write_segment_parts`,
-`write_raw`, `write_segment`), so every segment you write inside a message is
-counted into the `UNT` DE 0074 total.
+the same four methods (`write_simple`, `write_composites`, `write_elements`,
+`write_segment`), so every segment you write inside a message is counted into the
+`UNT` DE 0074 total.
 
 ---
 
-## `write_raw` — runtime string data
+## `write_simple` and `write_composites` — runtime string data
 
-When building segments from runtime data (e.g., database values), use `write_raw`
-to avoid constructing `Segment` / `Element` objects:
+When building segments from runtime data — database rows, a mapping layer —
+these two avoid constructing `Segment` / `Element` values at all.
+
+`write_simple` is the all-simple shape: one value per data element, and a
+component separator inside a value stays part of the value.
 
 ```rust
 use edifact_rs::Writer;
@@ -248,14 +279,32 @@ use edifact_rs::Writer;
 let mut buf: Vec<u8> = Vec::new();
 let mut writer = Writer::new(&mut buf);
 
-// write_raw(tag, &[elements]) — components inside an element separated by ':'
-writer.write_raw("DTM", &["137:20240101:102"])?;
-writer.write_raw("RFF", &["ON:PO-4711"])?;
-// Caveat: the split is on the *active* component separator, and a literal `:`
-// inside a value becomes a boundary. Prefer `write_elements` when either
-// matters.
+writer.write_simple("BGM", &["220", "PO-4711", "9"])?;
+writer.write_simple("FTX", &["AAA", "ACME:INC"])?;   // the `:` is escaped, not split
 
 writer.finish()?;
+assert_eq!(buf, b"BGM+220+PO-4711+9'FTX+AAA+ACME?:INC'".to_vec());
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+`write_composites` takes the components explicitly, and its bounds accept
+borrowed and owned data through the same call — `&[&[&str]]`, `&[Vec<String>]`,
+`&[[String; 3]]`:
+
+```rust
+use edifact_rs::Writer;
+
+let mut buf: Vec<u8> = Vec::new();
+let mut writer = Writer::new(&mut buf);
+
+// Borrowed literals …
+writer.write_composites("DTM", &[&["137", "20240101", "102"][..]])?;
+// … and owned values built at runtime.
+let rff = vec![vec!["ON".to_string(), "PO-4711".to_string()]];
+writer.write_composites("RFF", &rff)?;
+
+writer.finish()?;
+assert_eq!(buf, b"DTM+137:20240101:102'RFF+ON:PO-4711'".to_vec());
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
@@ -263,7 +312,7 @@ writer.finish()?;
 
 ## Custom delimiters and UNA
 
-To write with non-default delimiters, create the writer with `Writer::with_una`:
+`Writer::with_una` writes a `UNA` header and then uses those delimiters:
 
 ```rust
 use edifact_rs::{Writer, ServiceStringAdvice};
@@ -280,9 +329,8 @@ let ssa = ServiceStringAdvice {
 let mut buf: Vec<u8> = Vec::new();
 let mut writer = Writer::with_una(&mut buf, ssa)?;
 
-// One `&str` per data element; `write_raw` splits each on the *component*
-// separator, which this UNA sets to `;`.
-writer.write_raw("BGM", &["220", "PO-4711", "9"])?;
+// One `&str` per data element; the custom element separator `|` is applied.
+writer.write_simple("BGM", &["220", "PO-4711", "9"])?;
 writer.finish()?;
 
 let text = String::from_utf8(buf).unwrap();
@@ -292,12 +340,38 @@ assert_eq!(text, "UNA;|.? !BGM|220|PO-4711|9!");
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
+### Delimiters without a `UNA`
+
+A syntax-version-4 interchange can carry repeating data elements and no `UNA` at
+all — the version in `UNB` S001 DE 0002 is what declares the separator. Writing
+one back through `with_una` would invent a header the original never had, so
+declare the delimiters to the writer directly instead:
+
+```rust
+use edifact_rs::{ServiceStringAdvice, Writer, from_bytes};
+
+let input = b"UNB+UNOC:4+S+R+260101:0900+I'RFF+ON:1*ON:2'UNZ+0+I'";
+let segments: Vec<_> = from_bytes(input).collect::<Result<Vec<_>, _>>()?;
+
+let ssa = ServiceStringAdvice::for_syntax_version(Some(4));
+let mut writer = Writer::with_service_string_advice(Vec::new(), ssa)?;
+for segment in &segments {
+    writer.write_segment(segment)?;
+}
+// Byte-for-byte the input, with no UNA invented along the way.
+assert_eq!(writer.finish()?, input.to_vec());
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
 ---
 
 ## Repeating data elements
 
 ISO 9735-1 §8.6 repetitions are written with the repetition separator from UNA
-position 050, so the writer needs a `ServiceStringAdvice` that declares one:
+position 050, so the writer needs a `ServiceStringAdvice` that declares one.
+Writing a repeating element through a writer that has none is
+`EdifactError::RepetitionSeparatorNotDeclared`, checked before the first byte is
+emitted so a rejected segment leaves nothing half-written behind it:
 
 ```rust
 use edifact_rs::{Element, Segment, ServiceStringAdvice, Writer};
@@ -337,11 +411,11 @@ use edifact_rs::{EdifactEvent, EventEmitter, ServiceStringAdvice, WriterEmitter}
 
 let ssa = ServiceStringAdvice::from_bytes(b"UNA:+.?*'")?;
 let mut emitter = WriterEmitter::with_una(Vec::new(), ssa)?;
-emitter.emit(EdifactEvent::StartSegment { tag: "RFF" })?;
-emitter.emit(EdifactEvent::Element { value: "ON" })?;
-emitter.emit(EdifactEvent::ComponentElement { value: "1" })?;
-emitter.emit(EdifactEvent::RepeatElement { value: "ON" })?;  // second occurrence
-emitter.emit(EdifactEvent::ComponentElement { value: "2" })?;
+emitter.emit(EdifactEvent::start("RFF"))?;
+emitter.emit(EdifactEvent::element("ON"))?;
+emitter.emit(EdifactEvent::component("1"))?;
+emitter.emit(EdifactEvent::repeat("ON"))?;  // second occurrence
+emitter.emit(EdifactEvent::component("2"))?;
 emitter.emit(EdifactEvent::EndSegment)?;
 
 assert_eq!(emitter.finish()?, b"UNA:+.?*'RFF+ON:1*ON:2'".to_vec());
@@ -367,8 +441,8 @@ The typed path reaches it through `WriterEmitter::with_charset`, so a
 use edifact_rs::{Charset, EdifactEvent, EventEmitter, WriterEmitter};
 
 let mut emitter = WriterEmitter::new(Vec::new()).with_charset(Charset::UnoC);
-emitter.emit(EdifactEvent::StartSegment { tag: "NAD" })?;
-emitter.emit(EdifactEvent::Element { value: "Müller" })?;
+emitter.emit(EdifactEvent::start("NAD"))?;
+emitter.emit(EdifactEvent::element("Müller"))?;
 emitter.emit(EdifactEvent::EndSegment)?;
 
 // `ü` goes out as the single Latin-1 byte 0xFC, not as two UTF-8 bytes.
@@ -480,18 +554,18 @@ let mut buf: Vec<u8> = Vec::new();
 let mut w = Writer::new(&mut buf);
 
 // Interchange header
-w.write_raw("UNB", &["UNOA:1", "SENDER:14", "RECEIVER:14", "200101:0900", "1"])?;
+w.write_simple("UNB", &["UNOA:1", "SENDER:14", "RECEIVER:14", "200101:0900", "1"])?;
 // Message header
-w.write_raw("UNH", &["1", "ORDERS:D:96A:UN"])?;
+w.write_simple("UNH", &["1", "ORDERS:D:96A:UN"])?;
 // Body
-w.write_raw("BGM", &["220", "PO-4711", "9"])?;
-w.write_raw("NAD", &["BY", "4000001::9"])?;
+w.write_simple("BGM", &["220", "PO-4711", "9"])?;
+w.write_simple("NAD", &["BY", "4000001::9"])?;
 // Message trailer (segment count includes UNH and UNT)
 let body_segments = w.segment_count(); // BGM + NAD
 let unt_count = body_segments + 2;
-w.write_raw("UNT", &[&unt_count.to_string(), "1"])?;
+w.write_simple("UNT", &[unt_count.to_string().as_str(), "1"])?;
 // Interchange trailer
-w.write_raw("UNZ", &["1", "1"])?;
+w.write_simple("UNZ", &["1", "1"])?;
 
 w.finish()?;
 # Ok::<(), edifact_rs::EdifactError>(())

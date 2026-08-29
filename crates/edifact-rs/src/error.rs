@@ -378,17 +378,6 @@ pub enum EdifactError {
         limit: usize,
     },
 
-    /// No handler was registered in [`crate::MessageDispatch`] for this message type.
-    ///
-    /// Returned by [`crate::MessageDispatch::dispatch`] when the message-type
-    /// extracted from the `UNH` segment does not match any registered handler
-    /// and no fallback was configured.
-    #[error("no handler registered for message type {message_type}")]
-    UnexpectedMessageType {
-        /// The unhandled message type string from the `UNH` segment.
-        message_type: String,
-    },
-
     /// An interchange or message contains more segments or messages than can be
     /// represented in a `u32` counter (> 4 294 967 295).
     ///
@@ -889,7 +878,8 @@ impl EdifactError {
             Self::InvalidReleaseSequence { .. } => "E019",
             Self::SegmentTooLong { .. } => "E020",
             Self::MissingRequiredComponent { .. } => "E021",
-            Self::UnexpectedMessageType { .. } => "E022",
+            // E022 is permanently retired (was UnexpectedMessageType, removed
+            // in 0.17.0 along with the type-erased MessageDispatch it served).
             Self::InterchangeTooLarge { .. } => "E023",
             Self::InvalidEventSequence { .. } => "E024",
             Self::InvalidElementPosition => "E025",
@@ -1063,7 +1053,6 @@ impl EdifactError {
             Self::ValidationErrors { .. }
             | Self::MessageCountMismatch { .. }
             | Self::SegmentCountMismatch { .. }
-            | Self::UnexpectedMessageType { .. }
             | Self::InterchangeTooLarge { .. }
             | Self::InvalidUtf8
             | Self::Io(_) => None,
@@ -1213,10 +1202,6 @@ impl miette::Diagnostic for EdifactError {
                 "Segment starting at byte offset {offset} exceeds the {limit}-byte limit. \
                  Use ReaderConfig::max_segment_bytes to adjust the limit if needed, \
                  or verify the input for a missing segment terminator",
-            ))),
-            Self::UnexpectedMessageType { message_type } => Some(Box::new(format!(
-                "No handler was registered for message type '{message_type}'. \
-                 Register a handler with MessageDispatch::on(\"{message_type}\", ...)",
             ))),
             Self::InterchangeTooLarge { count } => Some(Box::new(format!(
                 "Interchange contains {count} items which exceeds the u32::MAX limit. \

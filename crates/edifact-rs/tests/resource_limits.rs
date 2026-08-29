@@ -8,11 +8,10 @@
 //!
 //! Both parsing front ends are covered: the borrowed slice path
 //! (`from_bytes_with_config`) and the owned reader path
-//! (`from_bufread_stream_with_config`).
+//! (`from_bufread_with_config`).
 
 use edifact_rs::{
-    EdifactError, OwnedSegment, ReaderConfig, from_bufread_stream_with_config,
-    from_bytes_with_config,
+    EdifactError, OwnedSegment, ReaderConfig, from_bufread_with_config, from_bytes_with_config,
 };
 
 // UNB + UNH + BGM + UNT + UNZ = 5 segments.
@@ -42,14 +41,14 @@ fn long_segment_msg(element_len: usize) -> Vec<u8> {
 
 /// Collect through the owned reader path.
 fn read(input: &[u8], config: ReaderConfig) -> Result<Vec<OwnedSegment>, EdifactError> {
-    from_bufread_stream_with_config(std::io::Cursor::new(input.to_vec()), config).collect()
+    from_bufread_with_config(std::io::Cursor::new(input.to_vec()), config).collect()
 }
 
 /// Collect through the borrowed slice path, keeping only the tags so the result
 /// does not borrow the input.
 fn slice_tags(input: &[u8], config: ReaderConfig) -> Result<Vec<String>, EdifactError> {
     from_bytes_with_config(input, config)
-        .map(|r| r.map(|s| s.tag.to_owned()))
+        .map(|r| r.map(|s| s.tag().to_owned()))
         .collect()
 }
 
@@ -187,8 +186,7 @@ fn max_segment_bytes_errors_on_oversized_segment() {
     let msg = long_segment_msg(500);
     let config = ReaderConfig::default().max_segment_bytes(100);
 
-    let results: Vec<_> =
-        from_bufread_stream_with_config(std::io::Cursor::new(&msg), config).collect();
+    let results: Vec<_> = from_bufread_with_config(std::io::Cursor::new(&msg), config).collect();
 
     assert!(
         results

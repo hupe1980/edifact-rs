@@ -69,7 +69,7 @@ fn main() -> Result<(), EdifactError> {
         .with_envelope_validation()
         .with_syntax_validation()
         .build()
-        .validate_lenient(&segments);
+        .validate(&segments);
 
     for issue in report.errors().iter().chain(report.warnings()) {
         println!(

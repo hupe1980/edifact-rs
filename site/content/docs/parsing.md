@@ -11,12 +11,24 @@ custom delimiter configuration, and envelope-level helpers.
 
 ## Entry points overview
 
-| Function | Input | Output type | When to use |
+Six functions, in three symmetric pairs — every one returns a **lazy iterator**
+of `Result<Segment<'_>, EdifactError>`, and every one has a `_with_config`
+sibling that takes a [`ReaderConfig`](#dos-hardening-with-readerconfig).
+
+| Function | Input | Yields | When to use |
 |---|---|---|---|
-| `from_bytes(input)` | `&[u8]` | `impl Iterator<Item = Result<Segment<'_>, _>>` | In-memory buffer (fastest path) |
-| `from_reader_collect(reader)` | `impl Read` | `Result<Vec<OwnedSegment>, _>` | Eagerly collect all segments from a reader |
-| `from_reader(reader)` | `impl Read` | `FromReaderIter<R>` | Lazy iterator — one segment at a time |
-| `from_bufread_stream_with_config(reader, config)` | `impl BufRead` | `Result<Vec<OwnedSegment>, _>` | DOS guard, custom limits |
+| `from_bytes` | `&[u8]` | `Segment<'input>` | In-memory buffer — the fastest path, borrows |
+| `from_reader` | `impl Read` | `OwnedSegment` | A file or socket; O(1) memory |
+| `from_bufread` | `impl BufRead` | `OwnedSegment` | As above, when you already hold a `BufRead` |
+| `from_bytes_decoded` | `&[u8]` | `Vec<OwnedSegment>` | Transcodes from the repertoire the `UNB` declares |
+| `from_reader_decoded` | `impl Read` | `OwnedSegment` | The streaming counterpart |
+
+`OwnedSegment` is just `Segment<'static>`, so the two paths produce values of the
+same type and every downstream function accepts either — see
+[Core Concepts](@/docs/core-concepts.md#one-segment-type-borrowed-or-owned).
+
+Collect with `.collect::<Result<Vec<_>, _>>()?`; take the first match with
+`.next()`; or iterate and handle each `Result` as it arrives.
 
 ---
 
@@ -153,17 +165,6 @@ assert_eq!(segs[0].element_str(1), Some("PO-4711"));
 
 ## Reader-based parsing
 
-### `from_reader_collect` — read all at once
-
-```rust,no_run
-use edifact_rs::from_reader_collect;
-use std::fs::File;
-
-let f = File::open("message.edi")?;
-let segments = from_reader_collect(f)?; // Vec<OwnedSegment>
-# Ok::<(), edifact_rs::EdifactError>(())
-```
-
 ### `from_reader` — streaming, one segment at a time
 
 ```rust,no_run
@@ -179,7 +180,21 @@ for result in from_reader(f) {
 ```
 
 `from_reader` is O(1) memory — it yields one `OwnedSegment` and then
-immediately drops the internal buffer before reading the next segment.
+immediately drops the internal buffer before reading the next segment. Collect
+it when you do want everything in memory:
+
+```rust,no_run
+use edifact_rs::from_reader;
+use std::fs::File;
+
+let f = File::open("message.edi")?;
+let segments: Vec<_> = from_reader(f).collect::<Result<Vec<_>, _>>()?;
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+If you already hold a `BufRead`, use `from_bufread` instead — `from_reader` wraps
+its argument in a `BufReader`, and wrapping a buffered reader again just pays for
+a second layer of copying.
 
 ---
 
@@ -195,9 +210,9 @@ that reports an error** — none of them ever ends the iterator quietly.
 | `max_messages` | unlimited | `LimitExceeded { limit: "max_messages", max }` (E036) |
 | `max_input_bytes` | unlimited | `LimitExceeded { limit: "max_input_bytes", max }` (E036) |
 
-The same config applies to both front ends: `from_bytes_with_config` for the
-borrowed slice path and `from_reader_with_config` /
-`from_bufread_stream_with_config` for the owned reader path.
+The same config applies to every front end: `from_bytes_with_config`,
+`from_reader_with_config`, `from_bufread_with_config`, and the two decoding
+variants.
 
 ```rust
 use edifact_rs::{EdifactError, ReaderConfig, from_bytes_with_config};
@@ -303,8 +318,8 @@ assert_eq!(bgm.element_str(1), Some("PO-4711"));
 let buyer_nad = find_qualified_segment(&segs, "NAD", "BY").expect("NAD BY not found");
 assert_eq!(buyer_nad.element_str(1), Some("4000001"));
 
-// Same for OwnedSegment slices (reader path)
-use edifact_rs::{find_segment_owned, find_qualified_segment_owned};
+// The very same calls work on the reader path — `&[OwnedSegment]` coerces to
+// `&[Segment<'_>]`, so there is no owned-specific variant to reach for.
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
@@ -315,28 +330,31 @@ use edifact_rs::{find_segment_owned, find_qualified_segment_owned};
 All parse errors carry stable codes and byte offsets:
 
 ```rust
-use edifact_rs::{from_bytes, EdifactError};
+use edifact_rs::{EdifactError, from_bytes};
 
 let bad_input = b"BGM+incomplete"; // no segment terminator
-match from_bytes(bad_input).collect::<Result<Vec<_>, _>>() {
-    Ok(_) => println!("parsed"),
-    Err(EdifactError::UnexpectedEof { offset }) => {
-        eprintln!("input ended at byte {offset}");
-    }
-    Err(e) => eprintln!("error: {e}"),
-}
+let err = from_bytes(bad_input)
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap_err();
+assert!(matches!(err, EdifactError::UnexpectedEof { offset: 14 }));
 ```
 
+A segment with no terminator is a **truncation**, not a short segment: accepting
+it would let a file cut off mid-transfer parse as a complete interchange. Every
+syntax contract is reported identically by both parse paths.
+
 See the [Error Reference](@/docs/error-reference.md) for a complete list of all variants
-and their stable codes (E001–E037).
+and their stable codes (E001–E053).
 
 ---
 
 ## Strict vs. lenient envelope validation
 
-`from_bytes`, `from_reader`, and `from_reader_collect` are **lenient by default** — they parse all
-segments and surface body segments even when `UNB`/`UNZ` or `UNH`/`UNT` reference
-parity is wrong. Use `validate_envelope` to enforce parity explicitly:
+The parse entry points are **lenient about the envelope** — they surface every
+segment even when `UNB`/`UNZ` or `UNH`/`UNT` reference parity is wrong. (They are
+not lenient about *syntax*: a segment with no terminator, a dangling release
+character, or a malformed `UNA` is an error on every path.) Use
+`validate_envelope` to enforce parity explicitly:
 
 ```rust
 use edifact_rs::{from_bytes, validate_envelope};

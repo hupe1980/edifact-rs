@@ -3,9 +3,7 @@ mod support;
 
 pub use support::edifact_rs::{
     Element, EdifactDeserialize, EdifactError, EdifactEvent, EdifactSegmentTag,
-    EdifactSerialize, EventEmitter, OwnedSegment, Segment, find_qualified_segment,
-    find_qualified_segment_owned, find_segment, find_segment_owned,
-};
+    EdifactSerialize, EventEmitter, Segment, find_qualified_segment, find_segment};
 
 extern crate self as edifact_rs;
 pub use support::edifact_rs::helpers;
@@ -18,8 +16,7 @@ struct NadSegment {
     #[edifact(element = 0)]
     qualifier: String,
     #[edifact(element = 1)]
-    party_id: Option<String>,
-}
+    party_id: Option<String>}
 
 #[derive(DeriveEdifactDeserialize)]
 #[edifact(segment = "RFF", qualifier_from = 0)]
@@ -27,8 +24,7 @@ struct RffSegment {
     #[edifact(element = 0)]
     qualifier: String,
     #[edifact(element = 1)]
-    value: Option<String>,
-}
+    value: Option<String>}
 
 #[derive(DeriveEdifactDeserialize)]
 struct Message {
@@ -36,8 +32,7 @@ struct Message {
     market_sender: Option<NadSegment>,
     #[edifact(qualifier = "MR")]
     market_receiver: Option<NadSegment>,
-    reference: Option<RffSegment>,
-}
+    reference: Option<RffSegment>}
 
 fn main() {
     let _ = std::any::type_name::<Message>();

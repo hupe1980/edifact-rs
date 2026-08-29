@@ -718,7 +718,7 @@ mod tests {
         let report = ValidationContext::builder()
             .with_validator(ValidationLayer::Structure, validator)
             .build()
-            .validate_lenient(&segments);
+            .validate(&segments);
 
         assert!(!report.has_errors(), "{:#?}", report.errors());
     }

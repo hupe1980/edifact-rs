@@ -4,12 +4,13 @@
 //! - Only fire for the group they are scoped to.
 //! - Do **not** cross-fire when the same segment tag appears in a different group.
 //! - Correctly auto-stamp `ValidationIssue::segment_group`.
-//! - Work through [`ValidationContext::validate_lenient_grouped`].
-//! - Work through [`ValidationContext::validate_lenient_grouped_owned`].
+//! - Work through [`ValidationContext::validate_grouped`], for segments from
+//!   either parsing path.
+//! - Honour `max_issues_per_rule` across the whole tree walk, not per group.
 
 use edifact_rs::{
     ProfileRulePack, ValidationContext, ValidationIssue, ValidationSeverity,
-    group::{GroupDef, group_owned_segments_indexed, group_segments_indexed},
+    group::{GroupDef, group_segments_indexed},
 };
 
 // ── Schema shared across tests ────────────────────────────────────────────────
@@ -73,7 +74,7 @@ fn group_rule_fires_when_required_segment_absent_from_scoped_group() {
     let pack = ProfileRulePack::new("TEST").require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
-    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    let report = ctx.validate_grouped(&tree, &segs);
     // DTM is present in SG1 but NOT in SG5, so the rule should fire.
     assert!(
         report.has_errors(),
@@ -95,7 +96,7 @@ fn group_rule_does_not_fire_when_segment_present_in_scoped_group() {
     let pack = ProfileRulePack::new("TEST").require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
-    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    let report = ctx.validate_grouped(&tree, &segs);
     assert!(
         report.is_valid(),
         "expected no errors (DTM is present in SG5): {report}"
@@ -114,7 +115,7 @@ fn forbid_segment_in_group_fires_when_segment_present() {
     let pack = ProfileRulePack::new("TEST").forbid_segment_in_group("SG5", "UNS", "SG5-UNS-F");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
-    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    let report = ctx.validate_grouped(&tree, &segs);
     assert!(report.has_errors(), "expected error: UNS in SG5 — {report}");
     let issue = report.errors().first().unwrap();
     assert_eq!(issue.segment_group.as_deref(), Some("SG5"));
@@ -129,7 +130,7 @@ fn forbid_segment_in_group_does_not_fire_when_segment_absent() {
     let pack = ProfileRulePack::new("TEST").forbid_segment_in_group("SG5", "UNS", "SG5-UNS-F");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
-    assert!(ctx.validate_lenient_grouped(&tree, &segs).is_valid());
+    assert!(ctx.validate_grouped(&tree, &segs).is_valid());
 }
 
 // ── F-029 Test 3: cross-group non-contamination ───────────────────────────────
@@ -151,7 +152,7 @@ fn group_rules_for_different_groups_do_not_cross_contaminate() {
         .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
-    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    let report = ctx.validate_grouped(&tree, &segs);
     // Exactly one error (SG5 missing DTM), not two.
     assert_eq!(report.errors().len(), 1, "expected 1 error; got {report}");
     assert_eq!(
@@ -172,7 +173,7 @@ fn group_rule_issues_are_auto_stamped_with_group_name() {
     let pack = ProfileRulePack::new("TEST").require_segment_in_group("SG5", "QTY", "SG5-QTY-M");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
-    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    let report = ctx.validate_grouped(&tree, &segs);
     assert!(report.has_errors());
     // Auto-stamp: segment_group must equal the group definition name.
     for issue in report.errors() {
@@ -190,12 +191,12 @@ fn group_rule_issues_are_auto_stamped_with_group_name() {
 fn validate_lenient_grouped_owned_works_with_owned_segments() {
     let input = b"UNH+1+ORDERS:D:04B:UN'LOC+172+L1'DTM+137:20230101:102'UNT+3+1'";
     let owned = owned_segs(input);
-    let tree = group_owned_segments_indexed(&owned, SCHEMA, "ROOT");
+    let tree = group_segments_indexed(&owned, SCHEMA, "ROOT");
 
     let pack = ProfileRulePack::new("TEST").require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
-    let report = ctx.validate_lenient_grouped_owned(&tree, &owned);
+    let report = ctx.validate_grouped(&tree, &owned);
     assert!(
         report.is_valid(),
         "DTM present in SG5 — no errors expected: {report}"
@@ -215,7 +216,7 @@ fn group_rule_fires_per_occurrence_when_group_repeats() {
     let pack = ProfileRulePack::new("TEST").require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
-    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    let report = ctx.validate_grouped(&tree, &segs);
     // One SG5 is missing DTM → exactly one error.
     assert_eq!(
         report.errors().len(),
@@ -256,7 +257,7 @@ fn custom_scoped_group_rule_fn_fires_and_sets_segment_group() {
     );
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
-    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    let report = ctx.validate_grouped(&tree, &segs);
     assert!(!report.warnings().is_empty(), "expected zero-qty warning");
     assert_eq!(
         report.warnings()[0].segment_group.as_deref(),
@@ -279,7 +280,7 @@ fn group_rules_respect_message_type_scoping() {
         .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
-    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    let report = ctx.validate_grouped(&tree, &segs);
     assert!(
         report.is_valid(),
         "INVOIC message: ORDERS-scoped group rules must not fire: {report}"
@@ -301,7 +302,7 @@ fn flat_and_group_validation_both_run_in_grouped_mode() {
         .require_segment_in_group("SG5", "DTM", "SG5-DTM-M");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
-    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    let report = ctx.validate_grouped(&tree, &segs);
     // Both a flat error and a group error should appear.
     let rule_ids: Vec<Option<&str>> = report
         .errors()
@@ -327,7 +328,7 @@ fn forbid_segment_segment_occurrence_is_relative_not_absolute() {
     let segs = parse_segs("UNH+1+ORDERS:D:96A:UN'QTY+21:10'QTY+21:20'QTY+21:30'UNT+4+1'");
     let pack = ProfileRulePack::new("TEST").forbid_segment("QTY", "TEST-FORBID-QTY");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
-    let report = ctx.validate_lenient(&segs);
+    let report = ctx.validate(&segs);
     let mut occurrences: Vec<u16> = report
         .errors()
         .iter()
@@ -349,7 +350,7 @@ fn forbid_segment_in_group_occurrence_is_relative_not_absolute() {
     let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
     let pack = ProfileRulePack::new("TEST").forbid_segment_in_group("SG5", "QTY", "TEST-SG5-QTY");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
-    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    let report = ctx.validate_grouped(&tree, &segs);
     let mut occurrences: Vec<u16> = report
         .errors()
         .iter()
@@ -386,7 +387,7 @@ fn bail_on_first_error_does_not_skip_sibling_groups_due_to_earlier_flat_errors()
         .with_bail_on_first_error(true);
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
 
-    let report = ctx.validate_lenient_grouped(&tree, &segs);
+    let report = ctx.validate_grouped(&tree, &segs);
 
     // We must have at least the flat BGM error AND at least one group error.
     // (bail_on_first_error stops after the first group error from THIS pass,
@@ -448,4 +449,148 @@ fn a_schema_built_at_runtime_groups_identically_to_a_static_one() {
     }
     assert_eq!(shape(&from_static), shape(&from_runtime));
     assert!(shape(&from_runtime).iter().any(|(n, _)| n == "SG6"));
+}
+
+/// `max_issues_per_rule` documents itself as applying "per rule per call".
+///
+/// The group walk applied it per rule per *group occurrence*, so a rule firing
+/// in twenty groups emitted twenty times the cap — and a group rule is the most
+/// likely to flood a report, which is the case the cap exists for.
+#[test]
+fn max_issues_per_rule_caps_a_group_rule_across_the_whole_tree() {
+    // Twenty SG1 occurrences, each triggering the rule once.
+    let mut input = String::from("UNH+1+ORDERS:D:96A:UN'");
+    for i in 0..20 {
+        input.push_str(&format!("RFF+ON:{i}'"));
+    }
+    input.push_str("UNT+22+1'");
+    let segments = parse_segs(&input);
+    let tree = group_segments_indexed(&segments, SCHEMA, "ROOT");
+
+    let pack = ProfileRulePack::new("CAP")
+        .with_max_issues_per_rule(3)
+        .with_scoped_group_rule_fn("SG1", "CAP-SG1", |_group, _segs, _ctx, issues| {
+            issues.push(ValidationIssue::new(
+                ValidationSeverity::Error,
+                "one issue per SG1 occurrence",
+            ));
+        });
+
+    let report = ValidationContext::builder()
+        .with_profile_pack(pack)
+        .build()
+        .validate_grouped(&tree, &segments);
+
+    assert_eq!(
+        report.total_issues(),
+        3,
+        "the cap is per rule per call, so twenty group occurrences must still \
+         yield at most three issues, not twenty",
+    );
+}
+
+/// The `UTILMD` shape: SG2 (message-level parties) and SG12 (a Vorgang's
+/// parties, inside SG4) both trigger on `NAD`.
+static UTILMD_LIKE: &[GroupDef] = &[
+    GroupDef {
+        name: "SG2",
+        trigger: "NAD",
+        children: &[],
+    },
+    GroupDef {
+        name: "SG4",
+        trigger: "IDE",
+        children: &[GroupDef {
+            name: "SG12",
+            trigger: "NAD",
+            children: &[],
+        }],
+    },
+];
+
+/// A group-scoped rule must see the group the message structure assigns, not the
+/// one the traversal happened to reopen.
+///
+/// Before the traversal preferred a nested definition over an ancestor's
+/// sibling, every `NAD` after the first `IDE` reopened a top-level SG2 — so an
+/// SG2-scoped rule fired on a Vorgang's parties, and an SG12-scoped rule never
+/// fired at all. That made a group-scoped `NAD` rule unsound on any message
+/// carrying an SG12, and forced downstream profiles to express the constraint on
+/// the flat `NAD` rule instead.
+#[test]
+fn a_group_scoped_nad_rule_fires_on_the_group_the_structure_assigns() {
+    let input = "UNH+1+UTILMD:D:11A:UN'BGM+E01+1+9'                 NAD+MS+SENDER::293'NAD+MR+RECEIVER::293'                 IDE+24+VORGANG1'NAD+Z09+KUNDE::293'DTM+92:20260101:102'NAD+VY+PARTY::293'";
+    let segments = parse_segs(input);
+    let tree = group_segments_indexed(&segments, UTILMD_LIKE, "ROOT");
+
+    // One rule per group, each recording the qualifiers it was shown.
+    let pack = ProfileRulePack::new("UTILMD-LIKE")
+        .with_scoped_group_rule_fn("SG2", "SG2-NAD", |_group, segs, _ctx, issues| {
+            for qualifier in segs
+                .iter()
+                .filter(|s| s.tag == "NAD")
+                .filter_map(|s| s.element_str(0))
+            {
+                issues.push(
+                    ValidationIssue::new(ValidationSeverity::Info, qualifier).with_rule_id("SG2"),
+                );
+            }
+        })
+        .with_scoped_group_rule_fn("SG12", "SG12-NAD", |_group, segs, _ctx, issues| {
+            for qualifier in segs
+                .iter()
+                .filter(|s| s.tag == "NAD")
+                .filter_map(|s| s.element_str(0))
+            {
+                issues.push(
+                    ValidationIssue::new(ValidationSeverity::Info, qualifier).with_rule_id("SG12"),
+                );
+            }
+        });
+
+    let report = ValidationContext::builder()
+        .with_profile_pack(pack)
+        .build()
+        .validate_grouped(&tree, &segments);
+
+    let seen = |rule: &str| -> Vec<String> {
+        report
+            .infos()
+            .iter()
+            .filter(|i| i.rule_id.as_deref() == Some(rule))
+            .map(|i| i.message.clone())
+            .collect()
+    };
+
+    assert_eq!(
+        seen("SG2"),
+        ["MS", "MR"],
+        "SG2 sees only the message-level parties",
+    );
+    assert_eq!(
+        seen("SG12"),
+        ["Z09", "VY"],
+        "SG12 sees the Vorgang's parties — and is reachable at all",
+    );
+}
+
+/// The reader side of the same shape: enumerating a Vorgang's parties.
+#[test]
+fn every_nested_party_group_is_enumerable_from_the_tree() {
+    let input = "NAD+MS+SENDER::293'                 IDE+24+V1'NAD+Z09+KUNDE::293'                 IDE+24+V2'NAD+VY+PARTY::293'NAD+DP+DELIVERY::293'";
+    let segments = parse_segs(input);
+    let tree = group_segments_indexed(&segments, UTILMD_LIKE, "ROOT");
+
+    // Per Vorgang, in document order.
+    let per_vorgang: Vec<Vec<&str>> = tree
+        .find("SG4")
+        .map(|sg4| {
+            sg4.find("SG12")
+                .filter_map(|sg12| sg12.segments(&segments).first())
+                .filter_map(|nad| nad.element_str(0))
+                .collect()
+        })
+        .collect();
+
+    assert_eq!(per_vorgang, [vec!["Z09"], vec!["VY", "DP"]]);
 }

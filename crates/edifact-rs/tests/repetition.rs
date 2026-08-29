@@ -10,8 +10,7 @@
 //! interchange without an explicit separator keeps the flat behaviour.
 
 use edifact_rs::{
-    EdifactError, Element, Segment, ServiceStringAdvice, Writer, from_bytes, from_bytes_owned,
-    from_reader_collect, segments_to_bytes,
+    EdifactError, Element, Segment, ServiceStringAdvice, Writer, from_bytes, segments_to_bytes,
 };
 
 /// `UNA` declaring `*` as the repetition separator; everything else default.
@@ -104,7 +103,8 @@ fn a_separator_before_any_element_is_rejected() {
 fn the_reader_path_agrees_with_the_slice_path() {
     let input = format!("{REP_UNA}RFF+ON:1*ON:2'");
 
-    let owned = from_reader_collect(std::io::Cursor::new(input.as_bytes()))
+    let owned = edifact_rs::from_reader(std::io::Cursor::new(input.as_bytes()))
+        .collect::<Result<Vec<_>, _>>()
         .expect("reader path must parse");
     let borrowed = parse(input.as_bytes());
 
@@ -112,21 +112,20 @@ fn the_reader_path_agrees_with_the_slice_path() {
     assert_eq!(owned[0].elements[0].repeat_count(), 2);
     let owned_values: Vec<Vec<&str>> = owned[0].elements[0]
         .repetitions()
-        .map(|r| r.iter().map(|(c, _)| c.as_str()).collect())
+        .map(|r| r.iter().map(|(c, _)| c.as_ref()).collect())
         .collect();
     assert_eq!(owned_values, vec![["ON", "1"], ["ON", "2"]]);
 }
 
 #[test]
-fn owned_conversion_preserves_repetitions() {
+fn detaching_a_segment_preserves_repetitions() {
     let input = format!("{REP_UNA}RFF+ON:1*ON:2'");
-    let owned: Vec<_> = from_bytes_owned(input.as_bytes())
+    let owned: Vec<_> = from_bytes(input.as_bytes())
+        .map(|r| r.map(|s| s.into_owned()))
         .collect::<Result<Vec<_>, _>>()
         .expect("parse");
     assert_eq!(owned[0].elements[0].repeat_count(), 2);
-    // …and converting back to a borrowed view keeps them.
-    assert_eq!(owned[0].as_borrowed().elements[0].repeat_count(), 2);
-    assert_eq!(owned[0].borrow().get_element(0).unwrap().repeat_count(), 2);
+    assert_eq!(owned[0].get_element(0).unwrap().repeat_count(), 2);
 }
 
 // ── writing and round-trip ───────────────────────────────────────────────────
@@ -228,7 +227,9 @@ fn reader_rebases_repetition_spans_onto_the_stream() {
         .collect::<Result<Vec<_>, _>>()
         .expect("slice parse");
     let owned: Vec<edifact_rs::OwnedSegment> =
-        edifact_rs::from_reader_collect(std::io::Cursor::new(&input[..])).expect("reader parse");
+        edifact_rs::from_reader(std::io::Cursor::new(&input[..]))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("reader parse");
 
     assert_eq!(borrowed.len(), owned.len());
     for (b, o) in borrowed.iter().zip(&owned) {
@@ -318,15 +319,15 @@ mod typed {
 
     #[test]
     fn the_owned_path_agrees_with_the_borrowed_one() {
-        let owned: Vec<_> = edifact_rs::from_bytes_owned(b"UNA:+.?*'RFF+ON:1*ON:2*ON:3'")
+        let owned: Vec<_> = edifact_rs::from_bytes(b"UNA:+.?*'RFF+ON:1*ON:2*ON:3'")
+            .map(|r| r.map(|s| s.into_owned()))
             .collect::<Result<Vec<_>, _>>()
             .expect("parse");
-        let from_owned = OrderReferences::edifact_deserialize_owned(&owned).expect("deserialize");
+        let from_owned = OrderReferences::edifact_deserialize(&owned).expect("deserialize");
 
-        let borrowed: Vec<_> = owned
-            .iter()
-            .map(edifact_rs::OwnedSegment::as_borrowed)
-            .collect();
+        let borrowed: Vec<_> = edifact_rs::from_bytes(b"UNA:+.?*'RFF+ON:1*ON:2*ON:3'")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("parse");
         let from_borrowed = OrderReferences::edifact_deserialize(&borrowed).expect("deserialize");
 
         assert_eq!(from_owned, from_borrowed);

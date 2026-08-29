@@ -1,5 +1,5 @@
 error: field `date_time`: #[edifact(required)] cannot be combined with #[edifact(composite)]; use a non-optional field type to require the composite element
-  --> tests/ui/fail_required_with_composite.rs:24:39
+  --> tests/ui/fail_required_with_composite.rs:23:39
    |
-24 |     #[edifact(element = 0, composite, required)]
+23 |     #[edifact(element = 0, composite, required)]
    |                                       ^^^^^^^^

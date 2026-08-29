@@ -1,5 +1,5 @@
 error: EdifactSerialize/EdifactDeserialize do not support generic structs
-  --> tests/ui/fail_generic_struct.rs:15:23
+  --> tests/ui/fail_generic_struct.rs:14:23
    |
-15 | struct GenericSegment<T> {
+14 | struct GenericSegment<T> {
    |                       ^

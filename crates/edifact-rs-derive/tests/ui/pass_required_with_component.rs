@@ -7,9 +7,7 @@ mod support;
 
 pub use support::edifact_rs::{
     Element, EdifactDeserialize, EdifactError, EdifactEvent, EdifactSegmentTag,
-    EdifactSerialize, EventEmitter, OwnedSegment, Segment, find_qualified_segment,
-    find_qualified_segment_owned, find_segment, find_segment_owned,
-};
+    EdifactSerialize, EventEmitter, Segment, find_qualified_segment, find_segment};
 
 extern crate self as edifact_rs;
 pub use support::edifact_rs::helpers;
@@ -26,8 +24,7 @@ struct PiaSegment {
     /// Component 0 of element 1 is required; emits `MissingRequiredComponent`
     /// instead of `MissingRequiredElement` when absent.
     #[edifact(element = 1, component = 0, required)]
-    item_identifier: Option<String>,
-}
+    item_identifier: Option<String>}
 
 fn main() {
     let _ = std::any::type_name::<PiaSegment>();

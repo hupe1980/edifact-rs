@@ -839,14 +839,14 @@ impl Contrl {
         out.push(OwnedSegment::new(
             "UNH",
             vec![
-                OwnedElement::of(&[reference.as_str()]),
+                OwnedElement::of(std::slice::from_ref(&reference)),
                 OwnedElement::of(&["CONTRL", "4", "1", "UN"]),
             ],
         ));
 
         // UCI — interchange level.
         let mut uci = vec![
-            OwnedElement::of(&[self.control_ref.as_str()]),
+            OwnedElement::of(std::slice::from_ref(&self.control_ref)),
             party(&self.sender, &self.sender_qualifier),
             party(&self.recipient, &self.recipient_qualifier),
             OwnedElement::of(&[self.action.code()]),
@@ -862,7 +862,7 @@ impl Contrl {
         }
         for group in &self.groups {
             let mut ucf = vec![
-                OwnedElement::of(&[group.envelope.group_ref.as_str()]),
+                OwnedElement::of(std::slice::from_ref(&group.envelope.group_ref)),
                 party(
                     &group.envelope.app_sender,
                     &group.envelope.app_sender_qualifier,
@@ -885,10 +885,7 @@ impl Contrl {
         let count = (out.len() + 1).to_string();
         out.push(OwnedSegment::new(
             "UNT",
-            vec![
-                OwnedElement::of(&[count.as_str()]),
-                OwnedElement::of(&[reference.as_str()]),
-            ],
+            vec![OwnedElement::of(&[count]), OwnedElement::of(&[reference])],
         ));
         out
     }
@@ -901,12 +898,12 @@ impl Contrl {
         action: Action,
     ) -> Vec<OwnedSegment> {
         let mut ucm = vec![
-            OwnedElement::of(&[message.message_ref.as_str()]),
+            OwnedElement::of(std::slice::from_ref(&message.message_ref)),
             OwnedElement::of(&[
-                message.message_type.as_str(),
-                message.version.as_str(),
-                message.release.as_str(),
-                message.controlling_agency.as_str(),
+                message.message_type.clone(),
+                message.version.clone(),
+                message.release.clone(),
+                message.controlling_agency.clone(),
             ]),
             OwnedElement::of(&[action.code()]),
         ];
@@ -953,7 +950,7 @@ impl Contrl {
             if !reported_positions.contains(&position) {
                 reported_positions.push(position);
                 let position_text = position.to_string();
-                let mut ucs = vec![OwnedElement::of(&[position_text.as_str()])];
+                let mut ucs = vec![OwnedElement::of(&[position_text])];
                 // The UCS states the code only when the segment itself is the
                 // deepest level that can carry it.
                 if level == ReportingLevel::Segment {
@@ -989,7 +986,7 @@ impl Contrl {
     ///
     /// Propagates any writer failure.
     pub fn to_bytes(&self) -> Result<Vec<u8>, EdifactError> {
-        crate::segments_to_bytes_owned(&self.segments())
+        crate::segments_to_bytes(&self.segments())
     }
 
     /// Render the message to an EDIFACT string, without an interchange envelope.
@@ -1047,7 +1044,7 @@ impl Contrl {
             control_reference,
         )?;
         for segment in self.segments() {
-            writer.write_segment(&segment.as_borrowed())?;
+            writer.write_segment(&segment)?;
         }
         writer.end_interchange(1, control_reference)?;
         writer.finish()
@@ -1081,9 +1078,9 @@ impl Contrl {
 /// Build an S002/S003-shaped element, omitting an absent qualifier.
 fn party(id: &str, qualifier: &str) -> OwnedElement {
     if qualifier.is_empty() {
-        OwnedElement::of(&[id])
+        OwnedElement::of(&[id.to_owned()])
     } else {
-        OwnedElement::of(&[id, qualifier])
+        OwnedElement::of(&[id.to_owned(), qualifier.to_owned()])
     }
 }
 
@@ -1167,7 +1164,8 @@ mod tests {
     use super::*;
 
     fn parse(input: &[u8]) -> Vec<OwnedSegment> {
-        crate::from_bytes_owned(input)
+        crate::from_bytes(input)
+            .map(|r| r.map(|s| s.into_owned()))
             .collect::<Result<Vec<_>, _>>()
             .expect("parse")
     }
@@ -1265,8 +1263,7 @@ mod tests {
                     UNH+MSG1+ORDERS:D:96A:UN'BGM+220+PO-1+9'UNT+3+MSG1'\
                     UNZ+1+IC4711'";
         let owned = parse(raw);
-        let segments: Vec<_> = owned.iter().map(OwnedSegment::as_borrowed).collect();
-        let validated = crate::validate_envelope(&segments).expect("valid subject");
+        let validated = crate::validate_envelope(&owned).expect("valid subject");
 
         let contrl = Contrl::acknowledgement(&validated).with_message_reference("ACK1");
         let wire = contrl.to_edifact_string().expect("render");
@@ -1278,7 +1275,6 @@ mod tests {
 
         // And it is itself a well-formed CONTRL by the crate's own tables.
         let reparsed = parse(wire.as_bytes());
-        let borrowed: Vec<_> = reparsed.iter().map(OwnedSegment::as_borrowed).collect();
         let validator = crate::DirectoryValidator::new(
             "iso-9735-4",
             crate::service::lookup,
@@ -1290,7 +1286,7 @@ mod tests {
         let report = crate::ValidationContext::builder()
             .with_validator(crate::ValidationLayer::Structure, validator)
             .build()
-            .validate_lenient(&borrowed);
+            .validate(&reparsed);
         assert!(!report.has_errors(), "{:#?}", report.errors());
     }
 
@@ -1299,8 +1295,7 @@ mod tests {
         let raw =
             b"UNB+UNOC:3+S+R+260101:0900+IC1'UNH+M1+ORDERS:D:96A:UN'BGM+220'UNT+3+M1'UNZ+1+IC1'";
         let owned = parse(raw);
-        let segments: Vec<_> = owned.iter().map(OwnedSegment::as_borrowed).collect();
-        let validated = crate::validate_envelope(&segments).expect("valid subject");
+        let validated = crate::validate_envelope(&owned).expect("valid subject");
 
         let wire = Contrl::receipt(&validated.interchange)
             .to_edifact_string()
@@ -1316,8 +1311,7 @@ mod tests {
     fn the_message_reference_defaults_to_the_subject_control_reference() {
         let raw = b"UNB+UNOC:3+S+R+260101:0900+IC-42'UNH+M1+ORDERS:D:96A:UN'BGM+220'UNT+3+M1'UNZ+1+IC-42'";
         let owned = parse(raw);
-        let segments: Vec<_> = owned.iter().map(OwnedSegment::as_borrowed).collect();
-        let validated = crate::validate_envelope(&segments).expect("valid subject");
+        let validated = crate::validate_envelope(&owned).expect("valid subject");
         assert_eq!(
             Contrl::acknowledgement(&validated).message_reference(),
             "IC-42"
@@ -1329,8 +1323,7 @@ mod tests {
         let raw =
             b"UNB+UNOC:3+S+R+260101:0900+IC1'UNH+M1+ORDERS:D:96A:UN'BGM+220'UNT+3+M1'UNZ+1+IC1'";
         let owned = parse(raw);
-        let segments: Vec<_> = owned.iter().map(OwnedSegment::as_borrowed).collect();
-        let validated = crate::validate_envelope(&segments).expect("valid subject");
+        let validated = crate::validate_envelope(&owned).expect("valid subject");
 
         // Annex A: "too many segment group repetitions" is UCS-only.
         let wire = Contrl::acknowledgement(&validated)
@@ -1346,16 +1339,15 @@ mod tests {
     /// *and* its faults — which is exactly what a CONTRL reports.
     fn report_for(raw: &[u8]) -> Contrl {
         let owned = parse(raw);
-        let segments: Vec<_> = owned.iter().map(OwnedSegment::as_borrowed).collect();
-        let validated = crate::validate_envelope_lenient(&segments)
+        let validated = crate::validate_envelope_lenient(&owned)
             .interchange
             .expect("subject must be structurally interpretable");
         let report = crate::ValidationContext::builder()
             .with_envelope_validation()
             .with_syntax_validation()
             .build()
-            .validate_lenient(&segments);
-        Contrl::from_report(&validated, &segments, &report)
+            .validate(&owned);
+        Contrl::from_report(&validated, &owned, &report)
     }
 
     #[test]

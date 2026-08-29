@@ -14,7 +14,6 @@ struct Bad {
     #[edifact(element = 1)]
     first: String,
     #[edifact(element = 1)]
-    second: String,
-}
+    second: String}
 
 fn main() {}

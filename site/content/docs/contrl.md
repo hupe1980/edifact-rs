@@ -91,7 +91,7 @@ let report = ValidationContext::builder()
     .with_envelope_validation()
     .with_syntax_validation()
     .build()
-    .validate_lenient(&segments);
+    .validate(&segments);
 
 let wire = Contrl::from_report(&validated, &segments, &report).to_edifact_string()?;
 
@@ -173,7 +173,7 @@ let validated = validate_envelope_lenient(&segments).interchange.unwrap();
 let report = ValidationContext::builder()
     .with_envelope_validation()
     .build()
-    .validate_lenient(&segments);
+    .validate(&segments);
 
 let wire = Contrl::from_report(&validated, &segments, &report).to_edifact_string()?;
 
@@ -263,7 +263,7 @@ let validator = DirectoryValidator::new(
 let report = ValidationContext::builder()
     .with_validator(ValidationLayer::Structure, validator)
     .build()
-    .validate_lenient(&segments);
+    .validate(&segments);
 assert!(!report.has_errors());
 # Ok::<(), edifact_rs::EdifactError>(())
 ```

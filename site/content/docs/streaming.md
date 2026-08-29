@@ -16,13 +16,15 @@ synchronous (`std::io::Read`) and can be bridged to async runtimes — see
 | API | Source | Output | Memory model |
 |---|---|---|---|
 | `from_reader(reader)` | `impl Read` | `Iterator<Item = Result<OwnedSegment, _>>` | O(1) — one segment at a time |
-| `from_bytes_windows(input)` | `&[u8]` | `Iterator<Item = Result<MessageWindow<'_>, _>>` | O(window) — one message window |
-| `message_windows_from_reader(reader)` | `impl Read` | `Iterator<Item = Result<OwnedMessageWindow, _>>` | O(window) — lazy I/O |
-| `deserialize_first_streaming(input)` | `&[u8]` | `Result<T, _>` | Stops at first match |
-| `deserialize_all_streaming(input)` | `&[u8]` | `Result<Vec<T>, _>` | Collects matching segments |
-| `deserialize_first_from_reader(reader)` | `impl Read` | `Result<T, _>` | Stops at first match |
-| `deserialize_all_from_reader(reader)` | `impl Read` | `Result<Vec<T>, _>` | Collects matching segments |
+| `message_windows(input)` | `&[u8]` | `Iterator<Item = Result<MessageWindow<'_>, _>>` | O(window) — one message window |
+| `message_windows_from_reader(reader)` | `impl Read` | `Iterator<Item = Result<MessageWindow, _>>` | O(window) — lazy I/O |
+| `deserialize_each(input)` | `&[u8]` | `Iterator<Item = Result<T, _>>` | O(1) — one matching segment at a time |
+| `deserialize_each_from_reader(reader)` | `impl Read` | `Iterator<Item = Result<T, _>>` | O(1) — lazy I/O |
+| `deserialize_messages(input)` | `&[u8]` | `Iterator<Item = Result<T, _>>` | One typed message per window |
 | `deserialize_messages_from_reader(reader)` | `impl Read` | `Iterator<Item = Result<T, _>>` | One typed message per window |
+
+Every one is a lazy iterator, so "first match" is `.next()` and "all matches" is
+`.collect()`. There is no separate eager entry point for either.
 
 ---
 
@@ -58,10 +60,10 @@ A **message window** is the slice of segments between a `UNH` and its matching `
 (inclusive). Envelope segments (`UNB`, `UNZ`, `UNG`, `UNE`) are **skipped**
 automatically.
 
-### `from_bytes_windows` — byte-slice source
+### `message_windows` — byte-slice source
 
 ```rust
-use edifact_rs::from_bytes_windows;
+use edifact_rs::message_windows;
 
 let interchange = b"\
     UNB+UNOA:1+S+R+200101:0900+1'\
@@ -69,7 +71,7 @@ let interchange = b"\
     UNH+2+ORDERS:D:96A:UN'BGM+220+PO-002+9'UNT+3+2'\
     UNZ+2+1'";
 
-for result in from_bytes_windows(interchange) {
+for result in message_windows(interchange) {
     let window = result?;
     // window.message_type  — Option<Cow<'_, str>> from UNH element 1, component 0
     // window.association_code — Option<Cow<'_, str>> from UNH DE 0057
@@ -97,19 +99,21 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 }
 ```
 
-> **Error propagation**: if a `UNH` is opened but no `UNT` is found before end of
-> input, the unclosed window is silently discarded (the iterator simply ends). Any
-> I/O error from the underlying reader surfaces as `EdifactError::Io`.
+> **Error propagation**: a `UNH` opened but never closed before end of input is
+> reported as `EdifactError::UnexpectedEof` — a truncated stream must not pass as
+> a complete message. A second `UNH` before the first one's `UNT` is
+> `EdifactError::InvalidSegmentForMessage`. Any I/O error from the underlying
+> reader surfaces as `EdifactError::Io`. In every case the iterator then ends.
 
 ---
 
 ## Typed streaming — extract matching segments
 
-Use `deserialize_first_streaming` / `deserialize_all_streaming` when you only care
-about specific segment types in an interchange.
+`deserialize_each` walks the segment stream and yields one `T` per segment that
+`T` maps to, skipping everything else without buffering it.
 
 ```rust
-use edifact_rs::{EdifactDeserialize, deserialize_first_streaming, deserialize_all_streaming};
+use edifact_rs::{EdifactDeserialize, deserialize_each};
 
 #[derive(Debug, EdifactDeserialize)]
 #[edifact(segment = "BGM")]
@@ -122,21 +126,23 @@ struct Bgm {
 
 let input = b"UNH+1+ORDERS:D:11A:UN'BGM+220+PO-001+9'BGM+231+PO-002+9'UNT+4+1'";
 
-// Stop after the first BGM:
-let first: Bgm = deserialize_first_streaming(input)?;
+// Stop after the first BGM — nothing past it is parsed.
+let first: Bgm = deserialize_each(input).next().transpose()?.expect("a BGM");
 assert_eq!(first.doc_id, "PO-001");
 
-// Collect all BGM segments:
-let all: Vec<Bgm> = deserialize_all_streaming(input)?;
+// Or drain the iterator for every match.
+let all: Vec<Bgm> = deserialize_each(input).collect::<Result<_, _>>()?;
 assert_eq!(all.len(), 2);
 assert_eq!(all[1].doc_id, "PO-002");
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-### Reader variants
+### Reader variant
+
+Identical semantics, for any `impl Read`:
 
 ```rust
-use edifact_rs::{deserialize_first_from_reader, deserialize_all_from_reader};
+use edifact_rs::deserialize_each_from_reader;
 use std::io::Cursor;
 
 # use edifact_rs::EdifactDeserialize;
@@ -145,8 +151,8 @@ use std::io::Cursor;
 # struct Bgm { #[edifact(element = 0)] doc_code: String, #[edifact(element = 1)] doc_id: String }
 let input = Cursor::new(b"BGM+220+PO-001+9'BGM+231+PO-002+9'".to_vec());
 
-let first: Bgm = deserialize_first_from_reader(input.clone())?;
-let all: Vec<Bgm> = deserialize_all_from_reader(input)?;
+let all: Vec<Bgm> = deserialize_each_from_reader(input).collect::<Result<_, _>>()?;
+assert_eq!(all.len(), 2);
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
@@ -191,16 +197,15 @@ assert_eq!(messages[1].bgm.as_ref().unwrap().doc_id, "PO-002");
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-### Zero-alloc owned deserialization path
+### No conversion step on the reader path
 
-`deserialize_messages_from_reader` calls `T::edifact_deserialize_owned(&window)`
-rather than converting `OwnedSegment` → `Segment<'_>`. The `#[derive(EdifactDeserialize)]`
-macro generates an override of `edifact_deserialize_owned` that accesses
-`OwnedSegment::element_str` and `OwnedSegment::component_str` directly — **no
-intermediate `Vec<Segment<'_>>` is allocated**.
+`OwnedSegment` *is* `Segment<'static>`, so `deserialize_messages_from_reader`
+hands the window's segments straight to `T::edifact_deserialize`. There is no
+owned-specific trait method, and **no intermediate `Vec<Segment<'_>>` is
+allocated** — the borrowed and reader paths run the identical code.
 
-This makes the reader path allocate at most:
-- One `OwnedMessageWindow` per message window (released after deserialization)
+The reader path therefore allocates at most:
+- One `MessageWindow` per message window (released after deserialization)
 - The deserialized `T` value itself
 
 ---
@@ -212,8 +217,8 @@ message as it arrives, without buffering the whole interchange:
 
 ```rust
 use edifact_rs::{
-    ValidationContext, ProfileRulePack, ValidationIssue, ValidationSeverity,
-    message_windows_from_reader, OwnedSegment,
+    ProfileRulePack, ValidationContext, ValidationIssue, ValidationSeverity,
+    message_windows_from_reader,
 };
 use std::io::Cursor;
 
@@ -223,7 +228,7 @@ let input = Cursor::new(b"\
 
 let pack = ProfileRulePack::new("ORDERS-PROGRESSIVE")
     .for_message_type("ORDERS")
-    .with_stateless_rule_fn(|segs, issues| {
+    .with_rule_fn(|segs, issues| {
         if !segs.iter().any(|s| s.tag == "BGM") {
             issues.push(
                 ValidationIssue::new(
@@ -241,9 +246,8 @@ let ctx = ValidationContext::builder()
 
 for result in message_windows_from_reader(input) {
     let window = result?;
-    // validate using borrowed views of the OwnedMessageWindow's segments
-    let borrowed: Vec<_> = window.segments.iter().map(|s| s.as_borrowed()).collect();
-    let report = ctx.validate_lenient(&borrowed);
+    // The window's segments go straight in — no conversion, no copy.
+    let report = ctx.validate(&window.segments);
     if !report.is_valid() {
         for e in report.errors() {
             eprintln!("❌ {}", e.message);
@@ -276,7 +280,7 @@ let mut in_message = false;
 
 for result in from_reader(input) {
     let seg = result?;
-    match seg.tag.as_str() {
+    match seg.tag() {
         "UNH" => {
             current.clear();
             in_message = true;

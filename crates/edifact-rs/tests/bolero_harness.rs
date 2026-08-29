@@ -1,24 +1,70 @@
-//! Bolero property-based / fuzz harness for `edifact-core` (Story 10.3).
+//! Property and fuzz tests over parse, write, and validate.
 //!
-//! Run:
-//!   cargo bolero test edifact_rs::tests::bolero_no_panic --engine=libfuzzer
-//! Or:
-//!   cargo test -- bolero
+//! # What a target here must assert
+//!
+//! **The output contract, not only the absence of a panic.** A target that runs
+//! the code and discards the result passes for the wrong reason: it exercises
+//! the bug and throws away the evidence. Every target below either
+//!
+//! - asserts an invariant of what came back (spans in bounds, a report's buckets
+//!   summing, a written segment reading back), or
+//! - compares two implementations that must agree — **including on whether they
+//!   succeed at all**, since an input one accepts and the other rejects is the
+//!   most interesting case, not one to skip.
+//!
+//! A conditional assertion (`if let (Ok(_), Ok(_)) = …`) is the trap: it looks
+//! like a differential test and silently covers only the agreeing half.
 
 use bolero::check;
 use edifact_rs::{from_bytes, segments_to_bytes};
 
 #[test]
-fn fuzz_parser_no_panic() {
-    // For any arbitrary byte sequence the parser must not panic.
-    // It may return errors, but never unwind.
+fn fuzz_parser_output_is_well_formed() {
+    // For any byte sequence the parser must not panic — and every segment it
+    // *does* yield must satisfy the contract the rest of the crate relies on:
+    // a valid tag, and spans that index the input in bounds and in order.
+    //
+    // Asserting only "no panic" would let a corrupt span or an unparseable tag
+    // through, and both are silent: a bad span misplaces a diagnostic, a bad tag
+    // is bytes that will not read back.
     check!()
         .with_type::<Vec<u8>>()
         .cloned()
         .for_each(|input: Vec<u8>| {
-            // input is owned by the closure; segments borrow from it and are
-            // dropped at the end of each iteration — no leak needed.
-            for _ in from_bytes(&input) { /* consume */ }
+            for result in from_bytes(&input) {
+                let Ok(segment) = result else { break };
+
+                assert_eq!(
+                    segment.tag().len(),
+                    3,
+                    "tag {:?} is not 3 bytes",
+                    segment.tag()
+                );
+                assert!(
+                    segment.tag().bytes().all(|b| b.is_ascii_uppercase()),
+                    "tag {:?} is not all uppercase ASCII",
+                    segment.tag(),
+                );
+
+                let in_bounds = |span: edifact_rs::Span, what: &str| {
+                    assert!(span.start <= span.end, "inverted {what} span {span:?}");
+                    assert!(
+                        span.end <= input.len(),
+                        "{what} span {span:?} runs past the {}-byte input",
+                        input.len(),
+                    );
+                };
+                in_bounds(segment.span, "segment");
+                in_bounds(segment.tag_span, "tag");
+                for element in &segment.elements {
+                    in_bounds(element.span, "element");
+                    for occurrence in element.repetitions() {
+                        for (_, span) in occurrence {
+                            in_bounds(*span, "component");
+                        }
+                    }
+                }
+            }
         });
 }
 
@@ -99,7 +145,7 @@ fn fuzz_parse_write_parse_invariant_small_message() {
 }
 
 #[test]
-fn fuzz_validation_layers_no_panic() {
+fn fuzz_validation_report_is_self_consistent() {
     use edifact_rs::{
         Segment, ValidationContext, ValidationLayer, ValidationReport, ValidationRuleContext,
         Validator, validate_each,
@@ -132,7 +178,26 @@ fn fuzz_validation_layers_no_panic() {
                 .with_validator(ValidationLayer::CodeList, NoopValidator)
                 .build();
 
-            let _ = context.validate_lenient(&segments);
+            let report = context.validate(&segments);
+
+            // The three severity buckets and the aggregate must agree, and the
+            // two ways of asking "did this pass?" must give the same answer —
+            // callers branch on both.
+            assert_eq!(
+                report.total_issues(),
+                report.errors().len() + report.warnings().len() + report.infos().len(),
+                "total_issues disagrees with the severity buckets",
+            );
+            assert_eq!(
+                report.is_valid(),
+                report.errors().is_empty(),
+                "is_valid disagrees with the error bucket",
+            );
+            assert_eq!(
+                report.is_valid(),
+                report.clone().result().is_ok(),
+                "result() disagrees with is_valid()",
+            );
         });
 }
 
@@ -182,15 +247,46 @@ fn fuzz_qualifier_pattern_invariants() {
 }
 
 #[test]
-fn fuzz_service_string_advice_is_valid_no_panic() {
-    use edifact_rs::ServiceStringAdvice;
-    // ServiceStringAdvice::from_bytes_unchecked + is_valid must not panic for any 9-byte input.
+fn fuzz_valid_service_characters_are_writable() {
+    use edifact_rs::{ServiceStringAdvice, Writer};
+    // `is_valid` is the gate the writer trusts before emitting a `UNA`, so the
+    // two must agree exactly: anything it calls valid must be writable, and
+    // anything it rejects must be refused.  Asserting only "does not panic"
+    // would let the predicate and its one consumer drift apart.
     check!()
         .with_type::<[u8; 9]>()
         .cloned()
         .for_each(|bytes: [u8; 9]| {
             let ssa = ServiceStringAdvice::from_bytes_unchecked(&bytes);
-            let _ = ssa.is_valid();
+            let accepted = Writer::with_una(Vec::new(), ssa).is_ok();
+            assert_eq!(
+                ssa.is_valid(),
+                accepted,
+                "is_valid() and Writer::with_una disagree about {bytes:?}",
+            );
+
+            if !ssa.is_valid() {
+                return;
+            }
+            // Valid means the active service characters are pairwise distinct,
+            // which is what makes a written interchange re-readable.
+            let mut active = vec![
+                ssa.component_sep,
+                ssa.element_sep,
+                ssa.release_char,
+                ssa.segment_term,
+            ];
+            if ssa.is_repetition_active() {
+                active.push(ssa.repetition_sep);
+            }
+            let mut sorted = active.clone();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(
+                sorted.len(),
+                active.len(),
+                "is_valid() accepted duplicate service characters {active:?}",
+            );
         });
 }
 
@@ -412,16 +508,38 @@ fn fuzz_custom_una_round_trip_is_stable() {
 }
 
 #[test]
-fn fuzz_writer_no_panic() {
-    // Feeding arbitrary string data to the writer must never panic.
-    // The writer may return errors, but must not unwind.
+fn fuzz_anything_the_writer_accepts_reparses() {
+    // The writer's core contract: it never emits bytes the parser rejects.
+    //
+    // A segment tag is written verbatim, so an invalid one cannot be escaped
+    // out of trouble the way a delimiter inside a value can — the writer has to
+    // refuse it rather than emit something that does not read back.
     check!()
         .with_type::<(String, Vec<Vec<String>>)>()
         .cloned()
         .for_each(|(tag, elements): (String, Vec<Vec<String>>)| {
             let mut buf: Vec<u8> = Vec::new();
             let mut writer = edifact_rs::Writer::new(&mut buf);
-            let _ = writer.write_segment_parts(&tag, &elements);
+            if writer.write_composites(&tag, &elements).is_err() {
+                return; // refused: nothing to reparse
+            }
+            if writer.finish().is_err() {
+                return;
+            }
+
+            let reparsed: Result<Vec<_>, _> = from_bytes(&buf).collect();
+            let segments = reparsed.unwrap_or_else(|e| {
+                panic!(
+                    "the writer accepted {tag:?} / {elements:?} and emitted {:?}, \
+                     which the parser then rejected: {e}",
+                    String::from_utf8_lossy(&buf),
+                )
+            });
+
+            // An all-empty element list writes just the tag and terminator, which
+            // is one segment; anything else is still exactly one segment.
+            assert_eq!(segments.len(), 1, "one segment in, one segment out");
+            assert_eq!(segments[0].tag, tag, "the tag must survive verbatim");
         });
 }
 
@@ -443,16 +561,16 @@ fn fuzz_validate_envelope_no_panic() {
 }
 
 #[test]
-fn fuzz_message_windows_bytes_no_panic() {
-    // `from_bytes_windows` must not panic for any byte sequence.
-    use edifact_rs::from_bytes_windows;
+fn fuzz_message_windows_no_panic() {
+    // `message_windows` must not panic for any byte sequence.
+    use edifact_rs::message_windows;
 
     check!()
         .with_type::<Vec<u8>>()
         .cloned()
         .for_each(|input: Vec<u8>| {
             // Consume the full iterator — any item may be Ok or Err.
-            for _ in from_bytes_windows(&input) { /* consume */ }
+            for _ in message_windows(&input) { /* consume */ }
         });
 }
 
@@ -462,32 +580,55 @@ fn fuzz_reader_no_panic_and_equivalence() {
     // slice path: fast-path BufRead scan, slow-path byte accumulation, UNA detection
     // across buffer boundaries, and max_segment_bytes guard.
     //
-    // Two properties are tested:
-    //   1. No panic for any arbitrary byte sequence.
-    //   2. When both paths succeed, the resulting segments are identical.
-    use edifact_rs::from_reader_collect;
-
+    // The two paths must agree **completely**: same verdict, and on success the
+    // same segments.  Comparing only when both succeed would skip the one case
+    // that matters most — an input one path accepts and the other rejects.
     check!()
         .with_type::<Vec<u8>>()
         .cloned()
         .for_each(|input: Vec<u8>| {
             // Use a small BufReader capacity to maximise buffer-boundary splits.
             let reader = std::io::BufReader::with_capacity(8, std::io::Cursor::new(&input));
-            let reader_result: Result<Vec<_>, _> = from_reader_collect(reader);
+            let reader_result: Result<Vec<_>, _> = edifact_rs::from_bufread(reader).collect();
             let slice_result: Result<Vec<_>, _> = from_bytes(&input).collect();
 
-            // Property 1: no panic (guaranteed by running the code above).
+            let head = &input[..input.len().min(64)];
+            assert_eq!(
+                reader_result.is_ok(),
+                slice_result.is_ok(),
+                "the two paths disagreed on whether {head:?} parses at all: \
+                 reader={reader_result:?} slice={slice_result:?}",
+            );
 
-            // Property 2: on success both paths must agree on tag sequence.
-            if let (Ok(reader_segs), Ok(slice_segs)) = (&reader_result, &slice_result) {
+            let (Ok(reader_segs), Ok(slice_segs)) = (&reader_result, &slice_result) else {
+                return; // both failed, which is agreement
+            };
+            assert_eq!(
+                reader_segs.len(),
+                slice_segs.len(),
+                "different segment counts for {head:?}",
+            );
+            for (r, s) in reader_segs.iter().zip(slice_segs.iter()) {
+                assert_eq!(r.tag, s.tag, "tag mismatch between the two paths");
                 assert_eq!(
-                    reader_segs.len(),
-                    slice_segs.len(),
-                    "reader and slice paths returned different segment counts for input: {:?}",
-                    &input[..input.len().min(64)],
+                    r.elements.len(),
+                    s.elements.len(),
+                    "element count mismatch on {} for {head:?}",
+                    r.tag,
                 );
-                for (r, s) in reader_segs.iter().zip(slice_segs.iter()) {
-                    assert_eq!(r.tag, s.tag, "tag mismatch between reader and slice paths");
+                for (re, se) in r.elements.iter().zip(s.elements.iter()) {
+                    assert_eq!(
+                        re.components().collect::<Vec<_>>(),
+                        se.components().collect::<Vec<_>>(),
+                        "component values differ on {} for {head:?}",
+                        r.tag,
+                    );
+                    assert_eq!(
+                        re.repeat_count(),
+                        se.repeat_count(),
+                        "occurrence count differs on {} for {head:?}",
+                        r.tag,
+                    );
                 }
             }
         });
@@ -794,11 +935,11 @@ fn fuzz_profile_rule_pack_no_panic() {
                 .forbid_segment_in_group("SG2", "UNS", "SG2-UNS-F");
             let ctx = ValidationContext::builder().with_profile_pack(pack).build();
             // Flat validation must not panic.
-            let _ = ctx.validate_lenient(&segs);
+            let _ = ctx.validate(&segs);
             // Build the segment group tree — must not panic.
             let tree = group_segments_indexed(&segs, FUZZ_SCHEMA, "ROOT");
             // Grouped validation must not panic.
-            let _ = ctx.validate_lenient_grouped(&tree, &segs);
+            let _ = ctx.validate_grouped(&tree, &segs);
         });
 }
 

@@ -40,7 +40,7 @@ enum OrdersViolation {
 fn build_orders_pack() -> ProfileRulePack {
     let function_code_pack = ProfileRulePack::new("ORDERS-FUNCTION-CODE")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments, issues| {
+        .with_rule_fn(|segments, issues| {
             issues.extend((|| -> Option<ValidationIssue> {
                 let bgm = segments.iter().find(|s| s.tag == "BGM")?;
                 let func = bgm.get_element(2)?.get_component(0)?;
@@ -60,7 +60,7 @@ fn build_orders_pack() -> ProfileRulePack {
 
     let reference_pack = ProfileRulePack::new("ORDERS-PO-REF")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments, issues| {
+        .with_rule_fn(|segments, issues| {
             issues.extend((|| -> Option<ValidationIssue> {
                 let bgm = segments.iter().find(|s| s.tag == "BGM")?;
                 let reference = bgm.get_element(1)?.get_component(0)?;
@@ -157,7 +157,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
         .with_profile_pack(build_orders_pack())
         .with_validator(ValidationLayer::Profile, MaxSegmentValidator { limit: 100 })
         .build()
-        .validate_lenient(&valid_segments);
+        .validate(&valid_segments);
     assert!(
         !report.has_errors(),
         "valid message should produce no errors"
@@ -170,7 +170,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
     let bad_func_report = ValidationContext::builder()
         .with_profile_pack(build_orders_pack())
         .build()
-        .validate_lenient(&bad_func_segments);
+        .validate(&bad_func_segments);
     let violations = extract_violations(&bad_func_report);
     println!("function-code violations: {violations:?}");
     assert_eq!(
@@ -193,7 +193,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
         .with_profile_pack(build_orders_pack())
         .with_validator(ValidationLayer::Profile, MaxSegmentValidator { limit: 2 })
         .build()
-        .validate_lenient(&valid_segments);
+        .validate(&valid_segments);
     assert!(
         tiny_limit_report.has_warnings(),
         "expected a segment-count warning"

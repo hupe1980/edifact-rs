@@ -1,5 +1,5 @@
 error: unknown struct-level `edifact` key; expected `segment`, `qualifier`, `qualifier_from`, or `layout`
-  --> tests/ui/fail_unknown_struct_attr_key.rs:15:28
+  --> tests/ui/fail_unknown_struct_attr_key.rs:13:28
    |
-15 | #[edifact(segment = "BGM", unknown = "X")]
+13 | #[edifact(segment = "BGM", unknown = "X")]
    |                            ^^^^^^^

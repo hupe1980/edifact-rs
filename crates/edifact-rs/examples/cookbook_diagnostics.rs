@@ -68,7 +68,7 @@ fn run_validation() -> Result<(), edifact_rs::EdifactError> {
         .with_validator(ValidationLayer::CodeList, DemoValidator)
         .build();
 
-    let report = context.validate_lenient(&segments);
+    let report = context.validate(&segments);
     // `render_deterministic` always produces the same output for the same
     // report — useful for snapshot tests.
     println!("report:\n{}", report.render_deterministic());

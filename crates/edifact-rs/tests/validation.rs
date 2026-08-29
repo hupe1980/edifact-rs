@@ -25,7 +25,7 @@ impl Validator for SimpleStructureValidator {
             // Reject segments starting with Z (reserved for user)
             if segment.tag.starts_with('Z') {
                 return Err(EdifactError::InvalidSegmentForMessage {
-                    tag: segment.tag.to_owned(),
+                    tag: segment.tag().to_owned(),
                     message_type: "GENERIC".to_owned(),
                     span: segment.span,
                 });
@@ -126,7 +126,7 @@ fn context_can_disable_code_list_layer() {
         .code_list(false)
         .build();
 
-    let report = ctx.validate_lenient(&segments);
+    let report = ctx.validate(&segments);
     assert!(report.warnings().is_empty());
 }
 
@@ -145,7 +145,7 @@ fn validation_context_supports_multiple_validators() {
             validate_each(segments, report, |segment| {
                 if segment.tag.starts_with('Z') {
                     return Err(EdifactError::InvalidSegmentForMessage {
-                        tag: segment.tag.to_owned(),
+                        tag: segment.tag().to_owned(),
                         message_type: "GENERIC".to_owned(),
                         span: segment.span,
                     });
@@ -180,7 +180,7 @@ fn validation_context_supports_multiple_validators() {
         .with_validator(ValidationLayer::CodeList, ValidatorB)
         .build();
 
-    let report = ctx.validate_lenient(&segments);
+    let report = ctx.validate(&segments);
     assert!(report.has_errors());
 }
 
@@ -219,7 +219,7 @@ fn validation_context_propagates_message_type() {
         )
         .build();
 
-    let report = ctx.validate_lenient(&segments);
+    let report = ctx.validate(&segments);
     assert!(!report.has_errors());
     assert_eq!(
         *captured_message_type.lock().unwrap(),
@@ -263,7 +263,7 @@ mod suppression_rules {
         ValidationContext::builder()
             .with_syntax_validation()
             .build()
-            .validate_lenient(&segments)
+            .validate(&segments)
             .iter_issues()
             .filter_map(|i| i.error_code().map(str::to_owned))
             .collect()
@@ -324,7 +324,7 @@ mod suppression_rules {
         ValidationContext::builder()
             .with_validator(ValidationLayer::Structure, validator)
             .build()
-            .validate_lenient(&segments)
+            .validate(&segments)
             .iter_issues()
             .filter_map(|i| i.error_code().map(str::to_owned))
             .collect()
@@ -427,7 +427,7 @@ mod suppression_rules {
         let report = ValidationContext::builder()
             .with_syntax_validation()
             .build()
-            .validate_lenient(&segments);
+            .validate(&segments);
         assert!(!report.has_errors(), "{report:#?}");
         assert!(report.has_warnings());
     }
@@ -469,7 +469,7 @@ mod suppression_rules {
         let report = ValidationContext::builder()
             .with_validator(ValidationLayer::Structure, validator)
             .build()
-            .validate_lenient(&segments);
+            .validate(&segments);
         assert!(
             report.iter_issues().any(|i| i.error_code() == Some("E053")),
             "{report:#?}"

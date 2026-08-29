@@ -1,12 +1,15 @@
 [workspace]
-resolver = "2"
+# MSRV-aware: never resolves a dependency whose `rust-version` exceeds ours.
+# Must be stated explicitly — a `[workspace] resolver` key overrides the
+# edition default.
+resolver = "3"
 members = [
     "crates/edifact-rs",
     "crates/edifact-rs-derive",
 ]
 
 [workspace.package]
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["hupe1980"]
@@ -14,21 +17,23 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 bolero = { version = "0.13", features = ["arbitrary"] }
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+# Capped at 0.7: criterion 0.8 requires rustc 1.86, above our MSRV.
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
 divan = "0.1"
 memchr = "2"
 miette = { version = "7", features = ["fancy"] }
 proc-macro2 = "1"
 quote = "1"
-# `union` enables a union-based inline/heap discriminant, eliminating the
-# redundant bool tag field per SmallVec instance. This is `unsafe`-sound per
-# smallvec's own safety guarantees and provides a measurable reduction in
-# struct size on hot paths (e.g., Element.components).
+# `rc` is required: `ValidationIssue::segment_group` is an `Option<Arc<str>>`,
+# and serde does not serialize `Rc`/`Arc` without it.
 serde = { version = "1", features = ["derive", "rc"] }
 # dev-only. Backs the serde round-trip tests for the validation report types.
 serde_json = "1"
+# `union` drops the per-SmallVec bool tag, shrinking `Element::components`.
 smallvec = { version = "1", features = ["union"] }
-syn = { version = "2", features = ["full"] }
+# 3 to match what `thiserror` already pulls in, so syn is compiled once.
+# No `full`: the derive only inspects a `DeriveInput`, never whole items.
+syn = "3"
 thiserror = "2"
 # dev-only. `fs` and `io-util` back the async-integration guide's snippets,
 # which are compiled as doctests.

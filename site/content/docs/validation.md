@@ -100,7 +100,7 @@ let ctx = ValidationContext::builder()
     .with_validator(ValidationLayer::CodeList, BgmCodeValidator)
     .build();
 
-let report = ctx.validate_lenient(&segs);
+let report = ctx.validate(&segs);
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
@@ -129,7 +129,7 @@ use std::sync::Arc;
 let pack = Arc::new(
     ProfileRulePack::new("ORDERS-RULES")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|_segs, _issues| {}),
+        .with_rule_fn(|_segs, _issues| {}),
 );
 
 // Lightweight clone — closures are not duplicated:
@@ -148,7 +148,7 @@ let ctx2 = ValidationContext::builder()
 use edifact_rs::ValidationContext;
 
 let ctx = ValidationContext::builder()
-    .bail_on_first_critical(true)  // stop after the first Critical-severity issue
+    .bail_on_first_critical(true)  // skip later validators once a Critical appears
     .build();
 ```
 
@@ -166,7 +166,7 @@ use edifact_rs::{ValidationContext, from_bytes};
 let ctx = ValidationContext::builder()
     .with_envelope_validation()  // adds UNB/UNG/UNH/UNT/UNE/UNZ structure checks
     .build();
-let report = ctx.validate_lenient(&segs);
+let report = ctx.validate(&segs);
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
@@ -210,7 +210,7 @@ let segments: Vec<_> = from_bytes(b"FTX+   'DTM'").collect::<Result<Vec<_>, _>>(
 let report = ValidationContext::builder()
     .with_syntax_validation()
     .build()
-    .validate_lenient(&segments);
+    .validate(&segments);
 
 assert_eq!(report.errors()[0].error_code(), Some("E046"));   // DTM has no data element
 assert_eq!(report.warnings()[0].error_code(), Some("E045")); // FTX value is only spaces
@@ -235,19 +235,29 @@ let ctx = ValidationContext::builder()
     .with_message_type("ORDERS")
     .with_message_ref("MSG-42")  // DE 0062 from the UNH segment
     .build();
-let report = ctx.validate_lenient(&segs);
+let report = ctx.validate(&segs);
 // Every issue in `report` will have `issue.message_ref == Some("MSG-42")`
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
 ---
 
-## `validate_lenient` vs `validate_strict`
+## Collecting issues, and turning them into a `Result`
 
-| Method | On first error | Returns |
-|---|---|---|
-| `validate_lenient(&segs)` | Continues collecting all issues | `ValidationReport` |
-| `validate_strict(&segs)` | Runs all validators, returns `Err(report)` if any `Error`/`Critical` found | `Result<ValidationReport, ValidationReport>` |
+There is **one** validate method per shape. It always runs every enabled
+validator and always returns a `ValidationReport` — validation reports, it does
+not decide for you. When you want a `Result`, ask the report for one:
+
+| Call | Returns |
+|---|---|
+| `ctx.validate(&segs)` | `ValidationReport` — every issue found |
+| `ctx.validate(&segs).result()` | `Result<ValidationReport, ValidationReport>` — `Err` when any `Error`/`Critical` was found |
+| `ctx.validate_with(&segs, &meta)` | as `validate`, with typed per-call metadata for rule closures |
+| `ctx.validate_grouped(&tree, &segs)` | as `validate`, plus the group-aware pass |
+
+Both parsing paths go into the same call: `&[OwnedSegment]` coerces to
+`&[Segment<'_>]`, so a window straight off `message_windows_from_reader` needs no
+conversion.
 
 ```rust
 # use edifact_rs::{ValidationContext, from_bytes};
@@ -255,7 +265,7 @@ let report = ctx.validate_lenient(&segs);
 # let ctx = ValidationContext::builder().build();
 
 // Lenient: collect all issues even when errors are present
-let report = ctx.validate_lenient(&segs);
+let report = ctx.validate(&segs);
 if !report.is_valid() {
     for issue in report.errors() {
         eprintln!("error [{}]: {}", issue.error_code().unwrap_or("?"), issue.message);
@@ -265,8 +275,8 @@ if !report.is_valid() {
     }
 }
 
-// Strict: run all validators; get Err(report) when any Error/Critical found
-match ctx.validate_strict(&segs) {
+// `.result()` turns the same report into a Result when that is what you want.
+match ctx.validate(&segs).result() {
     Ok(report) => println!("valid, {} warnings", report.warnings().len()),
     Err(report) => {
         for issue in report.errors() {
@@ -285,7 +295,7 @@ match ctx.validate_strict(&segs) {
 # use edifact_rs::{ValidationContext, from_bytes};
 # let segs: Vec<_> = from_bytes(b"BGM+220+PO-4711+9'").collect::<Result<_,_>>()?;
 # let ctx = ValidationContext::builder().build();
-let report = ctx.validate_lenient(&segs);
+let report = ctx.validate(&segs);
 
 // Overall validity (no errors, no criticals)
 println!("valid: {}", report.is_valid());
@@ -452,7 +462,7 @@ let ctx = ValidationContext::builder()
     .with_profile_pack(
         ProfileRulePack::new("ORDERS-REQUIRED")
             .for_message_type("ORDERS")
-            .with_stateless_rule_fn(|segs, issues| {
+            .with_rule_fn(|segs, issues| {
                 if !segs.iter().any(|s| s.tag == "BGM") {
                     issues.push(
                         ValidationIssue::new(ValidationSeverity::Error, "BGM is required")
@@ -465,8 +475,8 @@ let ctx = ValidationContext::builder()
 
 for result in message_windows_from_reader(input) {
     let window = result?;
-    let borrowed: Vec<_> = window.segments.iter().map(|s| s.as_borrowed()).collect();
-    let report = ctx.validate_lenient(&borrowed);
+    let borrowed: Vec<_> = window.segments.iter().map(|s| s.clone()).collect();
+    let report = ctx.validate(&borrowed);
     println!(
         "message {:?}: {} error(s)",
         window.message_type,
@@ -486,7 +496,7 @@ for a complete example.
 Group-aware validation fires `ProfileRulePack` group rules once per segment-group
 occurrence (e.g. once per `SG5` instance) rather than once across the entire
 message. First define a `[GroupDef]` schema, build a `SegmentGroupIndexed` tree
-with `group_segments_indexed`, then pass the tree to `validate_lenient_grouped`:
+with `group_segments_indexed`, then pass the tree to `validate_grouped`:
 
 ```rust
 use edifact_rs::{
@@ -518,21 +528,14 @@ let ctx = ValidationContext::builder()
     .with_profile_pack(pack)
     .build();
 
-// validate_lenient_grouped runs the flat pass then the group pass:
-let report = ctx.validate_lenient_grouped(&tree, &segs);
+// `validate_grouped` runs the flat pass, then the group pass:
+let report = ctx.validate_grouped(&tree, &segs);
 println!("{} error(s)", report.errors().len());
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-For owned segments (e.g. from `message_windows_from_reader`), use the `_owned`
-variants:
-
-| Method | Args | Segment type | Mode |
-|---|---|---|---|
-| `validate_lenient_grouped(root, segs)` | `(&SegmentGroupIndexed, &[Segment])` | borrowed | Collect all issues |
-| `validate_strict_grouped(root, segs)` | `(&SegmentGroupIndexed, &[Segment])` | borrowed | `Err` on first error/critical |
-| `validate_lenient_grouped_owned(root, segs)` | `(&SegmentGroupIndexed, &[OwnedSegment])` | owned | Collect all issues |
-| `validate_strict_grouped_owned(root, segs)` | `(&SegmentGroupIndexed, &[OwnedSegment])` | owned | `Err` on first error/critical |
+Segments read from a reader go into the same call unchanged, and `.result()`
+converts the report exactly as it does for the flat pass.
 
 ### Schemas built at runtime
 
@@ -556,12 +559,88 @@ assert_eq!(tree.children[0].definition, "SG5");
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
+### How a tag is resolved
+
+At every level the traversal asks, in this order:
+
+1. **Does a child group at *this* level trigger on the tag?** If so, open it.
+2. **Does a group further out trigger on it?** If so, close this group and let
+   the outer level handle it.
+3. Otherwise the segment belongs directly to the group currently open.
+
+Step 1 comes first because the same trigger tag routinely appears at more than
+one level. `UTILMD` names its message-level parties in SG2 and a Vorgang's
+parties in SG12 inside SG4 — both triggered by `NAD`:
+
+```rust
+use edifact_rs::group::{GroupDef, group_segments_indexed};
+
+static SCHEMA: &[GroupDef] = &[
+    GroupDef::new("SG2", "NAD"),
+    GroupDef::with_children("SG4", "IDE", &[GroupDef::new("SG12", "NAD")]),
+];
+
+let segments: Vec<_> = edifact_rs::from_bytes(
+    b"BGM+E01'NAD+MS+SENDER'NAD+MR+RECEIVER'IDE+24+V1'NAD+Z09+KUNDE'DTM+92:20260101:102'",
+)
+.collect::<Result<Vec<_>, _>>()?;
+
+let tree = group_segments_indexed(&segments, SCHEMA, "ROOT");
+
+// The two message-level parties are SG2 …
+assert_eq!(
+    tree.children.iter().map(|g| g.definition).collect::<Vec<_>>(),
+    ["SG2", "SG2", "SG4"],
+);
+// … and the party inside the Vorgang nests as SG12, rather than reopening SG2.
+let sg4 = tree.children.last().unwrap();
+assert_eq!(sg4.children[0].definition, "SG12");
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+A group ends at the first segment the current branch cannot consume, never at
+one an outer branch could also have consumed — the other order would make SG12
+unreachable from any input.
+
+A group's own trigger is not among its children, so a repeated trigger opens the
+**next occurrence** rather than nesting.
+
+### Reading groups back
+
+The tree stores index ranges, not copies. `segments(&all)` resolves a group
+against the slice it was built from, `descendants()` walks the subtree in
+document order, and `find(name)` yields every group with a given name at any
+depth:
+
+```rust
+use edifact_rs::group::{GroupDef, group_segments_indexed};
+
+static SCHEMA: &[GroupDef] = &[
+    GroupDef::new("SG2", "NAD"),
+    GroupDef::with_children("SG4", "IDE", &[GroupDef::new("SG12", "NAD")]),
+];
+
+let segments: Vec<_> = edifact_rs::from_bytes(
+    b"NAD+MS+SENDER'IDE+24+V1'NAD+Z09+KUNDE'IDE+24+V2'NAD+VY+PARTY'",
+)
+.collect::<Result<Vec<_>, _>>()?;
+let tree = group_segments_indexed(&segments, SCHEMA, "ROOT");
+
+// Every SG12 in the message, whichever Vorgang it belongs to.
+let parties: Vec<&str> = tree
+    .find("SG12")
+    .filter_map(|group| group.segments(&segments).first())
+    .filter_map(|nad| nad.element_str(0))
+    .collect();
+assert_eq!(parties, ["Z09", "VY"]);
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
 ### What a group actually spans
 
-Grouping is driven purely by trigger tags: a group runs from its trigger up to
-the next trigger of a sibling or ancestor, or to the end of the slice. Nothing
-stops the last group of a message at `UNT`, so the trailer lands inside whichever
-group ran last.
+A tag that triggers nothing is a direct segment of whichever group is open when
+it arrives. Nothing stops the last group of a message at `UNT`, so the trailer
+lands inside whichever group ran last.
 
 `MessageWindow::segments` deliberately includes `UNH` and `UNT` so that
 envelope-aware consumers can read them; pass `MessageWindow::body()` — which is
@@ -862,9 +941,9 @@ assert!(nad.value_by_code(&NAD, "2380").is_err());
 
 | Method | On | Returns |
 |---|---|---|
-| `value_by_code(layout, de)` | `Segment`, `BorrowedSegment`, `OwnedSegment` | `Result<Option<&str>, EdifactError>` |
-| `span_by_code(layout, de)` | `Segment`, `BorrowedSegment`, `OwnedSegment` | `Result<Option<Span>, EdifactError>` — attach to a `ValidationIssue` with `with_span` |
-| `element_by_code(layout, de)` | `Segment`, `BorrowedSegment`, `OwnedSegment` | `Result<Option<Element>, EdifactError>` — the enclosing composite when `de` names a component |
+| `value_by_code(layout, de)` | `Segment` (and therefore `OwnedSegment`) | `Result<Option<&str>, EdifactError>` |
+| `span_by_code(layout, de)` | `Segment` | `Result<Option<Span>, EdifactError>` — attach to a `ValidationIssue` with `with_span` |
+| `element_by_code(layout, de)` | `Segment` | `Result<Option<&Element>, EdifactError>` — the enclosing composite when `de` names a component |
 | `SegmentLayout::resolve_code(de)` | `SegmentDefinition`, `OwnedSegmentDef` | `Result<ElementPath, EdifactError>` — resolve once, then read many segments with `value_at` / `span_at` |
 
 Three distinct failures are reported rather than silently tolerated:

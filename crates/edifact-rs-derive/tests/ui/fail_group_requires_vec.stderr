@@ -1,5 +1,5 @@
 error: field `line`: #[edifact(group)] requires Vec<T>
-  --> tests/ui/fail_group_requires_vec.rs:15:15
+  --> tests/ui/fail_group_requires_vec.rs:14:15
    |
-15 |     #[edifact(group)]
+14 |     #[edifact(group)]
    |               ^^^^^

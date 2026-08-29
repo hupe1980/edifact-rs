@@ -1,5 +1,5 @@
 error: field `doc_name_code`: #[edifact(required)] only applies to Option<T> fields; non-Option fields are always required
-  --> tests/ui/fail_required_on_non_option.rs:16:28
+  --> tests/ui/fail_required_on_non_option.rs:15:28
    |
-16 |     #[edifact(element = 0, required)]
+15 |     #[edifact(element = 0, required)]
    |                            ^^^^^^^^

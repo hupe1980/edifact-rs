@@ -1,10 +1,12 @@
-//! Event model for EDIFACT (de)serialization.
+//! Event model for EDIFACT serialization.
 //!
-//! [`EdifactEvent`] is the borrowed, zero-allocation form used during real-time
-//! emission.  [`OwnedEdifactEvent`] is the owned form collected by [`VecEmitter`]
-//! for testing and introspection — no `Box::leak` anywhere.
+//! [`EdifactEvent`] carries its text as a [`Cow`], so one type serves both the
+//! zero-allocation emission path (where every value borrows from the value being
+//! serialized) and [`VecEmitter`], which has to keep events past the borrow that
+//! produced them.
 
 use crate::EdifactError;
+use std::borrow::Cow;
 use std::io::Write;
 
 // ── event types ───────────────────────────────────────────────────────────────
@@ -16,17 +18,17 @@ pub enum EdifactEvent<'a> {
     /// Beginning of a new segment (e.g. `"BGM"`, `"NAD"`).
     StartSegment {
         /// Segment tag.
-        tag: &'a str,
+        tag: Cow<'a, str>,
     },
     /// A data element value — first (or only) component of a new element.
     Element {
         /// Element text value.
-        value: &'a str,
+        value: Cow<'a, str>,
     },
     /// An additional component within the current element.
     ComponentElement {
         /// Component text value.
-        value: &'a str,
+        value: Cow<'a, str>,
     },
     /// The first component of a further occurrence of the current data element.
     ///
@@ -43,57 +45,60 @@ pub enum EdifactEvent<'a> {
     /// output that reads back as a single occurrence.
     RepeatElement {
         /// First component of the new occurrence.
-        value: &'a str,
+        value: Cow<'a, str>,
     },
     /// End of the current segment.
     EndSegment,
 }
 
-/// An owned EDIFACT event — for collection and testing (no borrowed lifetimes).
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum OwnedEdifactEvent {
-    /// Owned segment-start event.
-    StartSegment {
-        /// Segment tag.
-        tag: String,
-    },
-    /// Owned element event.
-    Element {
-        /// Element text value.
-        value: String,
-    },
-    /// Owned component event.
-    ComponentElement {
-        /// Component text value.
-        value: String,
-    },
-    /// Owned repetition event.
-    RepeatElement {
-        /// First component of the new occurrence.
-        value: String,
-    },
-    /// Owned segment-end event.
-    EndSegment,
+impl<'a> EdifactEvent<'a> {
+    /// A [`StartSegment`][Self::StartSegment] event for `tag`.
+    #[inline]
+    #[must_use]
+    pub fn start(tag: impl Into<Cow<'a, str>>) -> Self {
+        Self::StartSegment { tag: tag.into() }
+    }
+
+    /// An [`Element`][Self::Element] event carrying `value`.
+    #[inline]
+    #[must_use]
+    pub fn element(value: impl Into<Cow<'a, str>>) -> Self {
+        Self::Element {
+            value: value.into(),
+        }
+    }
+
+    /// A [`ComponentElement`][Self::ComponentElement] event carrying `value`.
+    #[inline]
+    #[must_use]
+    pub fn component(value: impl Into<Cow<'a, str>>) -> Self {
+        Self::ComponentElement {
+            value: value.into(),
+        }
+    }
+
+    /// A [`RepeatElement`][Self::RepeatElement] event carrying `value`.
+    #[inline]
+    #[must_use]
+    pub fn repeat(value: impl Into<Cow<'a, str>>) -> Self {
+        Self::RepeatElement {
+            value: value.into(),
+        }
+    }
 }
 
 impl EdifactEvent<'_> {
-    /// Convert to an owned event, cloning string data.
-    pub fn into_owned(self) -> OwnedEdifactEvent {
+    /// Detach this event from the value it borrows from, cloning its text.
+    #[must_use]
+    pub fn into_owned(self) -> EdifactEvent<'static> {
         match self {
-            Self::StartSegment { tag } => OwnedEdifactEvent::StartSegment {
-                tag: tag.to_owned(),
-            },
-            Self::Element { value } => OwnedEdifactEvent::Element {
-                value: value.to_owned(),
-            },
-            Self::ComponentElement { value } => OwnedEdifactEvent::ComponentElement {
-                value: value.to_owned(),
-            },
-            Self::RepeatElement { value } => OwnedEdifactEvent::RepeatElement {
-                value: value.to_owned(),
-            },
-            Self::EndSegment => OwnedEdifactEvent::EndSegment,
+            Self::StartSegment { tag } => EdifactEvent::start(Cow::Owned(tag.into_owned())),
+            Self::Element { value } => EdifactEvent::element(Cow::Owned(value.into_owned())),
+            Self::ComponentElement { value } => {
+                EdifactEvent::component(Cow::Owned(value.into_owned()))
+            }
+            Self::RepeatElement { value } => EdifactEvent::repeat(Cow::Owned(value.into_owned())),
+            Self::EndSegment => EdifactEvent::EndSegment,
         }
     }
 }
@@ -122,13 +127,13 @@ pub trait EventEmitter {
 
 // ── VecEmitter ────────────────────────────────────────────────────────────────
 
-/// Collects events into a [`Vec<OwnedEdifactEvent>`].
+/// Collects events into a `Vec<EdifactEvent<'static>>`.
 ///
 /// Useful for testing and introspection.  Does not leak memory.
 #[derive(Debug, Default)]
 pub struct VecEmitter {
     /// Collected owned events.
-    pub events: Vec<OwnedEdifactEvent>,
+    pub events: Vec<EdifactEvent<'static>>,
 }
 
 impl EventEmitter for VecEmitter {
@@ -209,8 +214,8 @@ impl<W: Write> WriterEmitter<W> {
     /// use edifact_rs::{Charset, EdifactEvent, EventEmitter, WriterEmitter};
     ///
     /// let mut emitter = WriterEmitter::new(Vec::new()).with_charset(Charset::UnoC);
-    /// emitter.emit(EdifactEvent::StartSegment { tag: "NAD" })?;
-    /// emitter.emit(EdifactEvent::Element { value: "Müller" })?;
+    /// emitter.emit(EdifactEvent::start("NAD"))?;
+    /// emitter.emit(EdifactEvent::element("Müller"))?;
     /// emitter.emit(EdifactEvent::EndSegment)?;
     /// assert_eq!(emitter.finish()?, b"NAD+M\xFCller'".to_vec());
     /// # Ok::<(), edifact_rs::EdifactError>(())
@@ -255,7 +260,7 @@ impl<W: Write> EventEmitter for WriterEmitter<W> {
                     });
                 }
                 self.state = EmitterState::InSegment;
-                self.writer.write_tag_only(tag)?;
+                self.writer.write_tag_only(&tag)?;
             }
             EdifactEvent::Element { value } => {
                 if self.state == EmitterState::Idle {
@@ -265,7 +270,7 @@ impl<W: Write> EventEmitter for WriterEmitter<W> {
                 }
                 self.state = EmitterState::InElement;
                 self.writer.write_element_sep()?;
-                self.writer.write_escaped(value)?;
+                self.writer.write_escaped(&value)?;
             }
             EdifactEvent::ComponentElement { value } => {
                 if self.state != EmitterState::InElement {
@@ -274,7 +279,7 @@ impl<W: Write> EventEmitter for WriterEmitter<W> {
                     });
                 }
                 self.writer.write_component_sep()?;
-                self.writer.write_escaped(value)?;
+                self.writer.write_escaped(&value)?;
             }
             EdifactEvent::RepeatElement { value } => {
                 if self.state != EmitterState::InElement {
@@ -285,7 +290,7 @@ impl<W: Write> EventEmitter for WriterEmitter<W> {
                 // Checked before the separator is written, so a rejected
                 // repetition leaves nothing half-emitted behind it.
                 self.writer.write_repetition_sep()?;
-                self.writer.write_escaped(value)?;
+                self.writer.write_escaped(&value)?;
             }
             EdifactEvent::EndSegment => {
                 if self.state == EmitterState::Idle {
@@ -308,21 +313,11 @@ mod tests {
     #[test]
     fn vec_emitter_no_memory_leak() {
         let mut e = VecEmitter::default();
-        e.emit(EdifactEvent::StartSegment { tag: "BGM" }).unwrap();
-        e.emit(EdifactEvent::Element { value: "E03" }).unwrap();
+        e.emit(EdifactEvent::start("BGM")).unwrap();
+        e.emit(EdifactEvent::element("E03")).unwrap();
         e.emit(EdifactEvent::EndSegment).unwrap();
-        assert_eq!(
-            e.events[0],
-            OwnedEdifactEvent::StartSegment {
-                tag: "BGM".to_owned()
-            }
-        );
-        assert_eq!(
-            e.events[1],
-            OwnedEdifactEvent::Element {
-                value: "E03".to_owned()
-            }
-        );
+        assert_eq!(e.events[0], EdifactEvent::start("BGM".to_owned()));
+        assert_eq!(e.events[1], EdifactEvent::element("E03".to_owned()));
     }
 
     #[test]
@@ -330,9 +325,9 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut e = WriterEmitter::new(&mut buf);
-            e.emit(EdifactEvent::StartSegment { tag: "BGM" }).unwrap();
-            e.emit(EdifactEvent::Element { value: "E03" }).unwrap();
-            e.emit(EdifactEvent::Element { value: "11042" }).unwrap();
+            e.emit(EdifactEvent::start("BGM")).unwrap();
+            e.emit(EdifactEvent::element("E03")).unwrap();
+            e.emit(EdifactEvent::element("11042")).unwrap();
             e.emit(EdifactEvent::EndSegment).unwrap();
             e.finish().unwrap();
         }
@@ -344,16 +339,11 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut e = WriterEmitter::new(&mut buf);
-            e.emit(EdifactEvent::StartSegment { tag: "NAD" }).unwrap();
-            e.emit(EdifactEvent::Element { value: "MS" }).unwrap();
-            e.emit(EdifactEvent::Element {
-                value: "9900112233445",
-            })
-            .unwrap();
-            e.emit(EdifactEvent::ComponentElement { value: "" })
-                .unwrap();
-            e.emit(EdifactEvent::ComponentElement { value: "293" })
-                .unwrap();
+            e.emit(EdifactEvent::start("NAD")).unwrap();
+            e.emit(EdifactEvent::element("MS")).unwrap();
+            e.emit(EdifactEvent::element("9900112233445")).unwrap();
+            e.emit(EdifactEvent::component("")).unwrap();
+            e.emit(EdifactEvent::component("293")).unwrap();
             e.emit(EdifactEvent::EndSegment).unwrap();
             e.finish().unwrap();
         }
@@ -370,13 +360,11 @@ mod tests {
         let mut buf = Vec::new();
         {
             let mut e = WriterEmitter::with_una(&mut buf, ssa).unwrap();
-            e.emit(EdifactEvent::StartSegment { tag: "RFF" }).unwrap();
-            e.emit(EdifactEvent::Element { value: "ON" }).unwrap();
-            e.emit(EdifactEvent::ComponentElement { value: "1" })
-                .unwrap();
-            e.emit(EdifactEvent::RepeatElement { value: "ON" }).unwrap();
-            e.emit(EdifactEvent::ComponentElement { value: "2" })
-                .unwrap();
+            e.emit(EdifactEvent::start("RFF")).unwrap();
+            e.emit(EdifactEvent::element("ON")).unwrap();
+            e.emit(EdifactEvent::component("1")).unwrap();
+            e.emit(EdifactEvent::repeat("ON")).unwrap();
+            e.emit(EdifactEvent::component("2")).unwrap();
             e.emit(EdifactEvent::EndSegment).unwrap();
             e.finish().unwrap();
         }
@@ -396,11 +384,9 @@ mod tests {
     #[test]
     fn a_repetition_without_a_declared_separator_is_refused() {
         let mut e = WriterEmitter::new(Vec::<u8>::new());
-        e.emit(EdifactEvent::StartSegment { tag: "RFF" }).unwrap();
-        e.emit(EdifactEvent::Element { value: "ON" }).unwrap();
-        let err = e
-            .emit(EdifactEvent::RepeatElement { value: "ON" })
-            .unwrap_err();
+        e.emit(EdifactEvent::start("RFF")).unwrap();
+        e.emit(EdifactEvent::element("ON")).unwrap();
+        let err = e.emit(EdifactEvent::repeat("ON")).unwrap_err();
         assert!(
             matches!(err, EdifactError::RepetitionSeparatorNotDeclared),
             "expected RepetitionSeparatorNotDeclared, got {err:?}"
@@ -411,10 +397,8 @@ mod tests {
     fn a_repetition_before_any_element_is_refused() {
         let ssa = crate::ServiceStringAdvice::from_bytes(b"UNA:+.?*'").unwrap();
         let mut e = WriterEmitter::with_una(Vec::<u8>::new(), ssa).unwrap();
-        e.emit(EdifactEvent::StartSegment { tag: "RFF" }).unwrap();
-        let err = e
-            .emit(EdifactEvent::RepeatElement { value: "ON" })
-            .unwrap_err();
+        e.emit(EdifactEvent::start("RFF")).unwrap();
+        let err = e.emit(EdifactEvent::repeat("ON")).unwrap_err();
         assert!(
             matches!(err, EdifactError::InvalidEventSequence { .. }),
             "expected InvalidEventSequence, got {err:?}"
@@ -426,7 +410,7 @@ mod tests {
     #[test]
     fn writer_emitter_element_before_start_segment_is_err() {
         let mut e = WriterEmitter::new(Vec::<u8>::new());
-        let err = e.emit(EdifactEvent::Element { value: "X" }).unwrap_err();
+        let err = e.emit(EdifactEvent::element("X")).unwrap_err();
         assert!(
             matches!(err, crate::EdifactError::InvalidEventSequence { .. }),
             "expected InvalidEventSequence, got {err:?}"
@@ -436,10 +420,8 @@ mod tests {
     #[test]
     fn writer_emitter_component_before_element_is_err() {
         let mut e = WriterEmitter::new(Vec::<u8>::new());
-        e.emit(EdifactEvent::StartSegment { tag: "BGM" }).unwrap();
-        let err = e
-            .emit(EdifactEvent::ComponentElement { value: "X" })
-            .unwrap_err();
+        e.emit(EdifactEvent::start("BGM")).unwrap();
+        let err = e.emit(EdifactEvent::component("X")).unwrap_err();
         assert!(
             matches!(err, crate::EdifactError::InvalidEventSequence { .. }),
             "expected InvalidEventSequence, got {err:?}"
@@ -449,10 +431,8 @@ mod tests {
     #[test]
     fn writer_emitter_double_start_segment_is_err() {
         let mut e = WriterEmitter::new(Vec::<u8>::new());
-        e.emit(EdifactEvent::StartSegment { tag: "BGM" }).unwrap();
-        let err = e
-            .emit(EdifactEvent::StartSegment { tag: "DTM" })
-            .unwrap_err();
+        e.emit(EdifactEvent::start("BGM")).unwrap();
+        let err = e.emit(EdifactEvent::start("DTM")).unwrap_err();
         assert!(
             matches!(err, crate::EdifactError::InvalidEventSequence { .. }),
             "expected InvalidEventSequence, got {err:?}"

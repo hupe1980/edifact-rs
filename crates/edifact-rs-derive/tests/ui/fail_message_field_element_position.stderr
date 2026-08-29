@@ -1,5 +1,5 @@
 error: field `bgm`: element/component positioning is only valid on segment structs
-  --> tests/ui/fail_message_field_element_position.rs:26:15
+  --> tests/ui/fail_message_field_element_position.rs:23:15
    |
-26 |     #[edifact(element = 0)]
+23 |     #[edifact(element = 0)]
    |               ^^^^^^^

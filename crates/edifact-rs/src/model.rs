@@ -1,7 +1,40 @@
+//! The EDIFACT data model: [`Span`], [`Element`], and [`Segment`].
+//!
+//! # One segment type, borrowed or owned
+//!
+//! [`Segment<'a>`] holds its text as [`Cow<'a, str>`], so the *same* type covers
+//! both parsing modes:
+//!
+//! - [`from_bytes`][crate::from_bytes] borrows straight out of the input and
+//!   yields `Segment<'input>` — no allocation for segment data.
+//! - [`from_reader`][crate::from_reader] cannot borrow from a stream, so it
+//!   yields `Segment<'static>`, aliased as [`OwnedSegment`].
+//!
+//! `Segment` is covariant in `'a`, so a `&[OwnedSegment]` is accepted anywhere a
+//! `&[Segment<'_>]` is expected: every API takes one shape and serves both.
+//!
+//! ```
+//! use edifact_rs::{OwnedSegment, Segment};
+//!
+//! fn count_bgm(segments: &[Segment<'_>]) -> usize {
+//!     segments.iter().filter(|s| s.tag == "BGM").count()
+//! }
+//!
+//! let borrowed: Vec<Segment<'_>> =
+//!     edifact_rs::from_bytes(b"BGM+220'").collect::<Result<_, _>>()?;
+//! let owned: Vec<OwnedSegment> =
+//!     edifact_rs::from_reader(std::io::Cursor::new(b"BGM+220'")).collect::<Result<_, _>>()?;
+//!
+//! assert_eq!(count_bgm(&borrowed), 1);
+//! assert_eq!(count_bgm(&owned), 1); // the same function, no conversion
+//! # Ok::<(), edifact_rs::EdifactError>(())
+//! ```
+
 use crate::directory_validator::{ElementPath, SegmentLayout};
 use crate::error::EdifactError;
 use smallvec::SmallVec;
 use std::borrow::Cow;
+use std::str::FromStr;
 
 /// Reject a layout whose tag does not describe `segment_tag`.
 ///
@@ -79,18 +112,234 @@ impl std::fmt::Display for Span {
     }
 }
 
-/// A single EDIFACT segment, borrowing its data from the source input.
+/// Components of one occurrence of a data element, each paired with its span.
+pub type Components<'a> = SmallVec<[(Cow<'a, str>, Span); 4]>;
+
+/// A [`Segment`] that owns all of its text.
+///
+/// Just `Segment<'static>` — the shape [`from_reader`][crate::from_reader]
+/// produces, because a stream has no buffer to borrow from. It is accepted
+/// anywhere a `&[Segment<'_>]` is wanted.
+pub type OwnedSegment = Segment<'static>;
+
+/// An [`Element`] that owns all of its text. See [`OwnedSegment`].
+pub type OwnedElement = Element<'static>;
+
+/// A data element, which may have one or more component values.
+///
+/// `#[non_exhaustive]`: build one with [`Element::of`] (plus
+/// [`and_repeat`][Element::and_repeat] / [`with_span`][Element::with_span])
+/// rather than a struct literal.
+///
+/// Uses [`SmallVec`] with an inline capacity of 4 to avoid heap allocation
+/// for the common case (≤ 4 components). Each entry is a `(value, span)` pair,
+/// guaranteeing that the component string and its byte span stay in sync.
+/// A value that contained a release-character sequence is stored as
+/// [`Cow::Owned`]; everything else borrows from the input.
+///
+/// # Repetition (ISO 9735-1 §8.6)
+///
+/// [`components`][Self::components] holds the **first** occurrence, which is the
+/// only one for every interchange that does not declare a repetition separator —
+/// that is, virtually all of them. Further occurrences land in
+/// [`repeats`][Self::repeats]; read them together with
+/// [`repetitions`][Self::repetitions].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Element<'a> {
+    /// Span covering the whole element, including every occurrence.
+    pub span: Span,
+    /// Components of the first occurrence, in positional order.
+    pub components: Components<'a>,
+    /// Second and subsequent occurrences of this data element.
+    ///
+    /// Empty — and therefore unallocated — unless the interchange declares a
+    /// repetition separator and the element actually repeats.
+    pub repeats: Vec<Components<'a>>,
+}
+
+impl<'a> Element<'a> {
+    /// Build a data element from its component values.
+    ///
+    /// Accepts anything that converts to `Cow<'a, str>`, so both string literals
+    /// and owned `String`s work:
+    ///
+    /// ```
+    /// use edifact_rs::{Element, OwnedElement};
+    ///
+    /// let borrowed = Element::of(&["4000001000002", "", "9"]);
+    /// let owned: OwnedElement = Element::of(&[String::from("BY")]);
+    ///
+    /// assert_eq!(borrowed.get_component(2), Some("9"));
+    /// assert_eq!(owned.get_component(0), Some("BY"));
+    /// ```
+    pub fn of<S>(components: &[S]) -> Self
+    where
+        S: Into<Cow<'a, str>> + Clone,
+    {
+        Self {
+            span: Span::default(),
+            components: components
+                .iter()
+                .map(|c| (c.clone().into(), Span::default()))
+                .collect(),
+            repeats: Vec::new(),
+        }
+    }
+
+    /// Return the component at position `n` (0-indexed) of the first occurrence.
+    #[inline]
+    pub fn get_component(&self, n: usize) -> Option<&str> {
+        self.components.get(n).map(|(c, _)| c.as_ref())
+    }
+
+    /// Return the component at position `n`, or `""` if absent.
+    #[inline]
+    pub fn component_or_empty(&self, n: usize) -> &str {
+        self.get_component(n).unwrap_or("")
+    }
+
+    /// Return the byte span of the component at position `n`, if it exists.
+    #[inline]
+    pub fn component_span(&self, n: usize) -> Option<Span> {
+        self.components.get(n).map(|(_, s)| *s)
+    }
+
+    /// Iterate over the component values of the first occurrence.
+    #[inline]
+    pub fn components(&self) -> impl Iterator<Item = &str> {
+        self.components.iter().map(|(c, _)| c.as_ref())
+    }
+
+    /// Number of occurrences of this data element — always at least 1.
+    #[inline]
+    pub fn repeat_count(&self) -> usize {
+        1 + self.repeats.len()
+    }
+
+    /// Components of occurrence `n` (0-indexed), if it exists.
+    #[inline]
+    pub fn repetition(&self, n: usize) -> Option<&[(Cow<'a, str>, Span)]> {
+        match n {
+            0 => Some(&self.components),
+            _ => self.repeats.get(n - 1).map(|r| r.as_slice()),
+        }
+    }
+
+    /// Iterate over every occurrence of this element, the first one included.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// // `UNA` byte 7 declares `*` as the repetition separator.
+    /// let segments: Vec<_> = edifact_rs::from_bytes(b"UNA:+.?*'RFF+ON:1*ON:2'")
+    ///     .collect::<Result<Vec<_>, _>>()?;
+    /// let rff = segments[0].get_element(0).unwrap();
+    ///
+    /// let refs: Vec<&str> = rff
+    ///     .repetitions()
+    ///     .map(|components| components[1].0.as_ref())
+    ///     .collect();
+    /// assert_eq!(refs, ["1", "2"]);
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    #[inline]
+    pub fn repetitions(&self) -> impl Iterator<Item = &[(Cow<'a, str>, Span)]> {
+        std::iter::once(self.components.as_slice()).chain(self.repeats.iter().map(|r| r.as_slice()))
+    }
+
+    /// Read component `n` from every occurrence of this element (ISO 9735-1 §8.6).
+    ///
+    /// One item per occurrence, using `""` where an occurrence omits the
+    /// component: §8.7.3 makes occurrence position significant, so dropping the
+    /// empty ones would shift every later value into the wrong slot.
+    #[inline]
+    pub fn repeated_component(&self, n: usize) -> impl Iterator<Item = &str> {
+        self.repetitions()
+            .map(move |occurrence| occurrence.get(n).map_or("", |(c, _)| c.as_ref()))
+    }
+
+    /// Set the span covering this element.
+    ///
+    /// Parsed elements carry real spans; hand-built ones default to
+    /// [`Span::default`] and only need this when the caller is synthesising
+    /// input for diagnostics.
+    #[must_use]
+    pub fn with_span(mut self, span: Span) -> Self {
+        self.span = span;
+        self
+    }
+
+    /// Append a further occurrence of this data element (ISO 9735-1 §8.6).
+    ///
+    /// Useful when building segments for
+    /// [`Writer::write_segment`][crate::Writer::write_segment]; the writer joins
+    /// occurrences with the active repetition separator.
+    #[must_use]
+    pub fn and_repeat<S>(mut self, components: &[S]) -> Self
+    where
+        S: Into<Cow<'a, str>> + Clone,
+    {
+        self.repeats.push(
+            components
+                .iter()
+                .map(|c| (c.clone().into(), Span::default()))
+                .collect(),
+        );
+        self
+    }
+
+    /// Shift every stored span by `delta` bytes, in place.
+    ///
+    /// Every occurrence is shifted, not just the first: the reader parses each
+    /// segment from a zero-based slice and then rebases it onto the stream, so
+    /// an occurrence left unshifted points into a different segment entirely.
+    #[inline]
+    pub fn offset_in_place(&mut self, delta: usize) {
+        self.span = self.span.offset(delta);
+        for (_, span) in &mut self.components {
+            *span = span.offset(delta);
+        }
+        for repeat in &mut self.repeats {
+            for (_, span) in repeat {
+                *span = span.offset(delta);
+            }
+        }
+    }
+
+    /// Detach this element from the input buffer, cloning any borrowed text.
+    #[must_use]
+    pub fn into_owned(self) -> OwnedElement {
+        fn own(components: Components<'_>) -> Components<'static> {
+            components
+                .into_iter()
+                .map(|(c, s)| (Cow::Owned(c.into_owned()), s))
+                .collect()
+        }
+        Element {
+            span: self.span,
+            components: own(self.components),
+            repeats: self.repeats.into_iter().map(own).collect(),
+        }
+    }
+}
+
+/// A single EDIFACT segment.
+///
+/// Borrows its text from the parsed input where it can, and owns it where it
+/// cannot: [`from_bytes`][crate::from_bytes] yields `Segment<'input>`, while
+/// [`from_reader`][crate::from_reader] yields `Segment<'static>` — aliased as
+/// [`OwnedSegment`]. Covariance in `'a` means one is accepted wherever the other
+/// is, so every API in this crate takes a single shape.
 ///
 /// `#[non_exhaustive]`: build one with [`Segment::new`] rather than a struct
-/// literal.  Adding `repeats` to [`Element`] in 0.14 broke every downstream
-/// literal, and the next field would do it again; a constructor plus builder
-/// setters keeps that additive.  The fields stay public, so reading and `..`
-/// destructuring are unaffected.
+/// literal, so a future field stays additive. The fields stay public, so reading
+/// and `..` destructuring are unaffected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Segment<'a> {
-    /// Segment tag, usually three uppercase letters.
-    pub tag: &'a str,
+    /// Segment tag — three ASCII uppercase letters for anything this crate parses.
+    pub tag: Cow<'a, str>,
     /// Span covering the whole segment payload.
     pub span: Span,
     /// Span covering only the segment tag.
@@ -100,15 +349,53 @@ pub struct Segment<'a> {
 }
 
 impl<'a> Segment<'a> {
+    /// Build a segment from a tag and its data elements.
+    ///
+    /// Spans default to [`Span::default`], which is what a segment synthesised
+    /// from a non-EDIFACT source should carry — there is no input to point at.
+    /// Use [`with_spans`][Self::with_spans] when there is.
+    ///
+    /// The tag is not checked here; it is checked when the segment is written.
+    /// A tag is emitted verbatim, so one the parser would reject is refused as
+    /// [`EdifactError::InvalidSegmentTag`] by
+    /// [`Writer::write_segment`][crate::Writer::write_segment] rather than
+    /// written out as bytes that do not read back.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use edifact_rs::{Element, Segment, segments_to_bytes};
+    ///
+    /// let segment = Segment::new("BGM", vec![Element::of(&["220"])]);
+    /// assert_eq!(segments_to_bytes(&[segment])?, b"BGM+220'".to_vec());
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
     #[inline]
-    /// Construct a segment with default spans.
-    pub fn new(tag: &'a str, elements: Vec<Element<'a>>) -> Self {
+    pub fn new(tag: impl Into<Cow<'a, str>>, elements: Vec<Element<'a>>) -> Self {
         Self {
-            tag,
+            tag: tag.into(),
             span: Span::default(),
             tag_span: Span::default(),
             elements,
         }
+    }
+
+    /// Set the segment and tag spans.
+    #[must_use]
+    pub fn with_spans(mut self, span: Span, tag_span: Span) -> Self {
+        self.span = span;
+        self.tag_span = tag_span;
+        self
+    }
+
+    /// The segment tag as a plain `&str`.
+    ///
+    /// `segment.tag` compares directly against a string literal
+    /// (`segment.tag == "BGM"`); this is for the places that need a `&str`, such
+    /// as a `match`.
+    #[inline]
+    pub fn tag(&self) -> &str {
+        self.tag.as_ref()
     }
 
     /// Return the element at position `n` (0-indexed), if it exists.
@@ -117,16 +404,13 @@ impl<'a> Segment<'a> {
         self.elements.get(n)
     }
 
-    /// Shorthand: get component 0 of element `n` — the most common access pattern.
+    /// Shorthand: component 0 of element `n` — the most common access pattern.
     #[inline]
     pub fn element_str(&self, n: usize) -> Option<&str> {
         self.elements.get(n)?.get_component(0)
     }
 
     /// Get component `comp` of element `elem` (both 0-based), or `None` if absent.
-    ///
-    /// Mirrors [`OwnedSegment::component_str`], eliminating the need to chain
-    /// `get_element(elem)?.get_component(comp)` in rule closures.
     #[inline]
     pub fn component_str(&self, elem: usize, comp: usize) -> Option<&str> {
         self.elements.get(elem)?.get_component(comp)
@@ -136,6 +420,133 @@ impl<'a> Segment<'a> {
     #[inline]
     pub fn element_span(&self, n: usize) -> Option<Span> {
         Some(self.elements.get(n)?.span)
+    }
+
+    /// Read component `component` from every occurrence of element `element`.
+    ///
+    /// Yields nothing when the element is absent. See
+    /// [`Element::repeated_component`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// // `UNA` position 050 declares `*` as the repetition separator.
+    /// let segments: Vec<_> = edifact_rs::from_bytes(b"UNA:+.?*'RFF+ON:1*ON:2*ON:3'")
+    ///     .collect::<Result<Vec<_>, _>>()?;
+    ///
+    /// let references: Vec<&str> = segments[0].repeated_component(0, 1).collect();
+    /// assert_eq!(references, ["1", "2", "3"]);
+    /// # Ok::<(), edifact_rs::EdifactError>(())
+    /// ```
+    #[inline]
+    pub fn repeated_component(
+        &self,
+        element: usize,
+        component: usize,
+    ) -> impl Iterator<Item = &str> {
+        self.elements
+            .get(element)
+            .into_iter()
+            .flat_map(move |elem| elem.repeated_component(component))
+    }
+
+    /// Shift every stored span by `delta` bytes.
+    #[inline]
+    #[must_use]
+    pub fn offset(mut self, delta: usize) -> Self {
+        self.span = self.span.offset(delta);
+        self.tag_span = self.tag_span.offset(delta);
+        for element in &mut self.elements {
+            element.offset_in_place(delta);
+        }
+        self
+    }
+
+    /// Detach this segment from the input buffer, cloning any borrowed text.
+    ///
+    /// Use it to keep a segment alive past the buffer it was parsed from.
+    #[must_use]
+    pub fn into_owned(self) -> OwnedSegment {
+        Segment {
+            tag: Cow::Owned(self.tag.into_owned()),
+            span: self.span,
+            tag_span: self.tag_span,
+            elements: self.elements.into_iter().map(Element::into_owned).collect(),
+        }
+    }
+
+    // ── checked field access ──────────────────────────────────────────────────
+
+    /// Read element `idx`, treating an empty value as absent.
+    ///
+    /// EDIFACT lets an element be syntactically present but empty (`SEG++'`).
+    /// A mandatory data element must carry a value, so this reports
+    /// [`EdifactError::MissingRequiredElement`] for both cases.
+    ///
+    /// # Errors
+    ///
+    /// [`EdifactError::MissingRequiredElement`] when the element is absent or empty.
+    pub fn required_element(&self, idx: usize) -> Result<&str, EdifactError> {
+        self.optional_element(idx)
+            .ok_or_else(|| EdifactError::MissingRequiredElement {
+                tag: self.tag.clone().into_owned(),
+                element_index: idx,
+            })
+    }
+
+    /// Read element `idx`, treating an empty value as absent.
+    #[inline]
+    pub fn optional_element(&self, idx: usize) -> Option<&str> {
+        self.element_str(idx).filter(|s| !s.is_empty())
+    }
+
+    /// Read component `comp` of element `elem`, treating an empty value as absent.
+    ///
+    /// # Errors
+    ///
+    /// [`EdifactError::MissingRequiredElement`] when the element itself is
+    /// absent, and [`EdifactError::MissingRequiredComponent`] when the element is
+    /// present but the component is absent or empty. The distinction matters:
+    /// the first says the segment is too short, the second that one composite is
+    /// incomplete.
+    pub fn required_component(&self, elem: usize, comp: usize) -> Result<&str, EdifactError> {
+        let element =
+            self.elements
+                .get(elem)
+                .ok_or_else(|| EdifactError::MissingRequiredElement {
+                    tag: self.tag.clone().into_owned(),
+                    element_index: elem,
+                })?;
+        element
+            .get_component(comp)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| EdifactError::MissingRequiredComponent {
+                tag: self.tag.clone().into_owned(),
+                element_index: elem,
+                component_index: comp,
+            })
+    }
+
+    /// Read component `comp` of element `elem`, treating an empty value as absent.
+    #[inline]
+    pub fn optional_component(&self, elem: usize, comp: usize) -> Option<&str> {
+        self.component_str(elem, comp).filter(|s| !s.is_empty())
+    }
+
+    /// Read element `idx` and parse it into `T`.
+    ///
+    /// # Errors
+    ///
+    /// As [`required_element`][Self::required_element], plus
+    /// [`EdifactError::InvalidText`] when the value does not parse.
+    pub fn parsed_element<T: FromStr>(&self, idx: usize) -> Result<T, EdifactError> {
+        let raw = self.required_element(idx)?;
+        raw.parse::<T>().map_err(|_| EdifactError::InvalidText {
+            offset: self
+                .element_span(idx)
+                .map(|s| s.start)
+                .unwrap_or(self.span.start),
+        })
     }
 
     // ── code-addressed access ─────────────────────────────────────────────────
@@ -165,7 +576,7 @@ impl<'a> Segment<'a> {
     /// Read a value by its UN/EDIFACT data element identifier.
     ///
     /// Positional access (`seg.element_str(4)`) fails silently when the index is
-    /// wrong: it reads a different, usually still-plausible value.  Code-addressed
+    /// wrong: it reads a different, usually still-plausible value. Code-addressed
     /// access cannot — a stale or mistyped identifier is a
     /// [`EdifactError::UnknownDataElement`], checked against the directory.
     ///
@@ -217,7 +628,7 @@ impl<'a> Segment<'a> {
         layout: &L,
         data_element: &str,
     ) -> Result<Option<&str>, EdifactError> {
-        check_layout_tag(layout, self.tag)?;
+        check_layout_tag(layout, &self.tag)?;
         Ok(self.value_at(layout.resolve_code(data_element)?))
     }
 
@@ -234,7 +645,7 @@ impl<'a> Segment<'a> {
         layout: &L,
         data_element: &str,
     ) -> Result<Option<Span>, EdifactError> {
-        check_layout_tag(layout, self.tag)?;
+        check_layout_tag(layout, &self.tag)?;
         Ok(self.span_at(layout.resolve_code(data_element)?))
     }
 
@@ -251,758 +662,61 @@ impl<'a> Segment<'a> {
         layout: &L,
         data_element: &str,
     ) -> Result<Option<&Element<'a>>, EdifactError> {
-        check_layout_tag(layout, self.tag)?;
-        let path = layout.resolve_code(data_element)?;
-        Ok(self.elements.get(path.element))
-    }
-}
-
-/// Components of one repetition of a data element, each paired with its span.
-pub type Components<'a> = SmallVec<[(Cow<'a, str>, Span); 4]>;
-
-/// Components of one repetition of an owned data element.
-pub type OwnedComponents = SmallVec<[(String, Span); 4]>;
-
-/// A data element, which may have one or more component values.
-///
-/// `#[non_exhaustive]`: build one with [`Element::of`] (plus
-/// [`and_repeat`][Element::and_repeat] / [`with_span`][Element::with_span])
-/// rather than a struct literal.
-///
-/// Uses [`SmallVec`] with an inline capacity of 4 to avoid heap allocation
-/// for the common case (≤ 4 components).  Component values borrow from the
-/// original input; if the value contained a release-character sequence the
-/// resolved string is stored as an owned [`Cow::Owned`] variant instead of
-/// using `Box::leak`.
-///
-/// Each entry is a `(value, span)` pair, guaranteeing that the component
-/// string and its byte span are always in sync.
-///
-/// # Repetition (ISO 9735-1 §8.6)
-///
-/// [`components`][Self::components] holds the **first** repetition, which is the
-/// only one for every interchange that does not declare a repetition separator
-/// in its `UNA` — that is, virtually all of them.  Further repetitions land in
-/// [`repeats`][Self::repeats]; read them together with
-/// [`repetitions`][Self::repetitions].
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct Element<'a> {
-    /// Span covering the whole element, including every repetition.
-    pub span: Span,
-    /// Components of the first repetition, in positional order.
-    pub components: Components<'a>,
-    /// Second and subsequent repetitions of this data element.
-    ///
-    /// Empty — and therefore unallocated — unless the interchange declares a
-    /// repetition separator and the element actually repeats.
-    pub repeats: Vec<Components<'a>>,
-}
-
-impl<'a> Element<'a> {
-    /// Return the component at position `n` (0-indexed) of the first repetition.
-    #[inline]
-    pub fn get_component(&self, n: usize) -> Option<&str> {
-        self.components.get(n).map(|(c, _)| c.as_ref())
-    }
-
-    /// Number of repetitions of this data element — always at least 1.
-    #[inline]
-    pub fn repeat_count(&self) -> usize {
-        1 + self.repeats.len()
-    }
-
-    /// Components of repetition `n` (0-indexed), if it exists.
-    #[inline]
-    pub fn repetition(&self, n: usize) -> Option<&[(Cow<'a, str>, Span)]> {
-        match n {
-            0 => Some(&self.components),
-            _ => self.repeats.get(n - 1).map(|r| r.as_slice()),
-        }
-    }
-
-    /// Iterate over every repetition of this element, first one included.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// // `UNA` byte 7 declares `*` as the repetition separator.
-    /// let segments: Vec<_> = edifact_rs::from_bytes(b"UNA:+.?*'RFF+ON:1*ON:2'")
-    ///     .collect::<Result<Vec<_>, _>>()?;
-    /// let rff = segments[0].get_element(0).unwrap();
-    ///
-    /// let refs: Vec<&str> = rff
-    ///     .repetitions()
-    ///     .map(|components| components[1].0.as_ref())
-    ///     .collect();
-    /// assert_eq!(refs, ["1", "2"]);
-    /// # Ok::<(), edifact_rs::EdifactError>(())
-    /// ```
-    #[inline]
-    pub fn repetitions(&self) -> impl Iterator<Item = &[(Cow<'a, str>, Span)]> {
-        std::iter::once(self.components.as_slice()).chain(self.repeats.iter().map(|r| r.as_slice()))
-    }
-
-    /// Return the component at position `n`, or `""` if absent.
-    #[inline]
-    pub fn component_or_empty(&self, n: usize) -> &str {
-        self.components
-            .get(n)
-            .map(|(c, _)| c.as_ref())
-            .unwrap_or("")
-    }
-
-    /// Return the byte span of the component at position `n`, if it exists.
-    #[inline]
-    pub fn component_span(&self, n: usize) -> Option<Span> {
-        self.components.get(n).map(|(_, s)| *s)
-    }
-
-    /// Convenience constructor: wraps string literals as borrowed components.
-    ///
-    /// Useful in tests and when constructing segments for writing.
-    pub fn of(components: &[&'a str]) -> Self {
-        Self {
-            span: Span::default(),
-            components: components
-                .iter()
-                .copied()
-                .map(|c| (Cow::Borrowed(c), Span::default()))
-                .collect(),
-            repeats: Vec::new(),
-        }
-    }
-
-    /// Set the span covering this element.
-    ///
-    /// Parsed elements carry real spans; hand-built ones default to
-    /// [`Span::default`] and only need this when the caller is synthesising
-    /// input for diagnostics.
-    #[must_use]
-    pub fn with_span(mut self, span: Span) -> Self {
-        self.span = span;
-        self
-    }
-
-    /// Append a further repetition of this data element (ISO 9735-1 §8.6).
-    ///
-    /// Useful when building segments for [`Writer::write_segment`][crate::Writer::write_segment];
-    /// the writer joins repetitions with the active repetition separator.
-    #[must_use]
-    pub fn and_repeat(mut self, components: &[&'a str]) -> Self {
-        self.repeats.push(
-            components
-                .iter()
-                .copied()
-                .map(|c| (Cow::Borrowed(c), Span::default()))
-                .collect(),
-        );
-        self
-    }
-}
-
-/// Owned data element used by reader-based parsing APIs.
-///
-/// Each entry in `components` is a `(value, span)` pair, keeping the string
-/// and its byte span structurally in sync.
-///
-/// `#[non_exhaustive]`: build one with [`OwnedElement::of`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct OwnedElement {
-    /// Span covering the whole element, including every repetition.
-    pub span: Span,
-    /// Components of the first repetition, in positional order.
-    pub components: OwnedComponents,
-    /// Second and subsequent repetitions (ISO 9735-1 §8.6); usually empty.
-    pub repeats: Vec<OwnedComponents>,
-}
-
-impl OwnedElement {
-    /// Build an owned data element from its component values.
-    ///
-    /// The owned counterpart of [`Element::of`].  Spans default to
-    /// [`Span::default`]; set the element span with
-    /// [`with_span`][Self::with_span] when synthesising input for diagnostics.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use edifact_rs::{OwnedElement, OwnedSegment};
-    ///
-    /// let segment = OwnedSegment::new(
-    ///     "NAD",
-    ///     vec![
-    ///         OwnedElement::of(&["BY"]),
-    ///         OwnedElement::of(&["4000001000002", "", "9"]),
-    ///     ],
-    /// );
-    /// assert_eq!(segment.component_str(1, 2), Some("9"));
-    /// ```
-    #[must_use]
-    pub fn of<S: AsRef<str>>(components: &[S]) -> Self {
-        Self {
-            span: Span::default(),
-            components: components
-                .iter()
-                .map(|c| (c.as_ref().to_owned(), Span::default()))
-                .collect(),
-            repeats: Vec::new(),
-        }
-    }
-
-    /// Set the span covering this element.
-    #[must_use]
-    pub fn with_span(mut self, span: Span) -> Self {
-        self.span = span;
-        self
-    }
-
-    /// Append a further repetition of this data element (ISO 9735-1 §8.6).
-    ///
-    /// The owned counterpart of [`Element::and_repeat`].
-    #[must_use]
-    pub fn and_repeat<S: AsRef<str>>(mut self, components: &[S]) -> Self {
-        self.repeats.push(
-            components
-                .iter()
-                .map(|c| (c.as_ref().to_owned(), Span::default()))
-                .collect(),
-        );
-        self
-    }
-
-    #[inline]
-    /// Shift all stored spans by `delta` bytes.
-    pub fn offset(mut self, delta: usize) -> Self {
-        self.offset_in_place(delta);
-        self
-    }
-
-    /// Shift all stored spans by `delta` bytes, in place.
-    ///
-    /// Every repetition is shifted, not just the first: the reader parses each
-    /// segment from a zero-based slice and then rebases it onto the stream, so
-    /// a repetition left unshifted points into a different segment entirely.
-    #[inline]
-    pub fn offset_in_place(&mut self, delta: usize) {
-        self.span = self.span.offset(delta);
-        for (_, span) in &mut self.components {
-            *span = span.offset(delta);
-        }
-        for repeat in &mut self.repeats {
-            for (_, span) in repeat {
-                *span = span.offset(delta);
-            }
-        }
-    }
-
-    /// Number of repetitions of this data element — always at least 1.
-    #[inline]
-    pub fn repeat_count(&self) -> usize {
-        1 + self.repeats.len()
-    }
-
-    /// Components of repetition `n` (0-indexed), if it exists.
-    #[inline]
-    pub fn repetition(&self, n: usize) -> Option<&[(String, Span)]> {
-        match n {
-            0 => Some(&self.components),
-            _ => self.repeats.get(n - 1).map(|r| r.as_slice()),
-        }
-    }
-
-    /// Iterate over every repetition of this element, first one included.
-    #[inline]
-    pub fn repetitions(&self) -> impl Iterator<Item = &[(String, Span)]> {
-        std::iter::once(self.components.as_slice()).chain(self.repeats.iter().map(|r| r.as_slice()))
-    }
-}
-
-impl<'a> From<Element<'a>> for OwnedElement {
-    fn from(value: Element<'a>) -> Self {
-        fn own(components: Components<'_>) -> OwnedComponents {
-            components
-                .into_iter()
-                .map(|(c, s)| (c.into_owned(), s))
-                .collect()
-        }
-        Self {
-            span: value.span,
-            components: own(value.components),
-            repeats: value.repeats.into_iter().map(own).collect(),
-        }
-    }
-}
-
-/// Owned segment used by reader-based parsing APIs.
-///
-/// `#[non_exhaustive]`: build one with [`OwnedSegment::new`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct OwnedSegment {
-    /// Segment tag, usually three uppercase letters.
-    pub tag: String,
-    /// Span covering the whole segment payload.
-    pub span: Span,
-    /// Span covering only the segment tag.
-    pub tag_span: Span,
-    /// Owned segment elements in positional order.
-    pub elements: Vec<OwnedElement>,
-}
-
-/// Zero-allocation view of an [`OwnedElement`].
-///
-/// Implements the same accessor methods as [`Element`] without constructing
-/// any intermediate `SmallVec` or `Cow` values.  Use this when you hold an
-/// `&OwnedSegment` reference and want to inspect element data without the
-/// `Vec<Element>` allocation that [`OwnedSegment::as_borrowed`] incurs.
-///
-/// Construct via `BorrowedElement::from(&owned_element)` or through
-/// [`BorrowedSegment::get_element`].
-#[derive(Debug, Clone, Copy)]
-pub struct BorrowedElement<'a>(pub(crate) &'a OwnedElement);
-
-impl<'a> From<&'a OwnedElement> for BorrowedElement<'a> {
-    #[inline]
-    fn from(elem: &'a OwnedElement) -> Self {
-        BorrowedElement(elem)
-    }
-}
-
-impl<'a> BorrowedElement<'a> {
-    /// Return the component at position `n` (0-indexed), if it exists.
-    #[inline]
-    pub fn get_component(&self, n: usize) -> Option<&'a str> {
-        self.0.components.get(n).map(|(s, _)| s.as_str())
-    }
-
-    /// Return the component at position `n`, or `""` if absent.
-    #[inline]
-    pub fn component_or_empty(&self, n: usize) -> &'a str {
-        self.0
-            .components
-            .get(n)
-            .map(|(s, _)| s.as_str())
-            .unwrap_or("")
-    }
-
-    /// Return the byte span of the component at position `n`, if it exists.
-    #[inline]
-    pub fn component_span(&self, n: usize) -> Option<Span> {
-        self.0.components.get(n).map(|(_, s)| *s)
-    }
-
-    /// The byte span covering the whole element.
-    #[inline]
-    pub fn span(&self) -> Span {
-        self.0.span
-    }
-
-    /// Number of components in this element.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.0.components.len()
-    }
-
-    /// Returns `true` if this element has no components.
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.0.components.is_empty()
-    }
-
-    /// Iterate over all component strings.
-    #[inline]
-    pub fn iter(&self) -> impl Iterator<Item = &'a str> {
-        self.0.components.iter().map(|(c, _)| c.as_str())
-    }
-
-    /// Number of repetitions of this data element — always at least 1.
-    #[inline]
-    pub fn repeat_count(&self) -> usize {
-        self.0.repeat_count()
-    }
-
-    /// Components of repetition `n` (0-indexed), if it exists.
-    #[inline]
-    pub fn repetition(&self, n: usize) -> Option<&'a [(String, Span)]> {
-        match n {
-            0 => Some(&self.0.components),
-            _ => self.0.repeats.get(n - 1).map(|r| r.as_slice()),
-        }
-    }
-
-    /// Iterate over every repetition of this element, first one included.
-    #[inline]
-    pub fn repetitions(&self) -> impl Iterator<Item = &'a [(String, Span)]> {
-        std::iter::once(self.0.components.as_slice())
-            .chain(self.0.repeats.iter().map(|r| r.as_slice()))
-    }
-}
-
-/// Zero-allocation view of an [`OwnedSegment`].
-///
-/// Implements the same accessor methods as [`Segment`] without constructing
-/// a `Vec<Element>`.  Use this when you hold an `&OwnedSegment` reference and
-/// want to read data without the allocations incurred by
-/// [`OwnedSegment::as_borrowed`].
-///
-/// # Construction
-///
-/// The idiomatic way to obtain a `BorrowedSegment` is via [`OwnedSegment::borrow`]
-/// or the [`From`] impl:
-///
-/// ```rust
-/// use edifact_rs::{BorrowedSegment, OwnedSegment, Span};
-///
-/// let seg = OwnedSegment::new("BGM", vec![]).with_spans(Span::new(0, 3), Span::new(0, 3));
-/// let borrowed = BorrowedSegment::from(&seg);
-/// assert_eq!(borrowed.tag(), "BGM");
-/// ```
-///
-/// The `'a` lifetime is tied to the referent — you cannot outlive the
-/// `OwnedSegment` you borrowed from.
-#[derive(Debug, Clone, Copy)]
-pub struct BorrowedSegment<'a>(pub(crate) &'a OwnedSegment);
-
-impl<'a> From<&'a OwnedSegment> for BorrowedSegment<'a> {
-    #[inline]
-    fn from(seg: &'a OwnedSegment) -> Self {
-        BorrowedSegment(seg)
-    }
-}
-
-impl<'a> BorrowedSegment<'a> {
-    /// The segment tag (e.g. `"BGM"`).
-    #[inline]
-    pub fn tag(&self) -> &'a str {
-        &self.0.tag
-    }
-
-    /// Byte span covering the whole segment.
-    #[inline]
-    pub fn span(&self) -> Span {
-        self.0.span
-    }
-
-    /// Byte span covering only the segment tag.
-    #[inline]
-    pub fn tag_span(&self) -> Span {
-        self.0.tag_span
-    }
-
-    /// Return the element at position `n` (0-indexed), if it exists.
-    #[inline]
-    pub fn get_element(&self, n: usize) -> Option<BorrowedElement<'a>> {
-        self.0.elements.get(n).map(BorrowedElement)
-    }
-
-    /// Shorthand: first component of element `n` — the most common access pattern.
-    #[inline]
-    pub fn element_str(&self, n: usize) -> Option<&'a str> {
-        self.0
-            .elements
-            .get(n)?
-            .components
-            .first()
-            .map(|(c, _)| c.as_str())
-    }
-
-    /// Get component `comp` of element `elem` (both 0-based), or `None` if absent.
-    ///
-    /// Mirrors [`OwnedSegment::component_str`].
-    #[inline]
-    pub fn component_str(&self, elem: usize, comp: usize) -> Option<&'a str> {
-        self.0
-            .elements
-            .get(elem)?
-            .components
-            .get(comp)
-            .map(|(c, _)| c.as_str())
-    }
-
-    /// Return the byte span of the element at position `n`, if it exists.
-    #[inline]
-    pub fn element_span(&self, n: usize) -> Option<Span> {
-        Some(self.0.elements.get(n)?.span)
-    }
-
-    /// Iterate over all elements as zero-allocation views.
-    #[inline]
-    pub fn elements(&self) -> impl Iterator<Item = BorrowedElement<'a>> {
-        self.0.elements.iter().map(BorrowedElement)
-    }
-
-    // ── code-addressed access ─────────────────────────────────────────────────
-
-    /// Read the value at an already-resolved [`ElementPath`].
-    #[inline]
-    pub fn value_at(&self, path: ElementPath) -> Option<&'a str> {
-        self.0
-            .elements
-            .get(path.element)?
-            .components
-            .get(path.component_index())
-            .map(|(c, _)| c.as_str())
-    }
-
-    /// Byte span of the value at an already-resolved [`ElementPath`].
-    #[inline]
-    pub fn span_at(&self, path: ElementPath) -> Option<Span> {
-        let element = self.0.elements.get(path.element)?;
-        match path.component {
-            Some(c) => element.components.get(c).map(|(_, s)| *s),
-            None => Some(element.span),
-        }
-    }
-
-    /// Read a value by its UN/EDIFACT data element identifier.
-    ///
-    /// Zero-allocation counterpart of [`Segment::value_by_code`].
-    ///
-    /// # Errors
-    ///
-    /// As [`Segment::value_by_code`].
-    pub fn value_by_code<L: SegmentLayout + ?Sized>(
-        &self,
-        layout: &L,
-        data_element: &str,
-    ) -> Result<Option<&'a str>, EdifactError> {
-        check_layout_tag(layout, &self.0.tag)?;
-        Ok(self.value_at(layout.resolve_code(data_element)?))
-    }
-
-    /// Byte span of a value addressed by its UN/EDIFACT data element identifier.
-    ///
-    /// # Errors
-    ///
-    /// As [`Segment::value_by_code`].
-    pub fn span_by_code<L: SegmentLayout + ?Sized>(
-        &self,
-        layout: &L,
-        data_element: &str,
-    ) -> Result<Option<Span>, EdifactError> {
-        check_layout_tag(layout, &self.0.tag)?;
-        Ok(self.span_at(layout.resolve_code(data_element)?))
-    }
-
-    /// Return the whole element addressed by a data element identifier.
-    ///
-    /// When the identifier names a component inside a composite, the enclosing
-    /// composite element is returned.
-    ///
-    /// # Errors
-    ///
-    /// As [`Segment::value_by_code`].
-    pub fn element_by_code<L: SegmentLayout + ?Sized>(
-        &self,
-        layout: &L,
-        data_element: &str,
-    ) -> Result<Option<BorrowedElement<'a>>, EdifactError> {
-        check_layout_tag(layout, &self.0.tag)?;
-        let path = layout.resolve_code(data_element)?;
-        Ok(self.0.elements.get(path.element).map(BorrowedElement))
-    }
-}
-
-impl OwnedSegment {
-    /// Build an owned segment from a tag and its data elements.
-    ///
-    /// The owned counterpart of [`Segment::new`].  Spans default to
-    /// [`Span::default`], which is what a segment synthesised from a non-EDIFACT
-    /// source should carry — there is no input to point at.  Use
-    /// [`with_spans`][Self::with_spans] when there is.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use edifact_rs::{OwnedElement, OwnedSegment, segments_to_bytes_owned};
-    ///
-    /// let segment = OwnedSegment::new("BGM", vec![OwnedElement::of(&["220"])]);
-    /// assert_eq!(segments_to_bytes_owned(&[segment])?, b"BGM+220'".to_vec());
-    /// # Ok::<(), edifact_rs::EdifactError>(())
-    /// ```
-    #[must_use]
-    pub fn new(tag: impl Into<String>, elements: Vec<OwnedElement>) -> Self {
-        Self {
-            tag: tag.into(),
-            span: Span::default(),
-            tag_span: Span::default(),
-            elements,
-        }
-    }
-
-    /// Set the segment and tag spans.
-    #[must_use]
-    pub fn with_spans(mut self, span: Span, tag_span: Span) -> Self {
-        self.span = span;
-        self.tag_span = tag_span;
-        self
-    }
-
-    /// Get the first component of element `n`, or `None` if absent.
-    ///
-    /// This is the zero-allocation equivalent of `as_borrowed().element_str(n)`.
-    /// Used internally by [`crate::find_segment_owned`] and the derived
-    /// [`crate::EdifactDeserialize::edifact_deserialize_owned`] implementations.
-    #[inline]
-    pub fn element_str(&self, n: usize) -> Option<&str> {
-        self.elements
-            .get(n)?
-            .components
-            .first()
-            .map(|(s, _)| s.as_str())
-    }
-
-    /// Get component `comp` of element `elem`, or `None` if absent.
-    ///
-    /// Zero-allocation equivalent of `as_borrowed().get_element(elem)?.get_component(comp)`.
-    #[inline]
-    pub fn component_str(&self, elem: usize, comp: usize) -> Option<&str> {
-        self.elements
-            .get(elem)?
-            .components
-            .get(comp)
-            .map(|(s, _)| s.as_str())
-    }
-
-    #[inline]
-    /// Shift all stored spans by `delta` bytes.
-    ///
-    /// Delegates to [`OwnedElement::offset_in_place`] rather than walking the
-    /// components inline: an inline walk shifted `components` but silently left
-    /// `repeats` at their segment-relative offsets, so on the reader path every
-    /// repetition after the first pointed at the wrong bytes.
-    pub fn offset(mut self, delta: usize) -> Self {
-        self.span = self.span.offset(delta);
-        self.tag_span = self.tag_span.offset(delta);
-        for element in &mut self.elements {
-            element.offset_in_place(delta);
-        }
-        self
-    }
-
-    #[inline]
-    /// View this owned segment as a borrowed [`Segment`].
-    ///
-    /// **Performance note**: allocates a `Vec<Element<'_>>` on every call.
-    /// When only individual field access is needed, prefer
-    /// [`OwnedSegment::borrow`] → [`BorrowedSegment`] which is O(1).
-    /// `as_borrowed` remains necessary when the callee requires `&[Segment<'_>]`.
-    pub fn as_borrowed(&self) -> Segment<'_> {
-        Segment {
-            tag: self.tag.as_str(),
-            span: self.span,
-            tag_span: self.tag_span,
-            elements: self
-                .elements
-                .iter()
-                .map(|elem| {
-                    fn borrow(components: &OwnedComponents) -> Components<'_> {
-                        components
-                            .iter()
-                            .map(|(c, s)| (Cow::Borrowed(c.as_str()), *s))
-                            .collect()
-                    }
-                    Element {
-                        span: elem.span,
-                        components: borrow(&elem.components),
-                        repeats: elem.repeats.iter().map(borrow).collect(),
-                    }
-                })
-                .collect(),
-        }
-    }
-
-    /// Return a zero-allocation view of this segment.
-    ///
-    /// Unlike [`as_borrowed`][OwnedSegment::as_borrowed], this is `O(1)` and
-    /// performs no heap allocation.  The view cannot be passed to APIs that
-    /// require `&[Segment<'_>]`; use [`as_borrowed`][OwnedSegment::as_borrowed]
-    /// for those call sites.
-    #[inline]
-    pub fn borrow(&self) -> BorrowedSegment<'_> {
-        BorrowedSegment(self)
-    }
-
-    // ── code-addressed access ─────────────────────────────────────────────────
-
-    /// Read the value at an already-resolved [`ElementPath`].
-    #[inline]
-    pub fn value_at(&self, path: ElementPath) -> Option<&str> {
-        self.elements
-            .get(path.element)?
-            .components
-            .get(path.component_index())
-            .map(|(s, _)| s.as_str())
-    }
-
-    /// Byte span of the value at an already-resolved [`ElementPath`].
-    #[inline]
-    pub fn span_at(&self, path: ElementPath) -> Option<Span> {
-        let element = self.elements.get(path.element)?;
-        match path.component {
-            Some(c) => element.components.get(c).map(|(_, s)| *s),
-            None => Some(element.span),
-        }
-    }
-
-    /// Read a value by its UN/EDIFACT data element identifier.
-    ///
-    /// Owned-storage counterpart of [`Segment::value_by_code`]; allocates nothing.
-    ///
-    /// # Errors
-    ///
-    /// As [`Segment::value_by_code`].
-    pub fn value_by_code<L: SegmentLayout + ?Sized>(
-        &self,
-        layout: &L,
-        data_element: &str,
-    ) -> Result<Option<&str>, EdifactError> {
-        check_layout_tag(layout, &self.tag)?;
-        Ok(self.value_at(layout.resolve_code(data_element)?))
-    }
-
-    /// Byte span of a value addressed by its UN/EDIFACT data element identifier.
-    ///
-    /// # Errors
-    ///
-    /// As [`Segment::value_by_code`].
-    pub fn span_by_code<L: SegmentLayout + ?Sized>(
-        &self,
-        layout: &L,
-        data_element: &str,
-    ) -> Result<Option<Span>, EdifactError> {
-        check_layout_tag(layout, &self.tag)?;
-        Ok(self.span_at(layout.resolve_code(data_element)?))
-    }
-
-    /// Return the whole [`OwnedElement`] addressed by a data element identifier.
-    ///
-    /// When the identifier names a component inside a composite, the enclosing
-    /// composite element is returned.
-    ///
-    /// # Errors
-    ///
-    /// As [`Segment::value_by_code`].
-    pub fn element_by_code<L: SegmentLayout + ?Sized>(
-        &self,
-        layout: &L,
-        data_element: &str,
-    ) -> Result<Option<&OwnedElement>, EdifactError> {
         check_layout_tag(layout, &self.tag)?;
         let path = layout.resolve_code(data_element)?;
         Ok(self.elements.get(path.element))
     }
 }
 
-impl<'a> From<Segment<'a>> for OwnedSegment {
-    fn from(value: Segment<'a>) -> Self {
-        Self {
-            tag: value.tag.to_string(),
-            span: value.span,
-            tag_span: value.tag_span,
-            elements: value.elements.into_iter().map(OwnedElement::from).collect(),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn owned_segments_pass_where_borrowed_ones_are_expected() {
+        fn tags<'s>(segments: &'s [Segment<'_>]) -> Vec<&'s str> {
+            segments.iter().map(Segment::tag).collect()
         }
+
+        let owned: Vec<OwnedSegment> =
+            crate::from_reader(std::io::Cursor::new(b"BGM+220'UNT+2+1'"))
+                .collect::<Result<_, _>>()
+                .expect("reader parse");
+        // The point of the unified model: no conversion, no `_owned` twin.
+        assert_eq!(tags(&owned), ["BGM", "UNT"]);
+    }
+
+    #[test]
+    fn into_owned_outlives_the_input_buffer() {
+        let segment = {
+            let input = b"BGM+220+PO-4711'".to_vec();
+            let parsed: Vec<Segment<'_>> = crate::from_bytes(&input)
+                .collect::<Result<_, _>>()
+                .expect("parse");
+            parsed.into_iter().next().unwrap().into_owned()
+        };
+        assert_eq!(segment.element_str(1), Some("PO-4711"));
+    }
+
+    #[test]
+    fn required_accessors_treat_empty_as_absent() {
+        let segments: Vec<Segment<'_>> = crate::from_bytes(b"NAD++::'")
+            .collect::<Result<_, _>>()
+            .expect("parse");
+        let nad = &segments[0];
+        assert!(matches!(
+            nad.required_element(0),
+            Err(EdifactError::MissingRequiredElement { .. })
+        ));
+        // Element 1 exists but its components are empty …
+        assert!(matches!(
+            nad.required_component(1, 0),
+            Err(EdifactError::MissingRequiredComponent { .. })
+        ));
+        // … while element 5 does not exist at all.
+        assert!(matches!(
+            nad.required_component(5, 0),
+            Err(EdifactError::MissingRequiredElement { .. })
+        ));
     }
 }

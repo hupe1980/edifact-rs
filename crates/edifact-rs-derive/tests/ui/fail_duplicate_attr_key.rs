@@ -12,7 +12,6 @@ use edifact_rs_derive::EdifactSerialize as DeriveEdifactSerialize;
 #[edifact(segment = "BGM", segment = "RFF")]
 struct Bad {
     #[edifact(element = 0)]
-    value: String,
-}
+    value: String}
 
 fn main() {}

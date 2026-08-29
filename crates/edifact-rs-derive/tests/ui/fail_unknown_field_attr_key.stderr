@@ -1,5 +1,5 @@
 error: unknown field-level `edifact` key; expected `element`, `component`, `composite`, `group`, `qualifier`, `repeat`, or `required`
-  --> tests/ui/fail_unknown_field_attr_key.rs:16:28
+  --> tests/ui/fail_unknown_field_attr_key.rs:15:28
    |
-16 |     #[edifact(element = 0, foo = 1)]
+15 |     #[edifact(element = 0, foo = 1)]
    |                            ^^^

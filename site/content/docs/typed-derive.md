@@ -487,13 +487,15 @@ For a **segment struct** `#[edifact(segment = "TAG")]` the macro generates:
 
 | Trait | Method | Notes |
 |---|---|---|
-| `EdifactDeserialize` | `edifact_deserialize(&[Segment<'_>])` | Finds first matching segment |
-| `EdifactDeserialize` | `edifact_deserialize_owned(&[OwnedSegment])` | Zero-alloc override for reader paths |
+| `EdifactDeserialize` | `edifact_deserialize(&[Segment<'_>])` | Finds the first matching segment |
 | `EdifactSerialize` | `edifact_serialize(&mut E)` | Emits one `StartSegment` .. `EndSegment` event sequence |
 | `EdifactSegmentTag` | `SEGMENT_TAG` | The `"TAG"` string as a const |
 | `EdifactSegmentTag` | `QUALIFIER_PATTERN` | `Some("Q")` or `None` |
 | `EdifactSegmentTag` | `matches_segment(seg)` | Checks tag and qualifier |
-| `EdifactSegmentTag` | `matches_owned_segment(seg)` | Same for `OwnedSegment` |
+
+One `edifact_deserialize` covers both parsing paths: `&[OwnedSegment]` coerces to
+`&[Segment<'_>]`, so the reader path runs exactly this code with no conversion and
+no second generated body.
 
 ---
 

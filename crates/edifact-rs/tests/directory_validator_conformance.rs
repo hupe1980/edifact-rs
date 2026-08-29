@@ -327,7 +327,7 @@ mod representation {
         ValidationContext::builder()
             .with_validator(ValidationLayer::Structure, validator)
             .build()
-            .validate_lenient(&segments)
+            .validate(&segments)
     }
 
     fn codes(report: &edifact_rs::ValidationReport) -> Vec<&str> {
@@ -381,7 +381,7 @@ mod representation {
         let report = ValidationContext::builder()
             .with_validator(ValidationLayer::Structure, validator)
             .build()
-            .validate_lenient(&segments);
+            .validate(&segments);
         assert!(!report.has_errors(), "{report:#?}");
     }
 
@@ -408,7 +408,7 @@ mod representation {
         let report = ValidationContext::builder()
             .with_validator(ValidationLayer::Structure, validator)
             .build()
-            .validate_lenient(&segments);
+            .validate(&segments);
         assert!(!report.has_errors(), "{report:#?}");
     }
 
@@ -434,7 +434,7 @@ mod representation {
             let report = ValidationContext::builder()
                 .with_validator(ValidationLayer::Structure, validator)
                 .build()
-                .validate_lenient(&segments);
+                .validate(&segments);
             // `ZZZ++123` leaves element 0 empty and puts `123` in element 1;
             // `ZZZ+1 2` is a single value with an embedded space.
             assert!(
@@ -504,7 +504,7 @@ mod representation {
             let report = ValidationContext::builder()
                 .with_validator(ValidationLayer::Structure, validator)
                 .build()
-                .validate_lenient(&segments);
+                .validate(&segments);
             assert!(
                 !report.has_errors(),
                 "{:?} must pass with no UNB: {report:#?}",
@@ -527,7 +527,7 @@ mod representation {
         let report = ValidationContext::builder()
             .with_validator(ValidationLayer::Structure, validator)
             .build()
-            .validate_lenient(&segments);
+            .validate(&segments);
         assert!(report.has_errors(), "seven digits is neither n6 nor n8");
     }
 
@@ -552,7 +552,7 @@ mod representation {
         let report = ValidationContext::builder()
             .with_validator(ValidationLayer::Structure, validator)
             .build()
-            .validate_lenient(&segments);
+            .validate(&segments);
         assert!(
             report.iter_issues().any(|i| i.error_code() == Some("E047")),
             "{report:#?}"
@@ -582,7 +582,7 @@ mod representation {
         let report = ValidationContext::builder()
             .with_validator(ValidationLayer::Structure, validator)
             .build()
-            .validate_lenient(&segments);
+            .validate(&segments);
         assert!(!report.has_errors(), "{report:#?}");
     }
 }

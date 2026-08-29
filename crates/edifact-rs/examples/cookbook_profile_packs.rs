@@ -3,7 +3,7 @@
 //! [`ProfileRulePack`] is the primary extension point for downstream MIG/profile
 //! crates.  This example shows how to:
 //!
-//! - Build packs from closures with `.with_rule_fn`
+//! - Build packs from closures with `.with_contextual_rule_fn`
 //! - Restrict a pack to a specific message type with `.for_message_type`
 //! - Merge multiple packs into one with `extend_from` / `merge_with_override`
 //! - Assign stable rule IDs and filter by prefix with `filter_by_rule_prefix`
@@ -29,7 +29,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
     // or map it independently.
     let document_pack = ProfileRulePack::new("ORDERS-DOCUMENT")
         .for_message_type("ORDERS") // only run for ORDERS messages
-        .with_stateless_rule_fn(|segments, issues| {
+        .with_rule_fn(|segments, issues| {
             issues.extend((|| -> Option<ValidationIssue> {
                 let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
                 let document_code = bgm.get_element(0)?.get_component(0)?;
@@ -49,7 +49,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
     // ── Pack 2: reference rule ────────────────────────────────────────────────
     let reference_pack = ProfileRulePack::new("ORDERS-REFERENCE")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments, issues| {
+        .with_rule_fn(|segments, issues| {
             issues.extend((|| -> Option<ValidationIssue> {
                 let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
                 let reference = bgm.get_element(1)?.get_component(0)?;
@@ -77,7 +77,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
     let report = ValidationContext::builder()
         .with_profile_pack(pack)
         .build()
-        .validate_lenient(&segments);
+        .validate(&segments);
 
     println!("{}", report.render_deterministic());
 

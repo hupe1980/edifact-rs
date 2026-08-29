@@ -14,7 +14,7 @@ fn externally_authored_pack_can_validate_a_message_type() {
 
     let pack = ProfileRulePack::new("ORDERS-DEMO")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments, issues| {
+        .with_rule_fn(|segments, issues| {
             issues.extend((|| -> Option<ValidationIssue> {
                 let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
                 let document_code = bgm.get_element(0)?.get_component(0)?;
@@ -37,7 +37,7 @@ fn externally_authored_pack_can_validate_a_message_type() {
     let report = ValidationContext::builder()
         .with_profile_pack(pack)
         .build()
-        .validate_lenient(&segments);
+        .validate(&segments);
 
     assert!(report.has_errors());
     assert!(
@@ -54,7 +54,7 @@ fn merged_packs_accumulate_rules() {
 
     let document_rule = ProfileRulePack::new("ORDERS-DOC")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments, issues| {
+        .with_rule_fn(|segments, issues| {
             issues.extend((|| -> Option<ValidationIssue> {
                 let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
                 let document_code = bgm.get_element(0)?.get_component(0)?;
@@ -66,7 +66,7 @@ fn merged_packs_accumulate_rules() {
         });
     let reference_rule = ProfileRulePack::new("ORDERS-REF")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments, issues| {
+        .with_rule_fn(|segments, issues| {
             issues.extend((|| -> Option<ValidationIssue> {
                 let bgm = segments.iter().find(|segment| segment.tag == "BGM")?;
                 let reference = bgm.get_element(1)?.get_component(0)?;
@@ -85,7 +85,7 @@ fn merged_packs_accumulate_rules() {
     let report = ValidationContext::builder()
         .with_profile_pack(pack)
         .build()
-        .validate_lenient(&segments);
+        .validate(&segments);
 
     assert!(
         report
@@ -107,7 +107,7 @@ fn builder_can_merge_existing_packs() {
         .merge_with_override(
             ProfileRulePack::new("ONE")
                 .for_message_type("ORDERS")
-                .with_stateless_rule_fn(|_, issues| {
+                .with_rule_fn(|_, issues| {
                     issues.push(
                         ValidationIssue::new(ValidationSeverity::Info, "rule one")
                             .with_rule_id("DEMO-P010"),
@@ -118,7 +118,7 @@ fn builder_can_merge_existing_packs() {
         .merge_with_override(
             ProfileRulePack::new("TWO")
                 .for_message_type("INVOIC")
-                .with_stateless_rule_fn(|_, issues| {
+                .with_rule_fn(|_, issues| {
                     issues.push(
                         ValidationIssue::new(ValidationSeverity::Info, "rule two")
                             .with_rule_id("DEMO-P011"),
@@ -140,7 +140,7 @@ fn message_type_scoping_prevents_wrong_pack_application() {
 
     let pack = ProfileRulePack::new("ORDERS-ONLY")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|_, issues| {
+        .with_rule_fn(|_, issues| {
             issues.push(
                 ValidationIssue::new(ValidationSeverity::Error, "should not run")
                     .with_rule_id("DEMO-P999"),
@@ -150,7 +150,7 @@ fn message_type_scoping_prevents_wrong_pack_application() {
     let report = ValidationContext::builder()
         .with_profile_pack(pack)
         .build()
-        .validate_lenient(&segments);
+        .validate(&segments);
 
     assert!(
         report.is_valid(),
@@ -164,10 +164,10 @@ fn merge_with_override_replaces_named_rules_in_place() {
 
     let base = ProfileRulePack::new("BASE")
         .for_message_type("ORDERS")
-        .with_named_stateless_rule_fn("RULE-1", |_, issues| {
+        .with_named_rule_fn("RULE-1", |_, issues| {
             issues.push(ValidationIssue::new(ValidationSeverity::Info, "base first"));
         })
-        .with_named_stateless_rule_fn("RULE-2", |_, issues| {
+        .with_named_rule_fn("RULE-2", |_, issues| {
             issues.push(ValidationIssue::new(
                 ValidationSeverity::Info,
                 "base second",
@@ -176,7 +176,7 @@ fn merge_with_override_replaces_named_rules_in_place() {
 
     let override_pack = ProfileRulePack::new("OVERRIDE")
         .for_message_type("ORDERS")
-        .with_named_stateless_rule_fn("RULE-1", |_, issues| {
+        .with_named_rule_fn("RULE-1", |_, issues| {
             issues.push(ValidationIssue::new(
                 ValidationSeverity::Info,
                 "override first",
@@ -191,7 +191,7 @@ fn merge_with_override_replaces_named_rules_in_place() {
     let report = ValidationContext::builder()
         .with_profile_pack(pack)
         .build()
-        .validate_lenient(&segments);
+        .validate(&segments);
 
     assert_eq!(report.infos().len(), 2);
     assert_eq!(report.infos()[0].message, "override first");
@@ -207,7 +207,7 @@ fn release_scoping_requires_matching_association_code() {
         ProfileRulePack::new("ORDERS-553A")
             .for_message_type("ORDERS")
             .for_release("5.5.3a")
-            .with_stateless_rule_fn(|_, issues| {
+            .with_rule_fn(|_, issues| {
                 issues.push(
                     ValidationIssue::new(ValidationSeverity::Error, "release-specific rule fired")
                         .with_rule_id("DEMO-P100"),
@@ -218,13 +218,13 @@ fn release_scoping_requires_matching_association_code() {
     let matching_report = ValidationContext::builder()
         .with_profile_pack(build_pack())
         .build()
-        .validate_lenient(&matching);
+        .validate(&matching);
     assert!(matching_report.has_errors());
 
     let mismatching_report = ValidationContext::builder()
         .with_profile_pack(build_pack())
         .build()
-        .validate_lenient(&mismatching);
+        .validate(&mismatching);
     assert!(
         mismatching_report.is_valid(),
         "expected release mismatch to skip pack"
@@ -236,18 +236,18 @@ fn pack_composition_preserves_compatible_release_scope() {
     let base = ProfileRulePack::new("BASE")
         .for_message_type("ORDERS")
         .for_release("5.5.3a")
-        .with_stateless_rule_fn(|_, _issues| {});
+        .with_rule_fn(|_, _issues| {});
 
     let delta = ProfileRulePack::new("DELTA")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|_, _issues| {});
+        .with_rule_fn(|_, _issues| {});
 
     let merged = base.merge_with_override(delta).expect("compatible scopes");
     assert_eq!(merged.release(), Some("5.5.3a"));
 
     let extended = ProfileRulePack::new("EXTENDED")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|_, _issues| {})
+        .with_rule_fn(|_, _issues| {})
         .extend_from(&ProfileRulePack::new("BASE2").for_release("5.5.3a"))
         .expect("compatible scopes");
     assert_eq!(extended.release(), Some("5.5.3a"));

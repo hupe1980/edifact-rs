@@ -176,7 +176,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
         .with_validator(ValidationLayer::Structure, MyValidator)
         .build();
 
-    let report = ctx.validate_lenient(&segs);
+    let report = ctx.validate(&segs);
     if report.is_valid() {
         println!("✅ valid");
     } else {
@@ -208,7 +208,9 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 }
 ```
 
-`from_reader` parses one `OwnedSegment` at a time without buffering the whole file.
+`from_reader` parses one `OwnedSegment` at a time without buffering the whole
+file. `OwnedSegment` is just `Segment<'static>` — the same type `from_bytes`
+yields, so every function you have already seen accepts it unchanged.
 
 → Full streaming guide: [Streaming](@/docs/streaming.md)
 

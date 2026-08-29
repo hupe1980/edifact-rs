@@ -32,7 +32,7 @@ use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
 
 let pack = ProfileRulePack::new("ORDERS-RULES")
     .for_message_type("ORDERS")
-    .with_stateless_rule_fn(|segments, issues| {
+    .with_rule_fn(|segments, issues| {
         // Find the BGM segment; skip if absent
         let Some(bgm) = segments.iter().find(|s| s.tag == "BGM") else { return };
         let Some(code) = bgm.get_element(0).and_then(|e| e.get_component(0)) else { return };
@@ -51,7 +51,7 @@ let pack = ProfileRulePack::new("ORDERS-RULES")
             );
         }
     })
-    .with_stateless_rule_fn(|segments, issues| {
+    .with_rule_fn(|segments, issues| {
         // Rule: a buyer NAD is mandatory
         let has_buyer = segments
             .iter()
@@ -83,7 +83,7 @@ let segs: Vec<_> = from_bytes(b"UNH+1+ORDERS:D:96A:UN'BGM+220+PO-4711+9'UNT+3+1'
 let report = ValidationContext::builder()
     .with_profile_pack(pack)
     .build()
-    .validate_lenient(&segs);
+    .validate(&segs);
 
 println!("{} error(s)", report.errors().len());
 # Ok::<(), edifact_rs::EdifactError>(())
@@ -103,14 +103,14 @@ use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
 
 let base_pack = ProfileRulePack::new("ORDERS-BASE")
     .for_message_type("ORDERS")
-    .with_named_stateless_rule_fn("BASE-BGM", |_segs, _issues| {
+    .with_named_rule_fn("BASE-BGM", |_segs, _issues| {
         // shared baseline rules …
     });
 
 // Partner-specific pack that prepends the base rules before its own:
 let partner_pack = ProfileRulePack::new("ORDERS-ACME")
     .for_message_type("ORDERS")
-    .with_stateless_rule_fn(|_segs, _issues| {
+    .with_rule_fn(|_segs, _issues| {
         // ACME-specific rules — appended after base rules …
     })
     .extend_from(&base_pack)?;  // base rules run first
@@ -127,12 +127,12 @@ use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
 
 let base = ProfileRulePack::new("ORDERS-5.4")
     .for_message_type("ORDERS")
-    .with_named_stateless_rule_fn("PROFILE-4711-BGM-M", |_segs, _issues| {
+    .with_named_rule_fn("PROFILE-4711-BGM-M", |_segs, _issues| {
         // 5.4 BGM rule …
     });
 
 let delta = ProfileRulePack::new("ORDERS-5.5-delta")
-    .with_named_stateless_rule_fn("PROFILE-4711-BGM-M", |_segs, _issues| {
+    .with_named_rule_fn("PROFILE-4711-BGM-M", |_segs, _issues| {
         // updated 5.5 BGM rule — replaces the 5.4 version
     });
 
@@ -159,13 +159,13 @@ Packs check the `UNH` segment element 1 component 0 (the message identifier):
 // This pack's rules run ONLY when the message type is "INVOIC"
 let invoic_pack = ProfileRulePack::new("INVOIC-RULES")
     .for_message_type("INVOIC")
-    .with_stateless_rule_fn(|_segs, _issues| {
+    .with_rule_fn(|_segs, _issues| {
         // Will not run for ORDERS, ORDERS, etc.
     });
 
 // Without for_message_type, rules run for all message types:
 let universal_pack = ProfileRulePack::new("UNIVERSAL")
-    .with_stateless_rule_fn(|_segs, _issues| {});
+    .with_rule_fn(|_segs, _issues| {});
 ```
 
 Call `.for_message_type` multiple times to include multiple types:
@@ -176,7 +176,7 @@ let multi_pack = ProfileRulePack::new("TRADE-DOCS")
     .for_message_type("ORDERS")
     .for_message_type("ORDRSP")
     .for_message_type("INVOIC")
-    .with_stateless_rule_fn(|_segs, _issues| {});
+    .with_rule_fn(|_segs, _issues| {});
 ```
 
 ---
@@ -192,13 +192,13 @@ let segs: Vec<_> = from_bytes(b"UNH+1+ORDERS:D:96A:UN'BGM+220+PO-4711+9'UNT+3+1'
 
 let pack = ProfileRulePack::new("ORDERS")
     .for_message_type("ORDERS")
-    .with_stateless_rule_fn(|_segs, issues| {
+    .with_rule_fn(|_segs, issues| {
         issues.push(
             ValidationIssue::new(ValidationSeverity::Warning, "demo warning")
                 .with_rule_id("ORDERS-DOC-P001"),
         );
     })
-    .with_stateless_rule_fn(|_segs, issues| {
+    .with_rule_fn(|_segs, issues| {
         issues.push(
             ValidationIssue::new(ValidationSeverity::Info, "demo info")
                 .with_rule_id("ORDERS-REF-P001"),
@@ -208,7 +208,7 @@ let pack = ProfileRulePack::new("ORDERS")
 let report = ValidationContext::builder()
     .with_profile_pack(pack)
     .build()
-    .validate_lenient(&segs);
+    .validate(&segs);
 
 // All findings:
 println!("total: {}", report.total_issues());
@@ -250,7 +250,7 @@ fn validate_orders(input: &[u8]) -> Result<(), Vec<TradeError>> {
 
     let pack = ProfileRulePack::new("ORDERS")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segs, issues| {
+        .with_rule_fn(|segs, issues| {
             let Some(code) = segs.iter()
                 .find(|s| s.tag == "BGM")
                 .and_then(|s| s.element_str(0))
@@ -262,7 +262,7 @@ fn validate_orders(input: &[u8]) -> Result<(), Vec<TradeError>> {
                 );
             }
         })
-        .with_stateless_rule_fn(|segs, issues| {
+        .with_rule_fn(|segs, issues| {
             let has_buyer = segs.iter()
                 .filter(|s| s.tag == "NAD")
                 .any(|s| s.element_str(0) == Some("BY"));
@@ -277,7 +277,7 @@ fn validate_orders(input: &[u8]) -> Result<(), Vec<TradeError>> {
     let report = ValidationContext::builder()
         .with_profile_pack(pack)
         .build()
-        .validate_lenient(&segs);
+        .validate(&segs);
 
     if report.is_valid() {
         return Ok(());
@@ -383,7 +383,7 @@ let pack = ProfileRulePack::new("ORDERS-GROUPS")
 ```
 
 Use `group::group_segments_indexed` to build the tree, then pass it to
-`ctx.validate_lenient_grouped(&tree, &segs)`.
+`ctx.validate_grouped(&tree, &segs)`.
 
 ### Custom group rule closure
 
@@ -421,9 +421,46 @@ let pack = ProfileRulePack::new("ORDERS-GROUPS")
     );
 ```
 
-Group rules are run via `validate_lenient_grouped` / `validate_strict_grouped` on
+Group rules are run via `validate_grouped` on
 `ValidationContext`. See [Validation](@/docs/validation.md) for how to supply a `GroupDef`
 schema and run the group pass.
+
+---
+
+## Capping a noisy rule
+
+A rule that sweeps every segment can produce one issue per segment, and a
+*group* rule fires once per group occurrence on top of that. `with_max_issues_per_rule`
+bounds the damage:
+
+```rust
+use edifact_rs::{ProfileRulePack, ValidationContext, ValidationIssue, ValidationSeverity, from_bytes};
+
+let pack = ProfileRulePack::new("NOISY")
+    .with_max_issues_per_rule(2)
+    .with_rule_fn(|segments, issues| {
+        for segment in segments {
+            issues.push(ValidationIssue::new(
+                ValidationSeverity::Warning,
+                format!("saw {}", segment.tag()),
+            ));
+        }
+    });
+
+let segments: Vec<_> = from_bytes(b"BGM+1'DTM+2'RFF+3'NAD+4'")
+    .collect::<Result<Vec<_>, _>>()?;
+let report = ValidationContext::builder()
+    .with_profile_pack(pack)
+    .build()
+    .validate(&segments);
+
+assert_eq!(report.total_issues(), 2); // four segments, capped at two
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+The cap is **per rule per call** — not per group. A group rule's budget is spent
+across the whole tree walk rather than reset at each occurrence, and once spent
+the rule is not called again on that pass.
 
 ---
 
@@ -433,8 +470,8 @@ schema and run the group pass.
 # use edifact_rs::ProfileRulePack;
 let pack = ProfileRulePack::new("MY-PACK")
     .for_message_type("ORDERS")
-    .with_stateless_rule_fn(|_segs, _issues| {})
-    .with_stateless_rule_fn(|_segs, _issues| {})
+    .with_rule_fn(|_segs, _issues| {})
+    .with_rule_fn(|_segs, _issues| {})
     .require_segment_in_group("SG5", "LIN", "SG5-LIN-M");
 
 println!("name:        {}", pack.name());              // "MY-PACK"
@@ -459,9 +496,12 @@ println!("types:       {:?}", pack.message_types().collect::<Vec<_>>()); // ["OR
    loose packs separately.
 5. **Keep rules small and focused** — one rule per concern makes reporting and
    debugging easier.
-6. **Use `with_stateless_rule_fn` for simple rules** — when you do not need
-   the [`ValidationRuleContext`], the stateless variant is cleaner; reach for
-   `with_rule_fn` only when you need per-call metadata.
+6. **Reach for `with_rule_fn` first** — it is the everyday form. Use
+   `with_contextual_rule_fn` only when the rule needs the per-call
+   `ValidationRuleContext` (message reference, message type, injected metadata).
+7. **Cap sweeping rules** — set `with_max_issues_per_rule` on any pack whose
+   rules iterate segments, so one bad interchange cannot produce a report larger
+   than the message.
 
 ---
 

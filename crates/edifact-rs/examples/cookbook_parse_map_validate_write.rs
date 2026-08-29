@@ -61,14 +61,14 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 
     // ── 3. Validate ───────────────────────────────────────────────────────────
     // `validate_lenient` collects all issues into a report rather than failing
-    // on the first error.  Switch to `validate_strict` to run all validators
+    // on the first error.  Call `.result()` on the report to turn it into a
     // and then return `Err(ValidationReport)` if any Error/Critical issues were found.
     let validation_context = ValidationContext::builder()
         .with_message_type("ORDERS")
         .with_validator(ValidationLayer::Structure, SimpleValidator)
         .build();
 
-    let report = validation_context.validate_lenient(&segments);
+    let report = validation_context.validate(&segments);
     if !report.is_valid() {
         return Err(edifact_rs::EdifactError::ValidationErrors {
             error_count: report.errors().len(),

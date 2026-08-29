@@ -55,7 +55,7 @@ fn run_case(
     // Parse the fixture into zero-copy segments, then validate.
     let segments: Vec<_> =
         edifact_rs::from_bytes(input.as_bytes()).collect::<Result<Vec<_>, _>>()?;
-    let report = context.validate_lenient(&segments);
+    let report = context.validate(&segments);
     println!("report:\n{}", report.render_deterministic());
 
     println!(

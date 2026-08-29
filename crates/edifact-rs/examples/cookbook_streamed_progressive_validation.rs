@@ -15,7 +15,7 @@ UNT+4+2'";
 
     let pack = ProfileRulePack::new("ORDERS-PROGRESSIVE")
         .for_message_type("ORDERS")
-        .with_stateless_rule_fn(|segments, issues| {
+        .with_rule_fn(|segments, issues| {
             let has_bgm = segments.iter().any(|segment| segment.tag == "BGM");
             if !has_bgm {
                 issues.push(
@@ -28,7 +28,7 @@ UNT+4+2'";
                 );
             }
         })
-        .with_stateless_rule_fn(|segments, issues| {
+        .with_rule_fn(|segments, issues| {
             let has_buyer = segments
                 .iter()
                 .filter(|segment| segment.tag == "NAD")
@@ -77,11 +77,7 @@ UNT+4+2'";
             .is_some_and(|segment| segment.tag == "UNT");
         if end_of_window {
             {
-                let borrowed: Vec<_> = current_window
-                    .iter()
-                    .map(|segment| segment.as_borrowed())
-                    .collect();
-                let report = context.validate_lenient(&borrowed);
+                let report = context.validate(&current_window);
                 println!(
                     "window {}: {} issue(s)",
                     validated_windows + 1,

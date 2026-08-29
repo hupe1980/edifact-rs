@@ -169,11 +169,17 @@ impl<'a> Iterator for Parser<'a> {
                 Some(Ok(t)) => t,
                 Some(Err(e)) => return Some(Err(e)),
                 None => {
-                    // EOF — flush whatever we have.
+                    // Input ran out mid-segment: no terminator arrived.
+                    //
+                    // Yielding what was read would let a truncated file parse as
+                    // a complete one — a silent data-integrity failure in a
+                    // format whose trailers declare counts.
                     if let Some(end) = pending.flush(&mut elements) {
                         segment_end = end;
                     }
-                    break;
+                    return Some(Err(EdifactError::UnexpectedEof {
+                        offset: segment_end,
+                    }));
                 }
             };
 
@@ -182,7 +188,13 @@ impl<'a> Iterator for Parser<'a> {
                     value: next_tag,
                     span,
                 } => {
-                    // We consumed the first token of the *next* segment; save it.
+                    // Not reachable through the current tokenizer, which only
+                    // leaves `InSegment` on a terminator (handled below) or on
+                    // an error it reports first.  Kept so the match stays total
+                    // and a future tokenizer change cannot silently splice two
+                    // segments together: a tag where a terminator belongs means
+                    // the current segment was never closed.  The token is saved
+                    // so a caller that continues sees the next segment intact.
                     self.peeked = Some(Token::SegmentTag {
                         value: next_tag,
                         span,
@@ -190,7 +202,9 @@ impl<'a> Iterator for Parser<'a> {
                     if let Some(end) = pending.flush(&mut elements) {
                         segment_end = end;
                     }
-                    break;
+                    return Some(Err(EdifactError::UnexpectedEof {
+                        offset: segment_end,
+                    }));
                 }
                 Token::SegmentTerminator { span } => {
                     pending.flush(&mut elements);
@@ -234,7 +248,7 @@ impl<'a> Iterator for Parser<'a> {
         }
 
         Some(Ok(Segment {
-            tag,
+            tag: Cow::Borrowed(tag),
             span: Span::new(tag_span.start, segment_end),
             tag_span,
             elements,
@@ -242,23 +256,9 @@ impl<'a> Iterator for Parser<'a> {
     }
 }
 
-/// Parse EDIFACT from an arbitrary reader.
-///
-/// This path is optimized for bounded-memory ingest and returns owned segments,
-/// allowing the parser to advance across chunk boundaries without requiring a
-/// fully-buffered input slice.
-pub fn from_reader<R: Read>(reader: R) -> Result<Vec<OwnedSegment>, EdifactError> {
-    from_reader_stream(reader).collect()
-}
-
-/// Parse EDIFACT from a buffered reader.
-pub fn from_bufread<R: BufRead>(reader: R) -> Result<Vec<OwnedSegment>, EdifactError> {
-    from_bufread_stream(reader).collect()
-}
-
 /// Configuration for reader-based EDIFACT parsers.
 ///
-/// Pass to [`from_reader_with_config`] or [`from_bufread_stream_with_config`] to
+/// Pass to [`from_reader_with_config`] or [`from_bufread_with_config`] to
 /// override default limits.
 ///
 /// # Example
@@ -417,7 +417,7 @@ enum StreamState {
 /// (8 KB) is far larger than a typical EDIFACT segment (<300 bytes).
 ///
 /// Configure limits via [`ReaderConfig`] and [`from_reader_with_config`] /
-/// [`from_bufread_stream_with_config`].
+/// [`from_bufread_with_config`].
 pub struct OwnedSegmentStream<R: BufRead> {
     reader: R,
     ssa: crate::tokenizer::ServiceStringAdvice,
@@ -631,7 +631,7 @@ fn try_fast_segment<R: BufRead>(
     match parser_iter.next() {
         None => FastSegment::Skip(pos + 1),
         Some(Err(e)) => FastSegment::Err(e),
-        Some(Ok(s)) => FastSegment::Parsed(OwnedSegment::from(s).offset(seg_start), pos + 1),
+        Some(Ok(s)) => FastSegment::Parsed(s.into_owned().offset(seg_start), pos + 1),
     }
     // `buf` borrow released here — `reader.consume()` is safe to call in the caller.
 }
@@ -693,6 +693,24 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
             }
 
             // ── Slow path: byte accumulation (also handles UNA header) ────
+            if self.state == StreamState::Init {
+                // Strip a byte order mark before anything tries to read a tag
+                // out of it.  The slice path does the same (see
+                // `tokenizer::prologue_len`), and the two must agree or the
+                // identical file parses only from one of them.
+                match self.reader.fill_buf() {
+                    Ok(buf) if buf.starts_with(&crate::tokenizer::UTF8_BOM) => {
+                        self.reader.consume(3);
+                        self.stream_offset += 3;
+                        self.bytes_consumed = self.stream_offset;
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        self.state = StreamState::Done;
+                        return Some(Err(error.into()));
+                    }
+                }
+            }
             let mut scanned = self.state != StreamState::Init;
             // `read_next_raw_segment` tracks offset as `usize` for segment
             // start positions; sync back to the `u64` field afterward.
@@ -733,7 +751,7 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
             let mut parser_iter = Parser::new(tok);
             match parser_iter.next() {
                 Some(Ok(s)) => {
-                    let seg = OwnedSegment::from(s).offset(raw.start_offset);
+                    let seg = s.into_owned().offset(raw.start_offset);
                     if let Some(error) = self.check_limits(&seg.tag) {
                         self.state = StreamState::Done;
                         return Some(Err(error));
@@ -754,13 +772,21 @@ impl<R: BufRead> Iterator for OwnedSegmentStream<R> {
     }
 }
 
-/// Parse EDIFACT from a buffered reader as a streaming iterator.
-pub fn from_bufread_stream<R: BufRead>(reader: R) -> OwnedSegmentStream<R> {
+/// Parse an already-buffered reader into a lazy iterator of [`OwnedSegment`]s.
+///
+/// The same as [`from_reader`][crate::from_reader] without the internal
+/// [`BufReader`] wrapper, for callers who already hold a [`BufRead`] and would
+/// otherwise pay for a second layer of buffering.
+///
+/// # Errors
+///
+/// Each `next()` yields a parse or I/O failure as `Some(Err(_))`.
+pub fn from_bufread<R: BufRead>(reader: R) -> OwnedSegmentStream<R> {
     OwnedSegmentStream::new(reader)
 }
 
-/// Parse EDIFACT from a buffered reader as a streaming iterator with custom config.
-pub fn from_bufread_stream_with_config<R: BufRead>(
+/// [`from_bufread`] with explicit [`ReaderConfig`] limits.
+pub fn from_bufread_with_config<R: BufRead>(
     reader: R,
     config: ReaderConfig,
 ) -> OwnedSegmentStream<R> {
@@ -769,7 +795,7 @@ pub fn from_bufread_stream_with_config<R: BufRead>(
 
 /// Parse EDIFACT from an arbitrary reader as a streaming iterator.
 pub fn from_reader_stream<R: Read>(reader: R) -> OwnedSegmentStream<BufReader<R>> {
-    from_bufread_stream(BufReader::new(reader))
+    from_bufread(BufReader::new(reader))
 }
 
 /// Parse EDIFACT from an arbitrary reader as a streaming iterator with custom config.
@@ -788,7 +814,7 @@ pub fn from_reader_with_config<R: Read>(
     reader: R,
     config: ReaderConfig,
 ) -> OwnedSegmentStream<BufReader<R>> {
-    from_bufread_stream_with_config(BufReader::new(reader), config)
+    from_bufread_with_config(BufReader::new(reader), config)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1018,8 +1044,10 @@ mod tests {
     #[test]
     fn reader_path_preserves_custom_una_delimiters() {
         let input = b"UNA:;.? 'BGM;220;test?;value'";
-        let segments = super::from_bufread(std::io::BufReader::new(std::io::Cursor::new(input)))
-            .expect("reader parse should succeed");
+        let segments: Vec<_> =
+            super::from_bufread(std::io::BufReader::new(std::io::Cursor::new(input)))
+                .collect::<Result<_, _>>()
+                .expect("reader parse should succeed");
         let bgm = segments
             .iter()
             .find(|segment| segment.tag == "BGM")
@@ -1039,7 +1067,9 @@ mod tests {
     fn from_reader_handles_chunk_boundaries() {
         let input = b"UNA:+.? 'BGM+220+test?+value'UNT+2+1'";
         let reader = std::io::BufReader::with_capacity(5, std::io::Cursor::new(input));
-        let parsed = from_bufread(reader).expect("reader parsing should succeed");
+        let parsed = from_bufread(reader)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("reader parsing should succeed");
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].tag, "BGM");
         assert_eq!(parsed[0].elements[1].components[0].0, "test+value");
@@ -1049,8 +1079,9 @@ mod tests {
     #[test]
     fn from_reader_without_una_uses_default_delimiters() {
         let input = b"BGM+220+X'UNT+2+1'";
-        let parsed =
-            from_reader(std::io::Cursor::new(input)).expect("reader parsing should succeed");
+        let parsed = crate::from_reader(std::io::Cursor::new(input))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("reader parsing should succeed");
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].tag, "BGM");
         assert_eq!(parsed[0].elements[0].components[0].0, "220");
@@ -1070,7 +1101,8 @@ mod tests {
     #[test]
     fn from_reader_reports_dangling_release_sequence() {
         let input = b"FTX+AAA++dangling?";
-        let err = from_reader(std::io::Cursor::new(input))
+        let err = crate::from_reader(std::io::Cursor::new(input))
+            .collect::<Result<Vec<_>, _>>()
             .expect_err("expected dangling release from reader path");
         assert!(matches!(err, EdifactError::InvalidReleaseSequence { .. }));
     }
@@ -1088,15 +1120,13 @@ mod tests {
         let from_slice: Vec<_> = crate::from_bytes(input)
             .collect::<Result<Vec<_>, _>>()
             .expect("slice path");
-        let from_reader =
-            from_reader(std::io::Cursor::new(&input[..])).expect("reader path must agree");
+        let from_reader = crate::from_reader(std::io::Cursor::new(&input[..]))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("reader path must agree");
 
         assert_eq!(
-            from_slice.iter().map(|s| s.tag).collect::<Vec<_>>(),
-            from_reader
-                .iter()
-                .map(|s| s.tag.as_str())
-                .collect::<Vec<_>>(),
+            from_slice.iter().map(|s| s.tag()).collect::<Vec<_>>(),
+            from_reader.iter().map(|s| s.tag()).collect::<Vec<_>>(),
         );
         assert_eq!(from_reader[1].element_str(0), Some("XXXXXX"));
     }
@@ -1110,7 +1140,9 @@ mod tests {
         let from_slice: Vec<_> = crate::from_bytes(input)
             .collect::<Result<Vec<_>, _>>()
             .expect("slice path");
-        let from_reader = from_reader(std::io::Cursor::new(&input[..])).expect("reader path");
+        let from_reader = crate::from_reader(std::io::Cursor::new(&input[..]))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("reader path");
 
         assert_eq!(from_slice[1].get_element(0).unwrap().repeat_count(), 2);
         assert_eq!(from_reader[1].elements[0].repeat_count(), 2);
@@ -1144,7 +1176,7 @@ mod tests {
 
         for segments in [
             crate::from_bytes_with_config(input, config)
-                .map(|r| r.map(crate::OwnedSegment::from))
+                .map(|r| r.map(crate::Segment::into_owned))
                 .collect::<Result<Vec<_>, _>>()
                 .expect("slice path"),
             from_reader_with_config(std::io::Cursor::new(&input[..]), config)
@@ -1155,10 +1187,80 @@ mod tests {
         }
     }
 
+    /// The slice and reader paths must agree byte for byte: the same file has
+    /// to parse — or fail — identically however it is handed in.
+    #[test]
+    fn both_parsing_paths_agree_on_every_edge_case() {
+        fn bom(rest: &[u8]) -> Vec<u8> {
+            let mut v = crate::tokenizer::UTF8_BOM.to_vec();
+            v.extend_from_slice(rest);
+            v
+        }
+
+        let cases: Vec<Vec<u8>> = vec![
+            b"BGM+220".to_vec(),                           // truncated: no terminator
+            b"BGM+220'".to_vec(),                          // the ordinary case
+            b"BGM+220'\r\n".to_vec(),                      // trailing whitespace
+            b"\n  UNA:+.? 'BGM+220'".to_vec(),             // UNA behind whitespace
+            bom(b"UNA:+.? 'BGM+220'"),                     // UNA behind a BOM
+            bom(b"UNB+UNOA:1+S+R+200101:0900+1'UNZ+0+1'"), // UNB behind a BOM
+            b"UNB+UNOC:4+S+R+260101:0900+I'RFF+ON:1*ON:2'UNZ+0+I'".to_vec(),
+            b"FTX+AAA++dangling?".to_vec(), // dangling release
+            b"UNA::.? 'BGM:220'".to_vec(),  // malformed UNA
+        ];
+
+        for input in cases {
+            let readable = String::from_utf8_lossy(&input).into_owned();
+            let sliced: Result<Vec<OwnedSegment>, _> = crate::from_bytes(&input)
+                .map(|r| r.map(|s| s.into_owned()))
+                .collect();
+            let streamed: Result<Vec<OwnedSegment>, _> =
+                crate::from_reader(std::io::Cursor::new(input.clone())).collect();
+            assert_eq!(
+                format!("{sliced:?}"),
+                format!("{streamed:?}"),
+                "slice and reader paths disagree on {readable:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_segment_with_no_terminator_is_rejected_not_accepted() {
+        // Accepting it would let a file cut off mid-transfer parse as a
+        // complete interchange whose UNZ count happens to agree.
+        for input in [
+            &b"BGM+220"[..],
+            &b"UNB+UNOA:1+S+R+200101:0900+1'UNZ+0+1"[..],
+        ] {
+            let err = crate::from_bytes(input)
+                .collect::<Result<Vec<_>, _>>()
+                .expect_err("an unterminated segment must not parse");
+            assert!(
+                matches!(err, EdifactError::UnexpectedEof { .. }),
+                "expected UnexpectedEof for {:?}, got {err:?}",
+                std::str::from_utf8(input).unwrap(),
+            );
+        }
+    }
+
+    #[test]
+    fn a_byte_order_mark_does_not_hide_the_first_segment() {
+        let mut input = crate::tokenizer::UTF8_BOM.to_vec();
+        input.extend_from_slice(b"UNB+UNOA:1+S+R+200101:0900+1'UNZ+0+1'");
+        let segments: Vec<_> = crate::from_bytes(&input)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("a BOM is prologue, not a segment tag");
+        assert_eq!(
+            segments.iter().map(Segment::tag).collect::<Vec<_>>(),
+            ["UNB", "UNZ"],
+        );
+    }
+
     #[test]
     fn from_reader_rejects_invalid_una() {
         let input = b"UNA::.? 'BGM:220'";
-        let err = from_reader(std::io::Cursor::new(input))
+        let err = crate::from_reader(std::io::Cursor::new(input))
+            .collect::<Result<Vec<_>, _>>()
             .expect_err("invalid UNA should fail reader parsing");
         assert!(matches!(err, EdifactError::InvalidUna));
     }

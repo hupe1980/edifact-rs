@@ -191,13 +191,17 @@ struct Nad {
   <h2 id="cta-heading">Start reading</h2>
   <ul class="guide-grid">
     {% set docs = get_section(path="docs/_index.md") %}
-    {% for p in docs.pages | slice(end=6) %}
+    {# `loop.index` rather than a `slice` filter: `slice` was dropped in Zola
+       0.23, and pinning the site build to an older Zola just to keep one filter
+       is not a trade worth making. #}
+    {% for p in docs.pages %}{% if loop.index <= 6 %}
     <li>
       <a href="{{ p.permalink }}">
         <strong>{{ p.title }}</strong>
         <span>{{ p.description }}</span>
       </a>
     </li>
+    {% endif %}
     {% endfor %}
   </ul>
   <p><a class="btn btn-primary" href="{{ get_url(path='@/docs/_index.md') }}">All guides</a></p>

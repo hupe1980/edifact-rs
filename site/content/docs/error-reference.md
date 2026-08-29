@@ -50,7 +50,6 @@ needed.
 | E019 | `InvalidReleaseSequence` | Parser | `offset` |
 | E020 | `SegmentTooLong` | Reader parser | `offset` |
 | E021 | `MissingRequiredComponent` | Deserializer | — |
-| E022 | `UnexpectedMessageType` | Message dispatch | — |
 | E023 | `InterchangeTooLarge` | Envelope builder | — |
 | E024 | `InvalidEventSequence` | Event emitter | — |
 | E025 | `InvalidElementPosition` | Directory builder | — |
@@ -400,22 +399,6 @@ field `Option<T>` if it is truly optional.
 
 ---
 
-### E022 — `UnexpectedMessageType`
-
-```text
-no handler registered for message type {message_type}
-```
-
-**When**: `MessageDispatch::dispatch` was called with a message whose `UNH` segment
-specifies a type that has no registered handler and no fallback was configured.
-
-**Fields**: `message_type: String`.
-
-**Fix**: Register a handler with `MessageDispatch::on("TYPE", ...)`, or add a
-catch-all fallback handler.
-
----
-
 ### E023 — `InterchangeTooLarge`
 
 ```text
@@ -529,7 +512,7 @@ validation failed with {error_count} error(s)
 **When**: Constructed explicitly to promote a `ValidationReport` that contains at
 least one error-severity issue into an `EdifactError` — typically inside application
 code or library helpers that need to return `Result<_, EdifactError>` rather than a
-bare report.  Note that `validate_strict` itself returns
+bare report.  Note that `ValidationReport::result` itself returns
 `Result<ValidationReport, ValidationReport>` (the `Err` arm carries the full report)
 and does **not** produce this variant automatically; callers must wrap it themselves
 when needed.
@@ -537,7 +520,7 @@ when needed.
 **Fields**: `error_count: usize`, `report: Box<ValidationReport>`.
 
 **Fix**: Inspect `report` for the full list of issues with locations, rule IDs, and
-suggested fixes. Call `validate_lenient` if you want validation to always return a
+suggested fixes. Call `ValidationContext::validate` if you want validation to always return a
 report rather than an error.
 
 ---
@@ -1104,4 +1087,5 @@ so a stored code always identifies the same condition:
 | Code | Former variant | Retired because |
 |---|---|---|
 | E018 | `ValidationFailed` | Superseded by `ValidationErrors` (E030). |
-| E029 | `FunctionalGroupNotSupported` | Functional groups (`UNG`/`UNE`) are now parsed and validated natively. |
+| E022 | `UnexpectedMessageType` | Message dispatch is a `match` on `MessageWindow::message_type`, not a registry. |
+| E029 | `FunctionalGroupNotSupported` | Functional groups (`UNG`/`UNE`) are parsed and validated natively. |
