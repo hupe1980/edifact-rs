@@ -42,7 +42,7 @@
 //! is defined by ISO 9735-4, not by a directory release, so the same argument
 //! applies: one correct answer, no version to pick. Together with `UNH` and
 //! `UNT` they are everything a `CONTRL` is built from, which means
-//! [`lookup`](crate::service::lookup) alone validates one. See [`contrl`] for
+//! [`service::lookup`] alone validates one. See [`contrl`] for
 //! generating them.
 //!
 //! Not here: the interactive-EDI segments `UIB`/`UIH`/`UIR`/`UIT`/`UIZ`
@@ -87,6 +87,15 @@
 //! 4 one is not rejected for carrying components version 3 lacked.
 
 use crate::directory_validator::{ComponentRef, ElementRef, Repr, SegmentDefinition, Status};
+// Names the module docs link to. Rustdoc versions differ on whether a module's
+// inner docs resolve in the module or its parent; importing them here makes the
+// links resolve either way.
+#[cfg(doc)]
+use crate::{
+    DirectoryValidator, EdifactError, Segment, contrl,
+    directory_validator::{DirectoryValidatorBuilder, SegmentLayout},
+    service,
+};
 
 use Status::{Conditional as C, Mandatory as M};
 
