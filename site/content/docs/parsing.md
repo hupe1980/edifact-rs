@@ -18,7 +18,7 @@ sibling that takes a [`ReaderConfig`](#dos-hardening-with-readerconfig).
 | Function | Input | Yields | When to use |
 |---|---|---|---|
 | `from_bytes` | `&[u8]` | `Segment<'input>` | In-memory buffer — the fastest path, borrows |
-| `from_reader` | `impl Read` | `OwnedSegment` | A file or socket; O(1) memory |
+| `from_reader` | `impl Read` | `OwnedSegment` | A file or socket; holds one segment at a time |
 | `from_bufread` | `impl BufRead` | `OwnedSegment` | As above, when you already hold a `BufRead` |
 | `from_bytes_decoded` | `&[u8]` | `Vec<OwnedSegment>` | Transcodes from the repertoire the `UNB` declares |
 | `from_reader_decoded` | `impl Read` | `OwnedSegment` | The streaming counterpart |
@@ -42,7 +42,7 @@ let input: &[u8] = b"UNA:+.? 'BGM+220+PO-4711+9'NAD+BY+4000001::9'";
 // collect eagerly
 let segments: Vec<_> = from_bytes(input).collect::<Result<_, _>>()?;
 
-// or iterate lazily — no allocations until each segment is consumed
+// or iterate lazily — each segment is parsed when you ask for it
 for result in from_bytes(input) {
     let seg = result?;
     println!("{}", seg.tag);
@@ -51,11 +51,11 @@ for result in from_bytes(input) {
 ```
 
 `from_bytes` is the fastest path:
-- The tag `&str` and component `&str` slices **borrow directly from `input`**.
-- A `Vec<Element>` per segment and a `SmallVec<[Cow<'_, str>; 4]>` per element are
-  the only heap allocations.
-- `Cow::Owned` is only created for components that contain a resolved release
-  character (the decoded string differs from the raw bytes).
+- The tag and every component value are `Cow<'_, str>` that **borrow from
+  `input`**; `Cow::Owned` appears only where a release escape was resolved.
+- Each segment allocates its element vector once; components sit inline in a
+  `SmallVec` up to four per element. The full budget is in
+  [Performance](@/docs/performance.md#allocation-per-segment).
 
 ---
 
@@ -179,9 +179,8 @@ for result in from_reader(f) {
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-`from_reader` is O(1) memory — it yields one `OwnedSegment` and then
-immediately drops the internal buffer before reading the next segment. Collect
-it when you do want everything in memory:
+`from_reader` holds one segment at a time, at most `max_segment_bytes`, plus its
+read buffer. Collect it when you do want everything in memory:
 
 ```rust,no_run
 use edifact_rs::from_reader;
@@ -200,15 +199,16 @@ a second layer of copying.
 
 ## DoS hardening with `ReaderConfig`
 
-`ReaderConfig` carries four independent budgets. Every one of them is a **hard cap
+`ReaderConfig` carries five independent budgets. Every one of them is a **hard cap
 that reports an error** — none of them ever ends the iterator quietly.
 
 | Field | Default | Raised as |
 |---|---|---|
 | `max_segment_bytes` | 65 536 (64 KiB) | `SegmentTooLong { offset, limit }` (E020) |
-| `max_segments` | unlimited | `LimitExceeded { limit: "max_segments", max }` (E036) |
-| `max_messages` | unlimited | `LimitExceeded { limit: "max_messages", max }` (E036) |
-| `max_input_bytes` | unlimited | `LimitExceeded { limit: "max_input_bytes", max }` (E036) |
+| `max_segments` | unlimited | `LimitExceeded { limit: "max_segments", max, offset }` (E036) |
+| `max_messages` | unlimited | `LimitExceeded { limit: "max_messages", max, offset }` (E036) |
+| `max_segments_per_message` | unlimited | `LimitExceeded { limit: "max_segments_per_message", max, offset }` (E036) |
+| `max_input_bytes` | unlimited | `LimitExceeded { limit: "max_input_bytes", max, offset }` (E036) |
 
 The same config applies to every front end: `from_bytes_with_config`,
 `from_reader_with_config`, `from_bufread_with_config`, and the two decoding
@@ -250,7 +250,7 @@ let err = from_bytes_with_config(b"BGM+220'DTM+137'", config)
     .unwrap_err();
 assert!(matches!(
     err,
-    EdifactError::LimitExceeded { limit: "max_segments", max: 1 },
+    EdifactError::LimitExceeded { limit: "max_segments", max: 1, .. },
 ));
 ```
 
@@ -267,7 +267,7 @@ is never handed out at all.
 
 `ReaderConfig` carries one non-budget field. By default `edifact-rs` discovers the
 service characters the way a receiver should — from a leading `UNA` if there is
-one, otherwise the ISO 9735-1 §5.1 defaults with the repetition separator
+one, otherwise the ISO 9735-1 §5.2 defaults with the repetition separator
 resolved from the syntax version in `UNB` S001 DE 0002.
 
 A **fragment** has neither. A single message lifted out of an interchange carries
@@ -344,7 +344,7 @@ it would let a file cut off mid-transfer parse as a complete interchange. Every
 syntax contract is reported identically by both parse paths.
 
 See the [Error Reference](@/docs/error-reference.md) for a complete list of all variants
-and their stable codes (E001–E053).
+and their stable codes.
 
 ---
 

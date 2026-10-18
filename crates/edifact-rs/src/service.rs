@@ -1,19 +1,17 @@
 //! Segment definitions for the ISO 9735 **service segments**.
 //!
 //! The batch-EDI service segments — `UNB`, `UNZ`, `UNG`, `UNE`, `UNH`, `UNT`,
-//! `UNS`, `UNO`, `UNP`, `UGH`, and `UGT` — are specified by the syntax standard
-//! itself (ISO 9735-1:2002 Annex C), not by a UN/EDIFACT directory release.
-//! There is one correct answer for their structure, it does not change between
-//! D.96A and D.24B, and it is not part of the licensed directory data this crate
-//! deliberately does not ship — so it ships here.
+//! `UNS`, `UNO`, `UNP`, `UGH`, and `UGT` — are defined by the ISO 9735 service
+//! segment specifications (the ISO 9735-10 service directory), not by a
+//! UN/EDIFACT directory release. Their structure does not change between D.96A
+//! and D.24A and is not licensed directory data, so it ships here.
 //!
 //! # Why this exists
 //!
 //! Code-addressed access ([`Segment::value_by_code`],
 //! `#[edifact(element = "0020")]`) needs a [`SegmentDefinition`] to resolve
-//! against. Requiring every consumer to hand-author `UNB` before they can read
-//! an interchange control reference by name made the crate's headline safety
-//! feature unreachable for exactly the segments every EDIFACT program touches.
+//! against; these definitions make it work on the envelope without
+//! hand-authoring `UNB` first.
 //!
 //! ```
 //! use edifact_rs::{from_bytes, service};

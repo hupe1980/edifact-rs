@@ -71,10 +71,8 @@ assert!(matches!(decode_interchange(ascii)?, Cow::Borrowed(_)));
 
 ## Decoding a stream
 
-Buffering a multi-gigabyte interchange just to transcode it would undo the
-crate's constant-memory guarantee. `decode_reader` buffers only the first few
-kilobytes — enough to find the `UNB` — reads the repertoire out of it, and
-streams the rest:
+`decode_reader` reads a 4 KiB probe to find the `UNB`, takes the repertoire
+from it, and streams the rest through one 8 KiB decoding buffer:
 
 ```rust
 use edifact_rs::{decode_reader, from_reader};
@@ -193,7 +191,8 @@ The repertoire check is a separate, suppressible validation issue.
 | `UNOK` | ISO 8859-9 | Latin-5, Turkish |
 | `UNOY` | ISO 10646-1 | UTF-8 — the identity transform |
 
-`UNOX` (ISO 2022 code extension) and `KECA` (Korean) are **not** supported. Both
+`UNOX` (ISO/IEC 2022 code extension) and `KECA` (a Korean identifier outside
+ISO 9735) are **not** supported. Both
 are stateful or multi-byte in ways that break the byte-level delimiter scanning
 every other repertoire permits — a `+` byte inside a multi-byte sequence would be
 mistaken for an element separator. They report

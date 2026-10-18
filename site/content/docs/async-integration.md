@@ -28,8 +28,7 @@ cargo add tokio --features rt-multi-thread,macros,fs,sync
 
 ## Pattern A — Read into memory, parse synchronously
 
-**Best for**: payloads that fit comfortably in memory (typical EDIFACT messages are
-well under 1 MB).
+**Best for**: payloads that fit comfortably in memory.
 
 ```rust,no_run
 use edifact_rs::{from_bytes, Segment};
@@ -38,7 +37,7 @@ async fn process_edi_file(path: &str) -> Result<(), Box<dyn std::error::Error>> 
     // Async I/O: read the file without blocking the runtime
     let bytes = tokio::fs::read(path).await?;
 
-    // Synchronous parsing on the async thread — safe because it's fast
+    // Synchronous parsing on the async thread
     let segments: Vec<_> = from_bytes(&bytes).collect::<Result<_, _>>()?;
 
     for seg in &segments {
@@ -48,8 +47,9 @@ async fn process_edi_file(path: &str) -> Result<(), Box<dyn std::error::Error>> 
 }
 ```
 
-This is the simplest pattern. Because `from_bytes` is O(n) in CPU (no blocking I/O),
-it is safe to call from an async context without `spawn_blocking`.
+This is the simplest pattern. `from_bytes` does no I/O, but it is CPU work linear
+in the input: for large payloads move it to `spawn_blocking` (Pattern B) so it
+does not stall the runtime.
 
 ---
 
@@ -187,9 +187,9 @@ async fn parse_from_async_reader<R: AsyncReadExt + Unpin>(
 
 | Payload size | Source | Recommended pattern |
 |---|---|---|
-| < 1 MB | Any | Pattern A — buffer, then `from_bytes` |
-| 1 MB – 100 MB | File | Pattern B — `spawn_blocking` + `from_reader` |
-| > 100 MB | File | Pattern B or C — streaming with channel |
+| Small | Any | Pattern A — buffer, then `from_bytes` |
+| Large | File | Pattern B — `spawn_blocking` + `from_reader` |
+| Larger than memory | File | Pattern B or C — streaming with channel |
 | Any | `TcpStream` / HTTP | Pattern A (small) or E + B (large) |
 | Any, with typed structs | Reader | Pattern D — typed channel streaming |
 

@@ -285,12 +285,73 @@ impl Read for ChunkedReader<'_> {
     }
 }
 
+/// Segment grouping at 10 k / 20 k / 40 k child groups.
+///
+/// `direct_indices` iterates the root's direct segments of a flat `SG1(LIN)`
+/// message; it must grow linearly with the number of child groups (a 40 k / 20 k
+/// ratio of at most 2.5). `resolve_ordered` resolves the same message against
+/// an ordered schema (`BGM`, `SG1[LIN, QTY]`, `UNS`) with `GroupSchema::resolve`.
+fn bench_grouping(c: &mut Criterion) {
+    use edifact_rs::Segment;
+    use edifact_rs::group::{Entry, GroupDef, GroupSchema, SegmentPlace, group_segments_indexed};
+
+    static FLAT: &[GroupDef] = &[GroupDef::new("SG1", "LIN")];
+
+    fn flat_message(groups: usize) -> Vec<Segment<'static>> {
+        let mut segments = Vec::with_capacity(groups * 2 + 2);
+        segments.push(Segment::new("BGM", vec![edifact_rs::Element::of(&["220"])]));
+        for _ in 0..groups {
+            segments.push(Segment::new("LIN", vec![edifact_rs::Element::of(&["1"])]));
+            segments.push(Segment::new(
+                "QTY",
+                vec![edifact_rs::Element::of(&["21", "5"])],
+            ));
+        }
+        segments.push(Segment::new("UNS", vec![edifact_rs::Element::of(&["S"])]));
+        segments
+    }
+
+    let mut group = c.benchmark_group("grouping");
+    for groups in [10_000_usize, 20_000, 40_000] {
+        let segments = flat_message(groups);
+        let tree = group_segments_indexed(&segments, FLAT, "ROOT");
+        group.bench_with_input(
+            BenchmarkId::new("direct_indices", groups),
+            &tree,
+            |b, tree| b.iter(|| black_box(tree.direct_segment_indices().count())),
+        );
+    }
+    let sg1 = GroupDef::builder("SG1", SegmentPlace::new("LIN"))
+        .segment(SegmentPlace::new("QTY").with_max(1))
+        .build()
+        .expect("valid bench schema");
+    let ordered = GroupSchema::ordered(
+        "ROOT",
+        [
+            Entry::Segment(SegmentPlace::new("BGM")),
+            Entry::Group(sg1),
+            Entry::Segment(SegmentPlace::new("UNS")),
+        ],
+    )
+    .expect("valid bench schema");
+    for groups in [10_000_usize, 20_000, 40_000] {
+        let segments = flat_message(groups);
+        group.bench_with_input(
+            BenchmarkId::new("resolve_ordered", groups),
+            &segments,
+            |b, segments| b.iter(|| black_box(ordered.resolve(segments).unplaced().len())),
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_tokenizer,
     bench_parser,
     bench_reader,
     bench_writer,
-    bench_validation
+    bench_validation,
+    bench_grouping
 );
 criterion_main!(benches);

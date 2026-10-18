@@ -341,7 +341,7 @@ struct OrderMessage {
 ### `repeat` — repeated *data element*
 
 `group` repeats the **segment**. `repeat` repeats the **data element inside one
-segment** (ISO 9735-1 §8.6). Both are `Vec<T>` in Rust, and nothing but the
+segment** (ISO 9735-1 §8.7). Both are `Vec<T>` in Rust, and nothing but the
 attribute can tell them apart:
 
 ```text
@@ -377,10 +377,10 @@ assert_eq!(rff.numbers, ["1", "2", "3"]);
 ```
 
 An occurrence that omits the component yields `""` rather than disappearing:
-§8.7.3 makes an occurrence's position significant, so `DE*DE***DE` deliberately
+§8.8.4 makes an occurrence's position significant, so `DE*DE***DE` deliberately
 transfers two empty ones and dropping them would shift every later value left.
 An empty `Vec` emits the element as absent, which keeps the elements after it in
-position (§8.7.1).
+position (§8.8.2).
 
 Writing needs an active repetition separator — see
 [Writing](@/docs/writing.md#repeating-data-elements). Without one the writer

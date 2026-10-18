@@ -226,9 +226,9 @@ struct ParityMessage {
     parties: Vec<ParityNadMs>,
 }
 
-/// The derive used to override only `matches_segment`, leaving
-/// `matches_owned_segment` matching on tag alone.  The owned path then picked up
-/// `NAD+BY`, handed it to a `qualifier = "MS"` type, and hard-errored.
+/// The derive must apply the qualifier on both `matches_segment` and
+/// `matches_owned_segment`; matching on tag alone, the owned path would hand
+/// `NAD+BY` to a `qualifier = "MS"` type and hard-error.
 #[test]
 fn qualified_group_deserializes_identically_borrowed_and_owned() {
     let raw = b"UNH+1+ORDERS:D:96A:UN'NAD+MS+SUP1'NAD+BY+BUY1'NAD+MS+SUP2'UNT+5+1'";

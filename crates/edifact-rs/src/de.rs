@@ -1,7 +1,7 @@
 //! Typed deserialization: EDIFACT segments to Rust values.
 //!
 //! [`EdifactDeserialize`] maps a slice of parsed [`Segment`]s onto a struct.
-//! Implement it by hand or, far more usually, derive it — see
+//! Implement it by hand or derive it — see
 //! [`EdifactDeserialize`][macro@crate::EdifactDeserialize].
 //!
 //! [`EdifactSegmentTag`] is the companion trait that carries a type's segment
@@ -18,10 +18,21 @@
 //! | [`deserialize_each_from_reader`] | `impl Read` | every matching `T`, lazily |
 //! | [`deserialize_messages`] | `&[u8]` | one `T` per `UNH`/`UNT` message |
 //! | [`deserialize_messages_from_reader`] | `impl Read` | one `T` per message |
+//!
+//! Each streaming entry point has a `_with_config` twin taking a
+//! [`ReaderConfig`] — [`deserialize_each_with_config`],
+//! [`deserialize_each_from_reader_with_config`],
+//! [`deserialize_messages_with_config`],
+//! [`deserialize_messages_from_reader_with_config`], and for the raw windows
+//! [`message_windows_with_config`] and
+//! [`message_windows_from_reader_with_config`]. The functions without it apply
+//! only the default 64 KiB segment-size limit: use the `_with_config` forms,
+//! with at least `max_segments_per_message` and `max_input_bytes`, for input
+//! from an untrusted source. See each function's `# Resource bounds`.
 
-use crate::{EdifactError, Segment};
+use crate::{EdifactError, FromBytesIter, OwnedSegmentStream, ReaderConfig, Segment};
 use std::borrow::Cow;
-use std::io::Read;
+use std::io::{BufReader, Read};
 
 // ── traits ────────────────────────────────────────────────────────────────────
 
@@ -54,8 +65,8 @@ pub trait EdifactCompositeDeserialize: Sized {
     ///
     /// # Errors
     ///
-    /// Implementation-defined; typically
-    /// [`EdifactError::MissingRequiredComponent`].
+    /// Implementation-defined; derived impls return
+    /// [`EdifactError::MissingRequiredComponent`] for an absent required component.
     fn edifact_deserialize_composite(composite: CompositeElement<'_>)
     -> Result<Self, EdifactError>;
 }
@@ -174,13 +185,33 @@ pub fn deserialize_each<'a, T>(
 where
     T: EdifactDeserialize + EdifactSegmentTag + 'a,
 {
-    deserialize_matching(crate::from_bytes(input))
+    deserialize_each_with_config(input, ReaderConfig::default())
+}
+
+/// [`deserialize_each`] with explicit [`ReaderConfig`] limits.
+///
+/// Every limit in `config` is enforced and reported as an `Err` item, after
+/// which the iterator ends.
+pub fn deserialize_each_with_config<'a, T>(
+    input: &'a [u8],
+    config: ReaderConfig,
+) -> impl Iterator<Item = Result<T, EdifactError>> + 'a
+where
+    T: EdifactDeserialize + EdifactSegmentTag + 'a,
+{
+    deserialize_matching(crate::from_bytes_with_config(input, config))
 }
 
 /// Lazily deserialize every segment from a reader that `T` maps to.
 ///
-/// The reader counterpart of [`deserialize_each`], with the same bounded-memory
-/// behaviour.
+/// The reader counterpart of [`deserialize_each`].
+///
+/// # Resource bounds
+///
+/// Only the default `max_segment_bytes` (64 KiB) applies. Memory is one
+/// segment plus an 8 KiB read buffer, but nothing bounds how much input is
+/// read or how long that takes. For untrusted input use
+/// [`deserialize_each_from_reader_with_config`] with `max_input_bytes`.
 pub fn deserialize_each_from_reader<T, R>(
     reader: R,
 ) -> impl Iterator<Item = Result<T, EdifactError>>
@@ -188,7 +219,28 @@ where
     T: EdifactDeserialize + EdifactSegmentTag,
     R: Read,
 {
-    deserialize_matching(crate::from_reader(reader))
+    deserialize_each_from_reader_with_config(reader, ReaderConfig::default())
+}
+
+/// [`deserialize_each_from_reader`] with explicit [`ReaderConfig`] limits.
+///
+/// Every limit in `config` is enforced and reported as an `Err` item, after
+/// which the iterator ends.
+///
+/// # Resource bounds
+///
+/// Every [`ReaderConfig`] limit applies. Memory is one segment of at most
+/// `max_segment_bytes` plus an 8 KiB read buffer, independent of the count
+/// limits; at most `max_input_bytes` plus one buffer is read from `reader`.
+pub fn deserialize_each_from_reader_with_config<T, R>(
+    reader: R,
+    config: ReaderConfig,
+) -> impl Iterator<Item = Result<T, EdifactError>>
+where
+    T: EdifactDeserialize + EdifactSegmentTag,
+    R: Read,
+{
+    deserialize_matching(crate::from_reader_with_config(reader, config))
 }
 
 /// Shared driver behind [`deserialize_each`] and [`deserialize_each_from_reader`].
@@ -308,7 +360,7 @@ pub fn qualifier_matches_pattern(value: &str, pattern: &str) -> bool {
         return value == pattern;
     }
 
-    // Fast path: single wildcard (dominant case — e.g. "M*" or "*:MS").
+    // Fast path: a single wildcard, e.g. "M*" or "*:MS".
     // The length test is what stops the prefix and the suffix from overlapping:
     // `value.len() >= prefix.len() + suffix.len()` is exactly the condition that
     // leaves a (possibly empty) gap between them for `*` to cover.
@@ -364,8 +416,8 @@ pub fn qualifier_matches_pattern(value: &str, pattern: &str) -> bool {
 /// A composite data element, flattened to its component strings.
 ///
 /// Holds borrowed `&'a str` references to the underlying data — no string
-/// copies are made. Up to four component pointers are stored inline, so the
-/// common case is allocation-free.
+/// copies are made. The references are a `SmallVec<[&str; 4]>`: up to four
+/// are stored inline, and a fifth moves them to the heap.
 pub struct CompositeElement<'a> {
     components: smallvec::SmallVec<[&'a str; 4]>,
 }
@@ -449,9 +501,12 @@ impl<'a> MessageWindow<'a> {
     /// [`segments`][Self::segments] deliberately includes the service segments so
     /// that envelope-aware consumers can read them, but they are exactly what a
     /// body-oriented pass does not want. In particular
-    /// [`group_segments_indexed`][crate::group_segments_indexed] is driven by
-    /// trigger tags alone, so a trailing `UNT` lands inside whichever group ran
-    /// last — pass `body()` and it cannot.
+    /// [`group_segments_indexed`][crate::group_segments_indexed] places a tag
+    /// that triggers nothing in whichever open group ran last, so a trailing
+    /// `UNT` lands inside it — pass `body()` and it cannot. An ordered
+    /// [`GroupSchema`][crate::group::GroupSchema] root that does not declare
+    /// `UNT` reports it as unplaced; pass `body()` or declare `UNT` as its last
+    /// entry.
     ///
     /// Missing service segments are tolerated: a window that somehow lacks its
     /// `UNH` or `UNT` yields whatever it does have, rather than panicking.
@@ -505,6 +560,19 @@ impl<'a> MessageWindow<'a> {
 /// and the windows borrow from the input; wrap
 /// [`from_reader`][crate::from_reader] and they own their text. Envelope
 /// segments outside any `UNH..UNT` pair are skipped.
+///
+/// # Resource bounds
+///
+/// A window is buffered until its `UNT` arrives, so the memory held is one
+/// message: at most `max_segments_per_message` segments of at most
+/// `max_segment_bytes` each when the inner iterator enforces a
+/// [`ReaderConfig`] with those limits (plus the inner iterator's own buffer).
+/// **Without `max_segments_per_message` a window is unbounded**: a `UNH` that
+/// never sees its `UNT` is buffered until the input ends — `max_messages`
+/// does not change that. Build windows with
+/// [`message_windows_from_reader_with_config`] or
+/// [`message_windows_with_config`] for untrusted input. An iterator passed to
+/// [`MessageWindows::new`] is bounded only by what it enforces itself.
 ///
 /// # Errors
 ///
@@ -617,18 +685,78 @@ where
 /// assert_eq!(windows[0].message_type.as_deref(), Some("ORDERS"));
 /// # Ok::<(), edifact_rs::EdifactError>(())
 /// ```
-pub fn message_windows(input: &[u8]) -> MessageWindows<'_, crate::FromBytesIter<'_>> {
-    MessageWindows::new(crate::from_bytes(input))
+pub fn message_windows(input: &[u8]) -> MessageWindows<'_, FromBytesIter<'_>> {
+    message_windows_with_config(input, ReaderConfig::default())
+}
+
+/// [`message_windows`] with explicit [`ReaderConfig`] limits.
+///
+/// Every limit in `config` is enforced; a violation is reported as an `Err`
+/// item and ends the iteration — no partial window is yielded.
+pub fn message_windows_with_config(
+    input: &[u8],
+    config: ReaderConfig,
+) -> MessageWindows<'_, FromBytesIter<'_>> {
+    MessageWindows::new(crate::from_bytes_with_config(input, config))
 }
 
 /// Split a reader into one [`OwnedMessageWindow`] per `UNH`/`UNT` pair.
 ///
 /// Reads lazily: only enough input to complete one window is consumed per
-/// [`Iterator::next`] call, so peak memory is one message, not one interchange.
+/// [`Iterator::next`] call, so the memory held is one message (see the bounds
+/// below), not one interchange.
+///
+/// # Resource bounds
+///
+/// Only the default `max_segment_bytes` (64 KiB) applies, so **one message is
+/// unbounded**: a `UNH` without its `UNT` is buffered until the input ends.
+/// Use this for trusted files; for untrusted input use
+/// [`message_windows_from_reader_with_config`] with
+/// `max_segments_per_message` (and `max_input_bytes`).
 pub fn message_windows_from_reader<R: Read>(
     reader: R,
 ) -> MessageWindows<'static, crate::FromReaderIter<R>> {
     MessageWindows::new(crate::from_reader(reader))
+}
+
+/// [`message_windows_from_reader`] with explicit [`ReaderConfig`] limits.
+///
+/// Every limit in `config` is enforced; a violation is reported as an `Err`
+/// item and ends the iteration — no partial window is yielded.
+///
+/// # Resource bounds
+///
+/// Every [`ReaderConfig`] limit applies. Peak memory is one window — at most
+/// `max_segments_per_message` segments of at most `max_segment_bytes` each —
+/// plus an 8 KiB read buffer; at most `max_input_bytes` plus one buffer is
+/// read from `reader`. Without `max_segments_per_message` a window is
+/// unbounded, whatever the other limits are.
+///
+/// # Example
+///
+/// ```
+/// use edifact_rs::{EdifactError, ReaderConfig, message_windows_from_reader_with_config};
+///
+/// // A message that never ends, as a hostile peer would send it.
+/// let mut input = b"UNB+UNOC:3+S+R+260101:0900+IC1'UNH+1+ORDERS:D:96A:UN'".to_vec();
+/// for _ in 0..100 {
+///     input.extend_from_slice(b"FTX+AAA+++NOTE'");
+/// }
+///
+/// let config = ReaderConfig::default().max_segments_per_message(50);
+/// let mut windows = message_windows_from_reader_with_config(&input[..], config);
+/// let err = windows.next().unwrap().unwrap_err();
+/// assert!(matches!(
+///     err,
+///     EdifactError::LimitExceeded { limit: "max_segments_per_message", max: 50, .. }
+/// ));
+/// assert!(windows.next().is_none());
+/// ```
+pub fn message_windows_from_reader_with_config<R: Read>(
+    reader: R,
+    config: ReaderConfig,
+) -> MessageWindows<'static, OwnedSegmentStream<BufReader<R>>> {
+    MessageWindows::new(crate::from_reader_with_config(reader, config))
 }
 
 /// Deserialize one `T` per `UNH`/`UNT` message in `input`.
@@ -661,13 +789,35 @@ pub fn deserialize_messages<'a, T>(
 where
     T: EdifactDeserialize + 'a,
 {
-    message_windows(input).map(|window| T::edifact_deserialize(&window?.segments))
+    deserialize_messages_with_config(input, ReaderConfig::default())
+}
+
+/// [`deserialize_messages`] with explicit [`ReaderConfig`] limits.
+///
+/// Every limit in `config` is enforced and reported as an `Err` item, after
+/// which the iterator ends.
+pub fn deserialize_messages_with_config<'a, T>(
+    input: &'a [u8],
+    config: ReaderConfig,
+) -> impl Iterator<Item = Result<T, EdifactError>> + 'a
+where
+    T: EdifactDeserialize + 'a,
+{
+    message_windows_with_config(input, config)
+        .map(|window| T::edifact_deserialize(&window?.segments))
 }
 
 /// Deserialize one `T` per `UNH`/`UNT` message read from `reader`.
 ///
 /// The highest-level streaming API: one `T` per message, reading only as much
 /// input as each window needs.
+///
+/// # Resource bounds
+///
+/// Only the default `max_segment_bytes` (64 KiB) applies, so **one message is
+/// unbounded**: a `UNH` without its `UNT` is buffered until the input ends.
+/// For untrusted input use [`deserialize_messages_from_reader_with_config`]
+/// with `max_segments_per_message` (and `max_input_bytes`).
 pub fn deserialize_messages_from_reader<T, R>(
     reader: R,
 ) -> impl Iterator<Item = Result<T, EdifactError>>
@@ -676,6 +826,29 @@ where
     R: Read,
 {
     message_windows_from_reader(reader).map(|window| T::edifact_deserialize(&window?.segments))
+}
+
+/// [`deserialize_messages_from_reader`] with explicit [`ReaderConfig`] limits.
+///
+/// Every limit in `config` is enforced and reported as an `Err` item, after
+/// which the iterator ends.
+///
+/// # Resource bounds
+///
+/// Every [`ReaderConfig`] limit applies. Peak memory is one message window —
+/// at most `max_segments_per_message` segments of at most `max_segment_bytes`
+/// each — plus an 8 KiB read buffer and the `T` being built; at most
+/// `max_input_bytes` plus one buffer is read from `reader`.
+pub fn deserialize_messages_from_reader_with_config<T, R>(
+    reader: R,
+    config: ReaderConfig,
+) -> impl Iterator<Item = Result<T, EdifactError>>
+where
+    T: EdifactDeserialize,
+    R: Read,
+{
+    message_windows_from_reader_with_config(reader, config)
+        .map(|window| T::edifact_deserialize(&window?.segments))
 }
 
 #[cfg(test)]

@@ -136,7 +136,6 @@ pub struct InterchangeEnvelope {
     /// Processing priority code (UNB DE 0029, element index 7), if present.
     ///
     /// Indicates the processing priority requested by the sender.
-    /// Rarely used in practice; included here for full ISO 9735-1 Annex C.1.5 (UNB) compliance.
     pub processing_priority: Option<String>,
     /// Acknowledgement request flag (UNB DE 0031, element index 8).
     ///
@@ -343,8 +342,7 @@ pub struct ValidatedInterchange {
     pub interchange: InterchangeEnvelope,
     /// Functional groups, when the interchange uses `UNG`/`UNE` wrappers.
     ///
-    /// Empty when messages appear directly under the interchange (the common
-    /// case for most modern EDIFACT implementations).
+    /// Empty when messages appear directly under the interchange.
     pub functional_groups: Vec<FunctionalGroupEnvelope>,
     /// Flat list of all messages in the interchange.
     ///
@@ -409,14 +407,14 @@ impl ValidatedInterchange {
 
     /// Iterate over all messages of a given type without allocating.
     ///
-    /// Zero-allocation alternative to [`messages_by_type`](Self::messages_by_type).
+    /// The lazy alternative to [`messages_by_type`](Self::messages_by_type)
+    /// (asserted by the `allocation_budget` test
+    /// `messages_by_type_iter_allocates_nothing`).
     ///
     /// The bound `'q: 's` means the `message_type` string reference must outlive the
-    /// borrow of `self`.  In practice this is always satisfied when passing a string
-    /// literal (`&'static str`) or any string whose lifetime is at least as long as
-    /// the `ValidatedInterchange` reference.  For short-lived computed strings, use
-    /// [`messages_by_type`](Self::messages_by_type) which collects eagerly and releases the string reference
-    /// immediately.
+    /// borrow of `self`, which a string literal always does. For a short-lived
+    /// computed string, use [`messages_by_type`](Self::messages_by_type), which
+    /// collects eagerly and releases the string reference immediately.
     #[inline]
     pub fn iter_messages_by_type<'s, 'q: 's>(
         &'s self,
@@ -477,7 +475,10 @@ pub struct MessageIdentifier<'a> {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Extract identifier fields from a `UNH` segment (zero allocation).
+/// Extract identifier fields from a `UNH` segment.
+///
+/// Every field borrows from `unh`; a successful call allocates nothing
+/// (asserted by the `allocation_budget` test `parse_unh_allocates_nothing`).
 pub fn parse_unh<'a>(unh: &'a Segment<'a>) -> Result<MessageIdentifier<'a>, EdifactError> {
     // Element [0]: DE 0062 — message reference number (required, simple DE)
     let message_ref = unh
@@ -516,8 +517,8 @@ pub fn parse_unh<'a>(unh: &'a Segment<'a>) -> Result<MessageIdentifier<'a>, Edif
 /// Parsed identifier fields from a `UNG` segment.
 ///
 /// All string slices borrow from the input bytes so they live as long as the
-/// original byte buffer.  Use this for zero-allocation group routing in streaming
-/// scenarios where you need to inspect group identity without full validation.
+/// original byte buffer.  Use this to route groups in streaming scenarios where
+/// you need to inspect group identity without full validation.
 ///
 /// # UNG element positions (ISO 9735-1 Annex C.1.5, 0-indexed)
 ///
@@ -557,7 +558,10 @@ pub struct GroupIdentifier<'a> {
     pub application_password: &'a str,
 }
 
-/// Extract identifier fields from a `UNG` segment (zero allocation).
+/// Extract identifier fields from a `UNG` segment.
+///
+/// Every field borrows from `ung`; a successful call allocates nothing
+/// (asserted by the `allocation_budget` test `parse_ung_allocates_nothing`).
 ///
 /// The symmetric counterpart to [`parse_unh`] for streaming scenarios that need
 /// to inspect or route functional groups before full validation.
@@ -2075,8 +2079,8 @@ mod tests {
 
     #[test]
     fn a_defined_but_undecodable_repertoire_says_so() {
-        // `UNOX` and `KECA` are real ISO 9735 syntax identifiers that this crate
-        // cannot decode.  "Unsupported" and "unrecognised" are different claims:
+        // `UNOX` (an ISO 9735 repertoire) and `KECA` (a Korean identifier outside
+        // ISO 9735) are known identifiers this crate cannot decode.  "Unsupported" and "unrecognised" are different claims:
         // one is about this crate, the other about the sender.
         for id in ["UNOX", "KECA"] {
             let input = format!(

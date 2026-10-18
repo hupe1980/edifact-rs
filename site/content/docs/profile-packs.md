@@ -358,10 +358,9 @@ group instance its own isolated segment list. This lets you enforce intra-group
 invariants (e.g. every `SG5` must contain at least one `LIN`) without writing manual
 tree-walking code.
 
-> **Note on `GroupDef`**: build a leaf group with `GroupDef::new(name, trigger)`
-> and a nesting one with `GroupDef::with_children(name, trigger, children)`. Both
-> are `const`, so a schema can be a `static`; both borrow, so a schema read from a
-> MIG at startup works too. The fields stay public for exhaustive construction.
+> **`GroupDef`**: `const` over `'static` data, or `GroupDef::builder` for
+> run-time and ordered groups — see
+> [Validation › Open and ordered groups](@/docs/validation.md#open-and-ordered-groups).
 
 ### Convenience builders
 
@@ -424,6 +423,53 @@ let pack = ProfileRulePack::new("ORDERS-GROUPS")
 Group rules are run via `validate_grouped` on
 `ValidationContext`. See [Validation](@/docs/validation.md) for how to supply a `GroupDef`
 schema and run the group pass.
+
+Every issue a group rule emits is stamped with the `segment_group` and the
+`group_path` of the instance being evaluated — `SG4[0]/SG8[1]`, zero-based and
+counted per group name among siblings — unless the rule set them itself. A rule
+at the tree root gets no path.
+
+---
+
+## What the pack stamps on its issues
+
+A pack stamps its name on every issue it emits without a `pack` set, and a
+`ValidationContext` stamps the registration layer (`Profile` for packs) on every
+issue without a `layer`. The helper rules set their own `kind`:
+
+| Helper | Kind |
+|---|---|
+| `require_segment`, `require_segment_in_group` | `FindingKind::Missing` |
+| `forbid_segment`, `forbid_segment_in_group` | `FindingKind::NotPermitted` |
+| `require_qualifier`, `require_qualifier_in_group` | `FindingKind::Code` |
+
+`forbid_segment*` and `require_qualifier*` also set `segment_occurrence` and, when
+the slice they see starts at `UNH`, `segment_position` (`UNH` = 1). So a consumer
+running a guide pack and an application pack side by side tells their findings
+apart by `pack()`, and missing from not-permitted by `kind()`:
+
+```rust
+use edifact_rs::{FindingKind, ProfileRulePack, ValidationContext, from_bytes};
+
+let segs: Vec<_> = from_bytes(b"UNH+1+ORDERS:D:96A:UN'BGM+220'UNT+3+1'")
+    .collect::<Result<_, _>>()?;
+let report = ValidationContext::builder()
+    .with_profile_pack(ProfileRulePack::new("MIG-ORDERS").require_segment("DTM", "MIG-DTM-M"))
+    .with_profile_pack(ProfileRulePack::new("AHB-ORDERS").forbid_segment("BGM", "AHB-BGM-X"))
+    .build()
+    .validate(&segs);
+
+let mig: Vec<_> = report.iter_issues().filter(|i| i.pack() == Some("MIG-ORDERS")).collect();
+assert_eq!(mig[0].kind(), Some(FindingKind::Missing));
+let ahb: Vec<_> = report.iter_issues().filter(|i| i.pack() == Some("AHB-ORDERS")).collect();
+assert_eq!(ahb[0].kind(), Some(FindingKind::NotPermitted));
+assert_eq!(ahb[0].segment_position(), Some(2));
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+The name is that of the pack that *runs* the rule: rules taken over with
+`extend_from` or `merge_with_override` carry the combined pack's name. Register
+packs separately when their findings must stay apart.
 
 ---
 

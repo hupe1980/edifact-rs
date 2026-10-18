@@ -268,3 +268,71 @@ fn incompatible_release_scopes_return_err_not_panic() {
         "expected IncompatibleReleaseScopes, got: {err:?}"
     );
 }
+
+// ── 019: layer, kind and pack stamping ────────────────────────────────────────
+
+#[test]
+fn pack_name_is_stamped() {
+    use edifact_rs::{
+        FindingKind, Segment, ValidationLayer, ValidationReport, ValidationRuleContext, Validator,
+    };
+
+    let segments = parse_segments(b"UNH+1+UTILMD:D:11A:UN'BGM+E01'UNT+3+1'");
+
+    // A closure-only pack that sets no layer, kind or pack.
+    let pack = ProfileRulePack::new("AHB-UTILMD").with_rule_fn(|_segments, issues| {
+        issues.push(ValidationIssue::new(ValidationSeverity::Error, "plain"));
+    });
+    let report = ValidationContext::builder()
+        .with_profile_pack(pack)
+        .build()
+        .validate(&segments);
+    let issue = &report.errors()[0];
+    assert_eq!(issue.layer(), Some(ValidationLayer::Profile));
+    assert_eq!(issue.kind(), None);
+    assert_eq!(issue.pack(), Some("AHB-UTILMD"));
+
+    // A pack set by the rule is kept.
+    let pack = ProfileRulePack::new("OUTER").with_rule_fn(|_segments, issues| {
+        issues.push(ValidationIssue::new(ValidationSeverity::Error, "x").with_pack("INNER"));
+    });
+    let report = ValidationContext::builder()
+        .with_profile_pack(pack)
+        .build()
+        .validate(&segments);
+    assert_eq!(report.errors()[0].pack(), Some("INNER"));
+
+    // An explicit layer wins over the registration layer.
+    struct CodeListUnderStructure;
+    impl Validator for CodeListUnderStructure {
+        fn validate_batch(
+            &self,
+            _segments: &[Segment<'_>],
+            report: &mut ValidationReport,
+            _context: &ValidationRuleContext<'_>,
+        ) {
+            report.add_error(
+                ValidationIssue::new(ValidationSeverity::Error, "explicit")
+                    .with_layer(ValidationLayer::CodeList)
+                    .with_kind(FindingKind::Code),
+            );
+            report.add_error(ValidationIssue::new(ValidationSeverity::Error, "implicit"));
+        }
+    }
+    let report = ValidationContext::builder()
+        .with_validator(ValidationLayer::Structure, CodeListUnderStructure)
+        .build()
+        .validate(&segments);
+    assert_eq!(report.errors()[0].layer(), Some(ValidationLayer::CodeList));
+    assert_eq!(report.errors()[1].layer(), Some(ValidationLayer::Structure));
+
+    // Outside a context only what the rule and pack set is there.
+    let mut report = ValidationReport::default();
+    ProfileRulePack::new("BARE")
+        .require_segment("FTX", "BARE-FTX-M")
+        .validate_batch(&segments, &mut report, &ValidationRuleContext::empty());
+    let issue = &report.errors()[0];
+    assert_eq!(issue.layer(), None);
+    assert_eq!(issue.kind(), Some(FindingKind::Missing));
+    assert_eq!(issue.pack(), Some("BARE"));
+}

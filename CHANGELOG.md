@@ -7,7 +7,228 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.17.0]
+## [Unreleased]
+
+## [0.18.0] — 2026-10-18
+
+Validation issues gain structured classification (layer, kind, pack, positions);
+recovering scan; configurable `CONTRL`; MIG-shaped group resolution; streaming
+conveniences bounded by `ReaderConfig`. Breaking changes carry a **Migration**
+note.
+
+### Added
+
+- **`FindingKind`** (`Missing`, `NotPermitted`, `Code`, `Representation`,
+  `Count`, `Placement`, `ControlMismatch`, `Duplicate`, `Envelope`, `Charset`,
+  `Syntax`, `Limit`, `Unsupported`, `Other`), with `as_str()` and
+  `FindingKind::for_error`, a total mapping from `EdifactError`.
+- **`GroupPath` / `GroupStep`**: the occurrence path to a finding's group
+  instance, displayed `SG4[0]/SG8[1]`, serialised as
+  `[{"group": "SG4", "occurrence": 0}, …]`.
+- **`ValidationIssue` fields** `segment_position: Option<u32>` (one-based, `UNH`
+  = 1 — CONTRL DE 0096), `group_path`, `layer`, `kind` and `pack`, with
+  `with_*` builders and getters.
+- **Built-in validators set layer and kind** (see the Validation guide).
+  Converted errors use `FindingKind::for_error`; segment walkers set
+  `segment_position` when the slice starts at `UNH`. CONTRL output is unchanged.
+- **`ValidationContext` stamps the registration layer** on issues without one;
+  **`ProfileRulePack` stamps its name** into `pack`; the group pass stamps
+  `group_path`.
+- **`ValidationLayer::Syntax` and `ValidationLayer::Charset`**, `as_str()`,
+  `Display`, `Hash`, serde support. Still switched by the envelope switch.
+- **`miette::Diagnostic` for `ValidationIssue`** (feature `diagnostics`) and
+  `ValidationReport::related()`.
+- **Recovering scan** (`recover`, `scan_recovering`, `RecoveredInterchange`,
+  `RecoveryConfig`): runs the strict parser, yields every accepted segment
+  unchanged and a `Fault` per refused one, resumes after the next unreleased
+  terminator. All `ReaderConfig` limits apply plus `RecoveryConfig::max_faults`
+  (default 1 000). Derives `UNB` address, message/group windows and message
+  identity. Slice input only.
+- **`contrl::ContrlLocation`**: reporting level, group/message index and DE
+  0096/0135/0013/0098/0104/0085; span-less errors are placed by tag with a
+  message hint and marked inexact. Produced by `RecoveredInterchange::locate`
+  and `fault_locations()`.
+- With feature `serde`: `ContrlLocation`, `InterchangeAddress`,
+  `MessageIdentity`, `ReportingLevel` and `SyntaxError` serialise.
+- **Configurable `CONTRL`**:
+  - `ContrlIdentifier` — the `CONTRL`'s own S009 (`syntax_4()`, `syntax_3()`,
+    `for_syntax_version`, `new`, `with_association`), validated against
+    `service::S009`.
+  - `ActionPolicy` — which DE 0083 codes `UCI`/`UCF`/`UCM` may carry.
+  - `RejectionScope::{PerLevel, Interchange}` — per-level (ISO 9735-4) or
+    whole-interchange rejection.
+  - `ContrlOptions` and `Contrl::{receipt_with, acknowledgement_with,
+    from_report_with}` → `Result<Contrl, EdifactError>`; the option-less
+    constructors are unchanged.
+  - `Contrl::from_recovered` — the `CONTRL` for an interchange that does not
+    parse.
+  - `Contrl::with_identifier`, `Contrl::identifier`.
+  - `EdifactError::ActionNotPermitted` (**E066**) and
+    `InvalidContrlIdentifier` (**E067**).
+- **MIG-shaped segment groups** (`group`): a group is **open** (trigger and
+  child groups — resolution unchanged) or **ordered**
+  (`GroupDef::builder(name, SegmentPlace)`), walked in guide order.
+  - `SegmentPlace` with `Discriminator`s (`one_of`, `not_used`) to tell two
+    places of one tag apart by code.
+  - `GroupDefBuilder`, `Entry`; `GroupSchema::{new, ordered}`, validated once;
+    `GroupSchema::resolve` → `GroupResolution` (`tree`, `placement`,
+    `unplaced`, `group_path`, `findings`).
+  - `PlacementValidator` for `ValidationContext`.
+  - `SegmentGroupIndexed::def` and `SegmentGroupIndexed::unplaced`.
+  - E068 `SegmentNotPlaced`, E069/E070 too many segment/group occurrences,
+    E071 `InvalidGroupSchema`; CONTRL codes 15/35/36. A place below its `min` is
+    `E015 MissingSegment`.
+- **Bounded streaming conveniences**: `message_windows_with_config`,
+  `message_windows_from_reader_with_config`, `deserialize_messages_with_config`,
+  `deserialize_messages_from_reader_with_config`, `deserialize_each_with_config`
+  and `deserialize_each_from_reader_with_config` enforce every `ReaderConfig`
+  limit; a violation is an `Err` item that ends the iterator.
+- **`ReaderConfig::max_segments_per_message`**: caps one `UNH`…`UNT` message
+  (`E036`); envelope segments do not count and a `UNH` restarts the count. It
+  bounds a `MessageWindows` buffer without stopping a long-lived stream.
+- **`# Resource bounds` rustdoc sections** on every reader entry point, stating
+  limits, defaults and the memory bound; the bounds are asserted by the
+  `resource_limits` tests.
+- **Benchmark group `grouping`** (`direct_indices`, `resolve_ordered`) with a
+  committed baseline.
+- **Performance guide evidence table**: every allocation and memory figure names
+  the test that asserts it; `docs_claims` keeps the figures in step with the
+  committed constants.
+
+### Changed — breaking
+
+#### `ValidationIssue`
+
+- `element_index` / `component_index`: `Option<u8>` → `Option<u16>`;
+  `segment_occurrence`: `Option<u16>` → `Option<u32>`.
+- `with_element_index`, `with_component_index` and `with_segment_occurrence`
+  take `usize`; a value that does not fit leaves the field `None` (was clamped
+  to `u8::MAX`/`u16::MAX`).
+- `render_deterministic` prints `[occurrence=…]`, `[position=…]`,
+  `[path=…/TAG]`, `[layer=…]`, `[kind=…]`, `[pack=…]` and sorts on them after
+  the existing keys.
+- `ProfileRulePack` helper issues carry `kind`, and `forbid_segment*` /
+  `require_qualifier*` issues `segment_position`; `==` comparisons see them.
+
+**Migration**:
+- `with_element_index(i as u8)` → `with_element_index(i)`; drop
+  `try_from(..).unwrap_or(MAX)` casts.
+- A message segment index passed as `segment_occurrence` →
+  `with_segment_position(index + 1)`.
+- `Option<u8>` → `Option<u16>`, `Option<u16>` → `Option<u32>` in bindings.
+- `match` on `ValidationLayer`: arms for `Syntax` and `Charset` (or the
+  wildcard).
+- Update `render_deterministic` snapshots. Serialised reports stay readable.
+
+#### `CONTRL` wire output
+
+A wire-behaviour change in every constructor; no code change is needed.
+
+- The `UNH` S009 follows the subject's syntax version: `CONTRL:D:3:UN` for
+  syntax 1–3, `CONTRL:4:1:UN` otherwise.
+- `UCM` copies the subject's S009 in full: `UCM+1+UTILMD:D:11A:UN+4+29'` →
+  `UCM+1+UTILMD:D:11A:UN:S2.1+4+29+UNT'`.
+- A service-segment fault names the segment (DE 0135 / DE 0013), then S011:
+  `UCI+…+4+28'` → `UCI+…+4+28+UNZ'`, `UCM+…+4+26'` → `UCM+…+4+26+UNH'`,
+  `UCI+…+4+46'` → `UCI+…+4+46+UNB+2:1'`.
+
+**Migration**: update stored `CONTRL` snapshots. To keep `CONTRL:4:1:UN` for
+syntax 1–3 subjects: `ContrlOptions::new().identifier(ContrlIdentifier::syntax_4())`
+or `.with_identifier(..)`. The other two changes have no opt-out.
+
+#### `GroupDef`
+
+- `GroupDef<'a>` → `GroupDef` (owned, no lifetime); fields private; not `Copy`
+  (`Clone` is cheap). `GroupDef::new` / `with_children` stay `const fn` over
+  `&'static` data. `SegmentGroupIndexed` is `#[non_exhaustive]`.
+
+**Migration**:
+- `GroupDef<'static>` → `GroupDef`.
+- `GroupDef { name, trigger, children }` → `GroupDef::new(name, trigger)` /
+  `GroupDef::with_children(name, trigger, CHILDREN)`; an inline child slice in a
+  `static` → its own `static` (`E0493`).
+- Field reads → `name()`, `trigger_tag()`, `children()`; `*def` → `def.clone()`.
+- Run-time schemas →
+  `GroupDef::builder(name, SegmentPlace::owned(trigger)).group(child).build()?`.
+- Open schemas resolve as before; declare SG8's members (ordered group) for the
+  guide's tree.
+
+#### `ReaderConfig` and `E036`
+
+- `ReaderConfig` is `#[non_exhaustive]` with the new field
+  `max_segments_per_message`.
+  **Migration**: `ReaderConfig { max_segments: Some(10), ..Default::default() }`
+  → `ReaderConfig::default().max_segments(10)`.
+- `EdifactError::LimitExceeded` (E036) carries `offset: usize` and is
+  `#[non_exhaustive]`; its message ends `at byte offset {offset}`.
+  **Migration**: `LimitExceeded { limit, max }` → `LimitExceeded { limit, max, .. }`.
+- `max_input_bytes` counts every consumed byte on both paths (BOM, `UNA`,
+  whitespace, stray terminators); a unit ending past the budget is `E036` at
+  `offset = max_input_bytes`. Endless whitespace from a reader now stops.
+  **Migration**: size the budget to the whole input, not its last segment.
+
+### Changed
+
+- `E031 UnrecognisedSyntaxIdentifier` text: Display `…: expected UNOA-UNOK,
+  UNOX, UNOY, or KECA` → `…: expected UNOA-UNOK or UNOY`; the help names the
+  repertoires this crate recognises instead of claiming an ISO list. Code and
+  variant unchanged.
+- The derive's index-limit diagnostic reads "exceeds the code-generation limit
+  of 256" (no "at most 99" claim).
+
+### Fixed
+
+- **`SegmentGroupIndexed::direct_segment_indices` is linear**: 40 000 child
+  groups 783 ms → 62 µs (`grouping` baseline).
+- `QualifierMismatch` issues no longer set `element_index = Some(0)` (would
+  become a wrong S011).
+- **`Contrl::from_report` never emits a DE 0085 code at a level ISO 9735-4
+  Annex A forbids:**
+  - an empty message (`E043`) is `UCM+…+4+13'`, not `+32'`;
+  - an invalid tag or stray data token (`E006`, `E028`) in a message is
+    `UCD+12+1'`, not `33` on the `UCM`;
+  - a code no lower level may carry climbs message → group → interchange;
+  - a finding in `UNH`/`UNT` is reported on the `UCM`, not as a `UCS`.
+
+  **Migration**: update `CONTRL` snapshots with `+32'` or `33` on a `UCM`, or a
+  `UCS` for `UNH`/`UNT`.
+- `to_interchange_bytes` keeps the S002/S003 code qualifiers (DE 0007), swapped.
+- A release-escaped value costs exactly one allocation: the unescape buffer is
+  sized to the raw value instead of 75 % of it.
+- **Parsed elements carry no unused repetition buffer.** `repeats` (was an
+  empty capacity-4 vector) is unallocated unless the element repeats; `elements`
+  is allocated once at exact length. 1 MB fixture (964 250 B):
+
+  | | before | after |
+  |---|---|---|
+  | `from_bytes(..).collect()` peak heap | 109 716 992 B (113.8 ×) | 25 217 536 B (26.2 ×) |
+  | `from_reader(..).collect()` live heap | 110 465 179 B (114.6 ×) | 25 964 059 B (26.9 ×) |
+  | allocations per segment, `from_bytes` | 3.27 | 1.00 |
+  | allocations per segment, `from_reader` | 7.74 | 5.47 |
+  | streaming peak, `from_bytes` | 5 024 B | 2 704 B |
+  | streaming peak, `from_reader` (8 KiB `BufReader` included) | 13 331 B | 9 347 B |
+
+  Enforced by the `allocation_budget` test.
+- The reader's byte-at-a-time path ends a unit at a stray segment terminator,
+  so bytes counted against `max_input_bytes` match the other paths; a segment
+  starting with the release character escapes the next byte there too.
+
+### Documentation
+
+- Allocation and memory statements in README, guides and rustdoc quote the
+  tested budget and bounds; unmeasured figures (1 MB parse time, "~3–4×",
+  "O(1)" for message windows) are removed.
+- The bench policy describes the PR comparison as informational.
+- README licence paragraph distinguishes use, unmodified redistribution and
+  modification.
+- ISO 9735-1 clause numbers in README and guides follow the 2002 edition.
+
+### CI
+
+- `concepts-check` job: published files may not cite paths absent from a fresh
+  checkout.
+
+## [0.17.0] — 2026-08-29
 
 A deliberate hard cut. The crate had grown a *borrowed* and an *owned* copy of
 nearly every API, and a second and third way to do several other things. Nothing
@@ -21,8 +242,8 @@ here changes what is accepted on the wire except where listed under **Fixed**.
   `&[OwnedSegment]` is accepted wherever `&[Segment<'_>]` is, so every API takes
   one shape. Use `Segment::into_owned()` to detach from the input buffer, and
   `segment.tag()` where a `&str` is needed (`segment.tag == "BGM"` still works).
-  - Removed: `BorrowedSegment`, `BorrowedElement`, `as_borrowed`, `borrow`,
-    `offset_in_place`.
+  - Removed: `BorrowedSegment`, `BorrowedElement`, `as_borrowed`, `borrow`.
+  - `offset_in_place` moved from `OwnedElement` to `Element`; it was not removed.
   - Removed as redundant: `validate_envelope_from_owned`,
     `validate_envelope_owned`, `validate_envelope_lenient_from_owned`,
     `validate_envelope_lenient_owned`, `segments_to_bytes_owned`,
@@ -1061,27 +1282,6 @@ Addresses feedback from downstream profile crates built on this library.
 - **`ProfileRulePack::group_scope` uses `Arc<str>`** — eliminates `'static`
   lifetime requirement for scoped group rules.
 
-### Fixed
-
-- **`escape_value` in `writer.rs`** no longer uses `unsafe { from_utf8_unchecked }`.
-  Uses `from_utf8(...).expect(...)` with a comment explaining why the expect is
-  unreachable.
-
-- **`resolve_release_owned` capacity heuristic** — allocates 75 % of input
-  length instead of 100 %, reducing wasted capacity for release-char-heavy values.
-
-- **`edifact_rs::helpers` paths removed from derive macro** — generated code
-  now references `::edifact_rs::find_segment` etc. directly.
-
-- **`IncompatibleReleaseScopes` variant** — removed spurious
-  `#[non_exhaustive]` attribute from a single variant (it only belongs on the
-  enum itself).
-
-- **`ValidationIssue::new` uses `HashMap::default()`** — avoids allocating an
-  unnecessary random state for empty context maps.
-
-### Added (0.10.0 continued)
-
 - **`#![deny(unsafe_code)]`** enforced on both `edifact-rs` and
   `edifact-rs-derive` crate roots. Future `unsafe` introductions are compile
   errors, not silent regressions.
@@ -1103,6 +1303,25 @@ Addresses feedback from downstream profile crates built on this library.
 - **`forbid_segment` and `forbid_segment_in_group` emit byte offsets.** Issues
   produced by these pack rules now carry `offset = segment.span.start`, matching
   the diagnostic precision of `DirectoryValidator`.
+
+### Fixed
+
+- **`escape_value` in `writer.rs`** no longer uses `unsafe { from_utf8_unchecked }`.
+  Uses `from_utf8(...).expect(...)` with a comment explaining why the expect is
+  unreachable.
+
+- **`resolve_release_owned` capacity heuristic** — allocates 75 % of input
+  length instead of 100 %, reducing wasted capacity for release-char-heavy values.
+
+- **`edifact_rs::helpers` paths removed from derive macro** — generated code
+  now references `::edifact_rs::find_segment` etc. directly.
+
+- **`IncompatibleReleaseScopes` variant** — removed spurious
+  `#[non_exhaustive]` attribute from a single variant (it only belongs on the
+  enum itself).
+
+- **`ValidationIssue::new` uses `HashMap::default()`** — avoids allocating an
+  unnecessary random state for empty context maps.
 
 ### Removed
 
@@ -1234,7 +1453,7 @@ Addresses feedback from downstream profile crates built on this library.
 - **Absolute byte tracking for `FromBytesIter`** (`F-002`): `bytes_consumed` now
   includes the 9-byte UNA header and segment terminators.
 
-### Validator module split (`F-033`)
+### Validator module split
 
 `validator.rs` (~1 400 lines) split into three focused sub-modules:
 
@@ -1554,16 +1773,20 @@ migration path is provided; users must update call sites.
 
 ---
 
-## [0.6.0] — 2024-xx-xx
+## [0.6.0] — 2026-06-02
 
 Initial public release.  See commit history for full details.
 
 ---
 
+[Unreleased]: https://github.com/hupe1980/edifact-rs/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/hupe1980/edifact-rs/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/hupe1980/edifact-rs/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/hupe1980/edifact-rs/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/hupe1980/edifact-rs/compare/v0.14.0...v0.15.0
-[0.14.0]: https://github.com/hupe1980/edifact-rs/compare/v0.10.0...v0.14.0
+[0.14.0]: https://github.com/hupe1980/edifact-rs/compare/v0.13.0...v0.14.0
+[0.13.0]: https://github.com/hupe1980/edifact-rs/compare/v0.12.0...v0.13.0
+[0.12.0]: https://github.com/hupe1980/edifact-rs/compare/v0.11.0...v0.12.0
 [0.10.0]: https://github.com/hupe1980/edifact-rs/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/hupe1980/edifact-rs/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/hupe1980/edifact-rs/compare/v0.8.0...v0.9.0

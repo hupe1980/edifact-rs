@@ -46,7 +46,9 @@ fn main() -> Result<(), EdifactError> {
     let receipt = Contrl::receipt(&validated.interchange).with_message_reference("RCPT1");
     println!("receipt:         {}", receipt.to_edifact_string()?);
 
-    // The acknowledgement, sent after the syntax check — action code 7.
+    // The acknowledgement, sent after the syntax check — action code 7. Its own
+    // UNH says `CONTRL:D:3:UN`, because the subject is syntax version 3; a
+    // syntax 4 subject is answered with `CONTRL:4:1:UN`.
     let ack = Contrl::acknowledgement(&validated).with_message_reference("ACK1");
     println!("acknowledgement: {}", ack.to_edifact_string()?);
 
@@ -95,7 +97,8 @@ fn main() -> Result<(), EdifactError> {
     //
     // Each finding then sits at the lowest reporting level that can both locate
     // it and legally carry its code:
-    //   UCM+…+4+29 — the message is rejected; code 29 may not go any lower
+    //   UCM+…+4+29+UNT — the message is rejected; code 29 may not go any
+    //                    lower, and UNT names the service segment at fault
     //   UCS+n      — the n-th segment of the message, UNH being 1
     //   UCD+code+p — data element p of that segment, the tag being position 1
     Ok(())

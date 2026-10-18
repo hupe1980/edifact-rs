@@ -254,9 +254,9 @@ fn from_owned_definitions_accepts_valid_definitions() {
 #[test]
 fn every_violation_in_a_segment_is_reported_not_just_the_first() {
     // `NAD` declares two mandatory elements; supplying neither is two distinct
-    // faults. The validator used to return on the first `Err`, so a report whose
-    // whole purpose is to be exhaustive showed one issue per segment and the
-    // caller fixed the message one round-trip at a time.
+    // faults. Both must be reported: the report exists to be exhaustive, so
+    // stopping at the first `Err` would make the caller fix the message one
+    // round-trip at a time.
     let segments: Vec<_> = from_bytes(b"NAD++'")
         .collect::<Result<Vec<_>, _>>()
         .expect("parse");
@@ -339,8 +339,8 @@ mod representation {
 
     #[test]
     fn a_non_numeric_control_count_is_rejected() {
-        // UNZ DE 0036 is `n..6`.  Nothing previously checked this: the segment
-        // has the right arity, so structure validation passed it through.
+        // UNZ DE 0036 is `n..6`.  The segment has the right arity, so only the
+        // element's format check can catch a non-numeric count.
         let report = service_report(b"UNZ+abc+IC1'");
         assert!(codes(&report).contains(&"E048"), "{report:#?}");
     }

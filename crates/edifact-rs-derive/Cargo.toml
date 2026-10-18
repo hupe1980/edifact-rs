@@ -8,9 +8,9 @@ license.workspace = true
 description = "Derive macros for EdifactSerialize / EdifactDeserialize (from edifact-rs)"
 readme = "../../README.md"
 repository = "https://github.com/hupe1980/edifact-rs"
-homepage = "https://github.com/hupe1980/edifact-rs"
+homepage = "https://hupe1980.github.io/edifact-rs/"
 documentation = "https://docs.rs/edifact-rs-derive"
-keywords = ["edifact", "edi", "derive", "proc-macro", "serde"]
+keywords = ["edifact", "edi", "derive", "proc-macro", "unedifact"]
 categories = ["encoding", "development-tools::procedural-macro-helpers"]
 
 [lib]

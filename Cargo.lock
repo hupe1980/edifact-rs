@@ -337,7 +337,7 @@ dependencies = [
 
 [[package]]
 name = "edifact-rs"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "bolero",
  "criterion",
@@ -355,7 +355,7 @@ dependencies = [
 
 [[package]]
 name = "edifact-rs-derive"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "proc-macro2",
  "quote",

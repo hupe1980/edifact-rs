@@ -41,28 +41,16 @@
 //!
 //! # `#[edifact(group)]` and `Vec<T>` fields
 //!
-//! The `#[edifact(group)]` attribute marks a `Vec<T>` field as a contiguous group of
-//! repeated segments.  Without the attribute, `Vec<T>` on a segment struct collects
-//! all matching segments from the window into the `Vec`.
-//!
-//! `#[edifact(group)]` is a documentation and validation marker: it makes the
-//! repeating-group intent explicit and enforces two compile-time constraints:
-//!
-//! 1. The annotated field **must** be of type `Vec<T>` — any other type is rejected
-//!    with a clear error message.
-//! 2. `#[edifact(group)]` cannot be combined with `#[edifact(element = ...)]` or
-//!    `#[edifact(component = ...)]` — positional placement and group semantics are
-//!    mutually exclusive.
-//!
-//! At runtime it generates the same code as a bare `Vec<T>`: every segment matching
-//! `T`'s tag and qualifier is collected, in document order, without a contiguity
-//! requirement.  When you need contiguity enforced, use
-//! [`contiguous_groups_by_qualifier`] directly on the parsed segments.
+//! `#[edifact(group)]` marks a `Vec<T>` field as repeated segments. It generates
+//! the same code as a bare `Vec<T>` — every segment matching `T`'s tag and
+//! qualifier is collected in document order, without a contiguity requirement —
+//! and adds two compile-time checks: the field must be a `Vec<T>`, and it cannot
+//! be combined with `element` or `component`.
 //!
 //! # `#[edifact(repeat)]` — a repeating *data element*
 //!
 //! `group` repeats the **segment**; `repeat` repeats the **data element inside
-//! one segment** (ISO 9735-1 §8.6). Both are `Vec<T>` in Rust and nothing but
+//! one segment** (ISO 9735-1 §8.7). Both are `Vec<T>` in Rust and nothing but
 //! the attribute can tell them apart:
 //!
 //! ```text
@@ -95,8 +83,6 @@
 //! Writing a repetition needs an active repetition separator; without one the
 //! writer returns `RepetitionSeparatorNotDeclared` (`E037`) rather than emitting
 //! output that reads back as a single occurrence.
-//!
-//! [`contiguous_groups_by_qualifier`]: https://docs.rs/edifact-rs/latest/edifact_rs/fn.contiguous_groups_by_qualifier.html
 //!
 //! # `#[edifact(required)]` on `Option<T>` fields
 //!
@@ -272,7 +258,7 @@ struct FieldAttrs {
     required: bool,
     required_span: Option<proc_macro2::Span>,
     /// `#[edifact(repeat)]` — `Vec<T>`: the *data element* repeats within one
-    /// segment (ISO 9735-1 §8.6), rather than the segment repeating.
+    /// segment (ISO 9735-1 §8.7), rather than the segment repeating.
     ///
     /// Distinct from `group`, which is about repeated segments. `RFF+ON:1*ON:2`
     /// is one `RFF` whose element 0 occurs twice; `RFF+ON:1'RFF+ON:2'` is two
@@ -287,10 +273,8 @@ struct FieldAttrs {
 /// Largest accepted `element` / `component` index.
 ///
 /// Serialization emits one statement per slot up to the highest declared index,
-/// so an unbounded value makes rustc generate an arbitrary amount of code — a
-/// typo'd `element = 200000` was enough to exhaust memory and kill the compiler.
-/// UN/EDIFACT caps segments at 99 data elements and composites at 99 components,
-/// so 256 is generous.
+/// so an unbounded value (a typo such as `element = 200000`) would make rustc
+/// generate an arbitrary amount of code.
 const MAX_POSITION_INDEX: u32 = 256;
 
 fn check_index_bound(lit: &syn::LitInt, value: u32, key: &str) -> syn::Result<()> {
@@ -298,8 +282,7 @@ fn check_index_bound(lit: &syn::LitInt, value: u32, key: &str) -> syn::Result<()
         return Err(syn::Error::new(
             lit.span(),
             format!(
-                "`{key}` index {value} exceeds the maximum of {MAX_POSITION_INDEX}; \
-                 UN/EDIFACT allows at most 99 elements per segment and 99 components per composite"
+                "`{key}` index {value} exceeds the code-generation limit of {MAX_POSITION_INDEX}"
             ),
         ));
     }
@@ -1638,7 +1621,7 @@ fn occurrence_value(ident: &syn::Ident, ty: &Type, repeat: bool) -> TokenStream2
     }
 }
 
-/// Emit a data element that repeats (ISO 9735-1 §8.6).
+/// Emit a data element that repeats (ISO 9735-1 §8.7).
 ///
 /// The repetition separator divides whole **occurrences**, not components, so
 /// every component of the element is re-emitted for each one — `RFF+ON:1*ON:2`
@@ -2166,7 +2149,7 @@ mod tests {
     /// The blessed `.stderr` files hold only this crate's own diagnostics, so
     /// they are stable across toolchains and CI runs the suite on both MSRV and
     /// stable.  Keep it that way: an expectation that captures a *rustc*
-    /// warning or note will drift on the next release and drown real
+    /// warning or note drifts between rustc releases and drowns real
     /// regressions in noise.  If a UI case triggers an incidental lint, silence
     /// it at the source (see `tests/ui/support.rs`) rather than blessing it.
     ///

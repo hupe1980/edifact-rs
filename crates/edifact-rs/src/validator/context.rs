@@ -13,19 +13,26 @@ pub(super) struct LayeredValidator {
     pub(super) validator: Box<dyn Validator + Send + Sync>,
 }
 
-/// Runs the four validation layers over one segment slice, collecting every
+/// Runs the validation layers over one segment slice, collecting every
 /// issue into a single [`ValidationReport`].
 ///
 /// | Layer | [`ValidationLayer`] | Default | Checks | Provided by |
 /// |---|---|---|---|---|
 /// | Envelope | `Envelope` | off | `UNB`/`UNH`/`UNT`/`UNZ` structure and counts | [`EnvelopeValidator`] |
+/// | Syntax | `Syntax` | off (envelope switch) | directory-independent ISO 9735-1 rules | [`SyntaxValidator`][crate::SyntaxValidator] |
+/// | Charset | `Charset` | off (envelope switch) | declared character repertoire | [`CharsetValidator`] |
 /// | Structure | `Structure` | on | segment presence, order, arity | `DirectoryValidator` |
 /// | Code-list | `CodeList` | on | DE values against the directory's code lists | `DirectoryValidator` |
 /// | Profile | `Profile` | on | partner and industry business rules | [`ProfileRulePack`] |
 ///
 /// Validators run in registration order within a layer; layers have no ordering
 /// beyond that. With the envelope layer on, `UNB`/`UNZ`/`UNG`/`UNE` are excluded
-/// from the slice later layers see.
+/// from the slice the structure, code-list and profile layers see; envelope,
+/// syntax and charset validators always see the whole slice.
+///
+/// Every issue a validator leaves without a [`layer`][crate::ValidationIssue::layer]
+/// is stamped with the layer that validator was registered under, in the flat
+/// and the group pass. An explicit layer is kept.
 ///
 /// A pack can be scoped by message type (`for_message_type`) and
 /// association-assigned code (`for_release`).
@@ -189,13 +196,14 @@ impl ValidationContextBuilder {
     /// Check every value against the repertoire the interchange declares, and
     /// enable the envelope layer.
     ///
-    /// Adds a [`CharsetValidator`] reading `UNB` S001 DE 0001. See
+    /// Adds a [`CharsetValidator`] reading `UNB` S001 DE 0001, registered under
+    /// [`ValidationLayer::Charset`] (switched by the envelope switch). See
     /// [`with_charset_validation_for`][Self::with_charset_validation_for] to pin
     /// a repertoire instead of reading it from the envelope.
     pub fn with_charset_validation(mut self) -> Self {
         self.inner.envelope_enabled = true;
         self.inner.validators.push(LayeredValidator {
-            layer: ValidationLayer::Envelope,
+            layer: ValidationLayer::Charset,
             validator: Box::new(CharsetValidator::from_envelope()),
         });
         self
@@ -208,7 +216,7 @@ impl ValidationContextBuilder {
     pub fn with_charset_validation_for(mut self, charset: crate::Charset) -> Self {
         self.inner.envelope_enabled = true;
         self.inner.validators.push(LayeredValidator {
-            layer: ValidationLayer::Envelope,
+            layer: ValidationLayer::Charset,
             validator: Box::new(CharsetValidator::with_charset(charset)),
         });
         self
@@ -217,13 +225,14 @@ impl ValidationContextBuilder {
     /// Check the directory-independent ISO 9735-1 syntax rules, and enable the
     /// envelope layer.
     ///
-    /// See [`SyntaxValidator`][crate::SyntaxValidator] for the exact rules. They
+    /// Registered under [`ValidationLayer::Syntax`], which the envelope switch
+    /// controls. See [`SyntaxValidator`][crate::SyntaxValidator] for the exact rules. They
     /// apply to any interchange from any partner in any directory, so this needs
     /// no configuration and is worth enabling wherever the envelope layer is on.
     pub fn with_syntax_validation(mut self) -> Self {
         self.inner.envelope_enabled = true;
         self.inner.validators.push(LayeredValidator {
-            layer: ValidationLayer::Envelope,
+            layer: ValidationLayer::Syntax,
             validator: Box::new(crate::validator::SyntaxValidator),
         });
         self
@@ -323,7 +332,7 @@ impl ValidationContext {
     /// Execute flat + group-aware validators in lenient mode.
     ///
     /// This method runs the full flat validation pass (same as
-    /// [`validate_lenient`](Self::validate)) **and** then runs the
+    /// [`validate`](Self::validate)) **and** then runs the
     /// group-aware pass by calling [`Validator::validate_group_batch`] on every
     /// validator.  Validators without group rules treat `validate_group_batch`
     /// as a no-op, so this is safe to call for any context.
@@ -389,10 +398,7 @@ impl ValidationContext {
         report: &mut ValidationReport,
         context: &ValidationRuleContext<'_>,
     ) {
-        // Short-circuit: skip the entire DFS tree walk when no enabled validator
-        // has group rules.  This avoids the O(n) borrowed-segment allocation in
-        // `validate_lenient_grouped_owned` for the common case where the context
-        // only has flat (envelope/structure/code-list) validators.
+        // Nothing to do when no enabled validator has group rules.
         if !self
             .validators
             .iter()
@@ -404,8 +410,10 @@ impl ValidationContext {
             if !self.layer_enabled(lv.layer) {
                 continue;
             }
+            let before = IssueCounts::of(report);
             lv.validator
                 .validate_group_batch(root, segments, report, context);
+            before.stamp_layer(report, lv.layer);
             if self.bail_on_first_critical && report.has_critical_errors() {
                 break;
             }
@@ -451,7 +459,7 @@ impl ValidationContext {
         context: &ValidationRuleContext<'_>,
     ) -> ValidationReport {
         let mut report = ValidationReport::default();
-        // Pre-extract UNH message type once (F-017).
+        // Pre-extract the UNH message type once for every validator.
         let unh_message_type = segments
             .iter()
             .find(|s| s.tag == "UNH")
@@ -469,23 +477,24 @@ impl ValidationContext {
             context
         };
         let mut filtered: Option<Vec<Segment<'_>>> = None;
-        // See the owned path: computed once so filtering is independent of the
-        // order in which validators were registered.
+        // Computed once, up front: whether envelope segments are hidden from
+        // the other layers must not depend on the order validators were
+        // registered in.
         let envelope_active = self.envelope_layer_active();
 
         for lv in &self.validators {
             if !self.layer_enabled(lv.layer) {
                 continue;
             }
-            if lv.layer == ValidationLayer::Envelope {
+            let before = IssueCounts::of(&report);
+            if lv.layer.is_envelope_class() {
                 lv.validator
                     .validate_batch(segments, &mut report, effective_ctx);
             } else {
                 let active: &[Segment<'_>] = if envelope_active {
                     match envelope_interior(segments) {
-                        // Common case: UNB/UNZ bracket the message and no
-                        // UNG/UNE appear inside, so a sub-slice suffices and no
-                        // segment has to be deep-cloned.
+                        // UNB/UNZ bracket the message and no UNG/UNE appear
+                        // inside: a sub-slice suffices and no segment is cloned.
                         Some(interior) => interior,
                         None => filtered.get_or_insert_with(|| {
                             segments
@@ -501,6 +510,7 @@ impl ValidationContext {
                 lv.validator
                     .validate_batch(active, &mut report, effective_ctx);
             }
+            before.stamp_layer(&mut report, lv.layer);
             if self.bail_on_first_critical && report.has_critical_errors() {
                 break;
             }
@@ -589,7 +599,9 @@ impl ValidationContext {
                          group-pass) will not run for this message",
                     ),
                 )
-                .with_rule_id("edifact-rs::fork::excluded-validator"),
+                .with_rule_id("edifact-rs::fork::excluded-validator")
+                // A note about the context, not about the message: no layer.
+                .with_kind(crate::FindingKind::Other),
             );
         }
 
@@ -609,14 +621,17 @@ impl ValidationContext {
 
     fn layer_enabled(&self, layer: ValidationLayer) -> bool {
         match layer {
-            ValidationLayer::Envelope => self.envelope_enabled,
+            ValidationLayer::Envelope | ValidationLayer::Syntax | ValidationLayer::Charset => {
+                self.envelope_enabled
+            }
             ValidationLayer::Structure => self.structure_enabled,
             ValidationLayer::CodeList => self.code_list_enabled,
             ValidationLayer::Profile => self.profile_enabled,
         }
     }
 
-    /// Whether an enabled envelope-layer validator is registered.
+    /// Whether an enabled envelope-class validator (envelope, syntax or charset)
+    /// is registered.
     ///
     /// Determines whether envelope segments are hidden from later layers.  It is
     /// a property of the context as a whole, not of how far the validator loop
@@ -626,7 +641,43 @@ impl ValidationContext {
             && self
                 .validators
                 .iter()
-                .any(|lv| lv.layer == ValidationLayer::Envelope)
+                .any(|lv| lv.layer.is_envelope_class())
+    }
+}
+
+/// Bucket lengths of a report before a validator runs, so the issues that
+/// validator added can be told apart afterwards.
+///
+/// Validators only ever append, so everything past these lengths is new.
+#[derive(Clone, Copy)]
+struct IssueCounts {
+    errors: usize,
+    warnings: usize,
+    infos: usize,
+}
+
+impl IssueCounts {
+    fn of(report: &ValidationReport) -> Self {
+        Self {
+            errors: report.errors.len(),
+            warnings: report.warnings.len(),
+            infos: report.infos.len(),
+        }
+    }
+
+    /// Stamp `layer` onto every issue added since `self` that has none.
+    fn stamp_layer(self, report: &mut ValidationReport, layer: ValidationLayer) {
+        let new = report
+            .errors
+            .iter_mut()
+            .skip(self.errors)
+            .chain(report.warnings.iter_mut().skip(self.warnings))
+            .chain(report.infos.iter_mut().skip(self.infos));
+        for issue in new {
+            if issue.layer.is_none() {
+                issue.layer = Some(layer);
+            }
+        }
     }
 }
 

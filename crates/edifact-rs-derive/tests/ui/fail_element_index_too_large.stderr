@@ -1,4 +1,4 @@
-error: `element` index 200000 exceeds the maximum of 256; UN/EDIFACT allows at most 99 elements per segment and 99 components per composite
+error: `element` index 200000 exceeds the code-generation limit of 256
   --> tests/ui/fail_element_index_too_large.rs:15:25
    |
 15 |     #[edifact(element = 200000)]

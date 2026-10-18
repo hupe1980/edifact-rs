@@ -1,0 +1,17 @@
+{
+  "error_code": "E014",
+  "severity": "Error",
+  "message": "QTY element 1 is not a valid code",
+  "span": {
+    "start": 120,
+    "end": 131
+  },
+  "segment_tag": "QTY",
+  "rule_id": "MIG-QTY-CODE",
+  "element_index": 1,
+  "component_index": null,
+  "segment_occurrence": 3,
+  "message_ref": null,
+  "suggestion": "Use qualifier 220",
+  "segment_group": null
+}

@@ -245,9 +245,8 @@ fn segment_one_byte_over_the_limit_is_rejected() {
 
 #[test]
 fn slice_and_reader_paths_agree_at_the_limit_boundary() {
-    // The two paths used to disagree by one byte, so a segment of exactly
-    // `max_segment_bytes` parsed or failed depending only on whether it happened
-    // to straddle a read-buffer boundary.
+    // A segment of exactly `max_segment_bytes` must parse or fail the same way
+    // on both paths, whether or not it straddles a read-buffer boundary.
     let limit = 512;
     for body_len in [limit - 1, limit, limit + 1] {
         let input = segment_of_body_len(body_len);

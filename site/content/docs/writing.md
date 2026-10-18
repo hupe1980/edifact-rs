@@ -367,7 +367,7 @@ assert_eq!(writer.finish()?, input.to_vec());
 
 ## Repeating data elements
 
-ISO 9735-1 §8.6 repetitions are written with the repetition separator from UNA
+ISO 9735-1 §8.7 repetitions are written with the repetition separator from UNA
 position 050, so the writer needs a `ServiceStringAdvice` that declares one.
 Writing a repeating element through a writer that has none is
 `EdifactError::RepetitionSeparatorNotDeclared`, checked before the first byte is
@@ -539,8 +539,9 @@ let _sink = emitter.finish()?;
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-`WriterEmitter` is **allocation-free** per event: it writes directly to the
-underlying `Write` on each `EdifactEvent` without buffering components in a `String`.
+`WriterEmitter` allocates nothing per event and keeps no buffer: each
+`EdifactEvent` goes straight to the underlying `Write`, so wrap a file or socket
+in `BufWriter`.
 
 ---
 
@@ -577,4 +578,4 @@ w.finish()?;
 
 - [Typed Derive](@/docs/typed-derive.md) — derive `EdifactSerialize` for your structs
 - [Parsing](@/docs/parsing.md) — parse EDIFACT input to `Segment` slices
-- [Performance](@/docs/performance.md) — allocation budgets and benchmarking tips
+- [Performance](@/docs/performance.md) — allocation budget and benchmarks

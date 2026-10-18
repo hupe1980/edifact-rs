@@ -705,10 +705,9 @@ impl<W: Write> Writer<W> {
         if find_escape(&self.ssa, bytes).is_none() {
             return Cow::Borrowed(value);
         }
-        // Built as a `String` from the start.  Assembling a `Vec<u8>` and then
-        // re-validating it needed a fallible conversion whose failure branch was
-        // unreachable, which is exactly the kind of `expect` that has no business
-        // in a library.  Every delimiter is single-byte ASCII (enforced by
+        // Built as a `String` from the start, so no fallible UTF-8 conversion
+        // (with an unreachable failure branch) is needed.  Every delimiter is
+        // single-byte ASCII (enforced by
         // `ServiceStringAdvice::is_valid`), so each hit lands on a character
         // boundary and both halves of the split are valid `&str`.
         let release = self.ssa.release_char as char;
@@ -726,7 +725,7 @@ impl<W: Write> Writer<W> {
     }
     /// Write only the segment tag bytes — no element separator or terminator.
     ///
-    /// Used by [`crate::WriterEmitter`] for eager, zero-allocation event writing.
+    /// Used by [`crate::WriterEmitter`] to write each event as it arrives.
     #[inline]
     pub(crate) fn write_tag_only(&mut self, tag: &str) -> Result<(), EdifactError> {
         self.write_tag(tag)?;
@@ -1371,9 +1370,8 @@ mod tests {
 
     #[test]
     fn escape_value_handles_multi_byte_text() {
-        // The old implementation assembled a `Vec<u8>` and re-validated it with
-        // an `expect`.  Escaping around non-ASCII text is the case that made
-        // that conversion look fallible in the first place.
+        // Escaping splits around delimiters; non-ASCII text on either side must
+        // stay intact.
         let w = Writer::new(std::io::sink());
         assert_eq!(w.escape_value("Grüße+Köln"), "Grüße?+Köln");
         assert_eq!(w.escape_value("Grüße"), "Grüße");

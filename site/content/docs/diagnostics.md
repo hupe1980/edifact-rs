@@ -30,6 +30,11 @@ cargo add miette --features fancy
 When `diagnostics` is enabled:
 
 - `EdifactError` implements `miette::Diagnostic`
+- `ValidationIssue` implements `miette::Diagnostic`: its code is the error code
+  (else the rule id), its help the suggestion, and it carries one label at its span
+  naming its kind and group path (e.g. `missing at SG4[0]/SG8[1]/RFF`)
+- `ValidationReport` implements `miette::Diagnostic` and yields every issue through
+  `related()`, errors first, then warnings, then infos
 - Every error carries a **byte-level source span** pointing into the input
 - `miette::Report` renders errors with annotated source context:
 
@@ -121,6 +126,35 @@ let rendered = report.render_deterministic();
 // Use in snapshot tests (insta, expect-test, etc.)
 println!("{rendered}");
 # Ok::<(), edifact_rs::EdifactError>(())
+```
+
+Each line is the message followed by the tokens that are set, in a fixed order:
+`[CODE]`, `[segment=…]`, `[rule=…]`, `[element=…]`, `[component=…]`,
+`[occurrence=…]`, `[position=…]`, `[path=SG4[0]/SG8[1]/RFF]`, `[layer=…]`,
+`[kind=…]`, `[pack=…]`, `[span=…]`, `[hint=…]`. Within a severity bucket lines sort
+by span start, tag, rule id, element and component index, code and message, then
+segment position, occurrence, layer, kind, pack and group path.
+
+### Rendering every finding with `miette`
+
+With `diagnostics` enabled, attach the source to the report and each issue that
+has a span is underlined where it occurred:
+
+```rust
+# #[cfg(feature = "diagnostics")]
+# {
+use edifact_rs::{ProfileRulePack, ValidationContext, from_bytes};
+
+let input = "UNH+1+ORDERS:D:96A:UN'BGM+220'DTM+137:20240101:102'UNT+4+1'";
+let segs: Vec<_> = from_bytes(input.as_bytes()).collect::<Result<_, _>>().unwrap();
+let report = ValidationContext::builder()
+    .with_profile_pack(ProfileRulePack::new("AHB").forbid_segment("DTM", "AHB-DTM-X"))
+    .build()
+    .validate(&segs);
+
+// One related diagnostic per issue, labelled "not_permitted at DTM".
+eprintln!("{:?}", miette::Report::new(report).with_source_code(input));
+# }
 ```
 
 ---

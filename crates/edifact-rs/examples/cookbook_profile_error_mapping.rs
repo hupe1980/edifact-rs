@@ -5,9 +5,10 @@
 //!
 //! ## Pattern A — `ProfileRulePack` rules mapped to application error codes
 //!
-//! Use `ValidationReport::filter_by_rule_prefix` and `issues_for_rule_id` to
-//! extract rule-specific findings from a report and map them to your own error
-//! type without coupling to `ValidationIssue`.
+//! Route on the structured fields every issue carries — `kind()` (what kind of
+//! fault), `layer()` (which stage found it) and `pack()` (which pack) — and use
+//! `issues_for_rule_id` only to name one specific rule.  None of this parses a
+//! rule-id prefix or suffix.
 //!
 //! ## Pattern B — custom `Validator` trait implementation
 //!
@@ -16,8 +17,8 @@
 //! trait directly and register it alongside a `ProfileRulePack`.
 
 use edifact_rs::{
-    ProfileRulePack, ValidationContext, ValidationIssue, ValidationLayer, ValidationReport,
-    ValidationRuleContext, ValidationSeverity, Validator, from_bytes,
+    FindingKind, ProfileRulePack, ValidationContext, ValidationIssue, ValidationLayer,
+    ValidationReport, ValidationRuleContext, ValidationSeverity, Validator, from_bytes,
 };
 
 // ── Application-level error type ──────────────────────────────────────────────
@@ -51,6 +52,7 @@ fn build_orders_pack() -> ProfileRulePack {
                         format!("unsupported BGM function code '{func}'"),
                     )
                     .with_rule_id("ORDERS-P001-FUNC")
+                    .with_kind(FindingKind::Code)
                     .with_segment("BGM")
                     .with_element_index(2)
                     .with_suggestion("Use function code 9 (original) or 1 (cancellation)")
@@ -70,6 +72,7 @@ fn build_orders_pack() -> ProfileRulePack {
                         "BGM purchase-order reference is empty",
                     )
                     .with_rule_id("ORDERS-P002-REF")
+                    .with_kind(FindingKind::Missing)
                     .with_segment("BGM")
                     .with_element_index(1)
                     .with_suggestion("Populate BGM element 1 with the buyer's PO reference number")
@@ -86,26 +89,38 @@ fn build_orders_pack() -> ProfileRulePack {
 
 /// Map a `ValidationReport` to an application-level violation list.
 ///
-/// Downstream crates use `filter_by_rule_prefix` and `issues_for_rule_id` to
-/// decouple their domain model from `ValidationIssue`.
+/// Profile findings are told apart by their `kind`, not by parsing the rule id.
 fn extract_violations(report: &ValidationReport) -> Vec<OrdersViolation> {
     let mut violations = Vec::new();
 
-    // Map profile rule IDs to domain violation types.
-    for issue in report.filter_by_rule_prefix("ORDERS-P001").iter_issues() {
-        // Rule ORDERS-P001-FUNC carries the disallowed code in the message text.
-        let code = issue.message.split('\'').nth(1).unwrap_or("?").to_owned();
-        violations.push(OrdersViolation::UnsupportedFunctionCode { code });
-    }
-    if report
-        .issues_for_rule_id("ORDERS-P002-REF")
-        .next()
-        .is_some()
-    {
-        violations.push(OrdersViolation::MissingPoReference);
+    for issue in report.iter_issues() {
+        if issue.layer() != Some(ValidationLayer::Profile) {
+            continue;
+        }
+        match issue.kind() {
+            Some(FindingKind::Code) => {
+                // The disallowed code is the value at the issue's location.
+                let code = issue.message.split('\'').nth(1).unwrap_or("?").to_owned();
+                violations.push(OrdersViolation::UnsupportedFunctionCode { code });
+            }
+            Some(FindingKind::Missing) => violations.push(OrdersViolation::MissingPoReference),
+            _ => {}
+        }
     }
 
     violations
+}
+
+/// Where a finding is acknowledged: interchange-level stages answer with a
+/// CONTRL, application stages with an application-level acknowledgement.
+fn acknowledgement_for(issue: &ValidationIssue) -> &'static str {
+    match issue.layer() {
+        Some(ValidationLayer::Envelope | ValidationLayer::Syntax | ValidationLayer::Charset) => {
+            "CONTRL"
+        }
+        Some(_) => "application acknowledgement",
+        None => "unclassified",
+    }
 }
 
 // ── Pattern B: custom Validator implementation ────────────────────────────────
@@ -180,13 +195,17 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
         }]
     );
 
-    // ── rule-ID based filtering (Pattern A) ───────────────────────────────────
-    let orders_issues = bad_func_report.filter_by_rule_prefix("ORDERS-");
-    println!(
-        "ORDERS-scoped issues: {}  |  total: {}",
-        orders_issues.total_issues(),
-        bad_func_report.total_issues()
-    );
+    // ── routing on layer and pack (Pattern A) ─────────────────────────────────
+    for issue in bad_func_report.iter_issues() {
+        println!(
+            "{} from pack {:?} -> {}",
+            issue.kind().map_or("unclassified", FindingKind::as_str),
+            issue.pack(),
+            acknowledgement_for(issue)
+        );
+        assert_eq!(issue.pack(), Some("ORDERS-COMBINED"));
+        assert_eq!(acknowledgement_for(issue), "application acknowledgement");
+    }
 
     // ── custom validator (Pattern B) ──────────────────────────────────────────
     let tiny_limit_report = ValidationContext::builder()

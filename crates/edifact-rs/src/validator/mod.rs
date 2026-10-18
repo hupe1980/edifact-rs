@@ -13,7 +13,9 @@ pub mod pack;
 pub use context::{ValidationContext, ValidationContextBuilder};
 pub use pack::{ProfileRule, ProfileRulePack};
 
-use crate::{EdifactError, Segment, Span, ValidationIssue, ValidationReport, ValidationSeverity};
+use crate::{
+    EdifactError, FindingKind, Segment, Span, ValidationIssue, ValidationReport, ValidationSeverity,
+};
 use std::any::Any;
 
 /// Typed context injected into profile rule closures at validation time.
@@ -97,18 +99,68 @@ impl std::fmt::Debug for ValidationRuleContext<'_> {
     }
 }
 
-/// Validation layers used by [`ValidationContext`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The validation stage a validator is registered under, and that an issue
+/// was produced by ([`ValidationIssue::layer`]).
+///
+/// | Variant | [`as_str`](Self::as_str) | Stage | Switched by |
+/// |---|---|---|---|
+/// | `Envelope` | `envelope` | `UNB`/`UNG`/`UNH`/`UNT`/`UNE`/`UNZ` structure, counts and references | [`envelope`][ValidationContextBuilder::envelope] |
+/// | `Syntax` | `syntax` | directory-independent ISO 9735-1 rules ([`SyntaxValidator`]) | [`envelope`][ValidationContextBuilder::envelope] |
+/// | `Charset` | `charset` | values against the declared character repertoire ([`CharsetValidator`]) | [`envelope`][ValidationContextBuilder::envelope] |
+/// | `Structure` | `structure` | directory structure: segment presence, order, arity | [`structure`][ValidationContextBuilder::structure] |
+/// | `CodeList` | `code_list` | directory code lists | [`code_list`][ValidationContextBuilder::code_list] |
+/// | `Profile` | `profile` | downstream profile packs | [`profile`][ValidationContextBuilder::profile] |
+///
+/// `Syntax` and `Charset` are interchange-level stages like `Envelope`: they
+/// share its switch and, like it, see the whole slice including `UNB`/`UNZ`.
+/// They exist as separate variants so an issue says which stage found it — a
+/// blank value or a `€` in a `UNOC` interchange is not an envelope fault.
+///
+/// Marked `#[non_exhaustive]`. With the `serde` feature variants serialise by
+/// name (`"CodeList"`), the casing [`ValidationSeverity`] uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub enum ValidationLayer {
     /// Interchange / message envelope checks (`UNB`/`UNH`/`UNT`/`UNZ` counts).
     Envelope,
+    /// Directory-independent ISO 9735-1 syntax checks.
+    Syntax,
+    /// Character repertoire checks.
+    Charset,
     /// Directory structure checks (segment presence/order/arity).
     Structure,
     /// Directory code-list checks.
     CodeList,
     /// Downstream profile-pack checks.
     Profile,
+}
+
+impl ValidationLayer {
+    /// A stable lowercase identifier, e.g. `"code_list"`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Envelope => "envelope",
+            Self::Syntax => "syntax",
+            Self::Charset => "charset",
+            Self::Structure => "structure",
+            Self::CodeList => "code_list",
+            Self::Profile => "profile",
+        }
+    }
+
+    /// Whether this layer is an interchange-level stage: switched by the
+    /// envelope switch and run over the unfiltered slice.
+    pub(crate) fn is_envelope_class(self) -> bool {
+        matches!(self, Self::Envelope | Self::Syntax | Self::Charset)
+    }
+}
+
+impl std::fmt::Display for ValidationLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Pluggable validator for parsed EDIFACT segments.
@@ -129,11 +181,11 @@ pub trait Validator: Send + Sync {
     /// Called by [`ValidationContext::validate_grouped`] in addition to
     /// [`validate_batch`](Validator::validate_batch).  Validators that only perform
     /// flat segment checks (e.g. [`EnvelopeValidator`]) can leave this as the
-    /// default no-op; only validators with group-scoped rules (typically
+    /// default no-op; only validators with group-scoped rules (such as a
     /// [`ProfileRulePack`] with at least one group rule) need to override it.
     ///
-    /// The default implementation is a no-op so that adding this method to the
-    /// trait is not a breaking change for external `Validator` implementors.
+    /// The default implementation is a no-op, so validators without group
+    /// rules need not implement it.
     fn validate_group_batch(
         &self,
         _root: &crate::group::SegmentGroupIndexed<'_>,
@@ -146,8 +198,7 @@ pub trait Validator: Send + Sync {
     /// Returns `true` if this validator has any group-scoped rules.
     ///
     /// Used by [`crate::ValidationContext`] to short-circuit the
-    /// group-tree walk when no validator in the context has group rules,
-    /// avoiding the cost of allocating a borrowed slice for nothing.
+    /// group-tree walk when no validator in the context has group rules.
     ///
     /// The default implementation returns `false`.
     fn has_group_rules(&self) -> bool {
@@ -186,17 +237,46 @@ where
     }
 }
 
-/// Convert a low-level validation error to a user-facing issue and append it.
-///
-/// Severity comes from [`report::severity_for_error`][crate::report::severity_for_error],
-/// which is also what the `miette` rendering uses.
-pub(crate) fn report_error(report: &mut ValidationReport, err: EdifactError) {
-    let issue = issue_from_error(err);
+/// The one-based message position (DE 0096) of `segments[index]`, or `None`
+/// when the slice does not start at `UNH` and so has no such coordinate.
+pub(crate) fn message_position(segments: &[Segment<'_>], index: usize) -> Option<usize> {
+    (segments.first().is_some_and(|s| s.tag == "UNH")).then_some(index + 1)
+}
+
+/// Add `issue` to the bucket its severity belongs in.
+pub(crate) fn push_issue(report: &mut ValidationReport, issue: ValidationIssue) {
     match issue.severity {
         ValidationSeverity::Critical | ValidationSeverity::Error => report.add_error(issue),
         ValidationSeverity::Warning => report.add_warning(issue),
         ValidationSeverity::Info => report.add_info(issue),
     }
+}
+
+/// Convert a low-level validation error to a user-facing issue and append it.
+///
+/// Severity comes from [`report::severity_for_error`][crate::report::severity_for_error],
+/// which is also what the `miette` rendering uses.
+///
+/// The issue's [`kind`][ValidationIssue::kind] is
+/// [`FindingKind::for_error`]; layer and segment position are left for the
+/// caller, which knows them.
+pub(crate) fn report_error(report: &mut ValidationReport, err: EdifactError) {
+    push_issue(report, issue_from_error(err));
+}
+
+/// [`report_error`] with the producing layer and, when known, the segment's
+/// one-based message position.
+pub(crate) fn report_error_at(
+    report: &mut ValidationReport,
+    err: EdifactError,
+    layer: ValidationLayer,
+    position: Option<usize>,
+) {
+    let mut issue = issue_from_error(err).with_layer(layer);
+    if let Some(position) = position {
+        issue = issue.with_segment_position(position);
+    }
+    push_issue(report, issue);
 }
 
 // ── EnvelopeValidator ─────────────────────────────────────────────────────────
@@ -219,8 +299,10 @@ impl Validator for EnvelopeValidator {
         // violation.  The strict path stops at the first, which made
         // `ValidationContext::validate` — whose whole purpose is
         // exhaustive reporting — yield at most one envelope issue per batch.
+        // Envelope errors carry no segment index; CONTRL places them from
+        // their span.
         for e in crate::envelope::validate_envelope_lenient(segments).errors {
-            report_error(report, e);
+            report_error_at(report, e, ValidationLayer::Envelope, None);
         }
     }
 
@@ -277,14 +359,18 @@ impl Validator for SyntaxValidator {
         report: &mut ValidationReport,
         _context: &ValidationRuleContext<'_>,
     ) {
-        for segment in segments {
+        for (index, segment) in segments.iter().enumerate() {
+            let position = message_position(segments, index);
+            let report_syntax = |report: &mut ValidationReport, err: EdifactError| {
+                report_error_at(report, err, ValidationLayer::Syntax, position);
+            };
             // §7.5: "A segment shall contain at least one data element in
             // addition to the segment tag."  A segment whose only element is
             // empty still satisfies this — §8.4 spells out `ABC'` versus the
             // mandatory-segment-with-no-data form — so the test is on presence,
             // not on content.
             if segment.elements.is_empty() {
-                report_error(
+                report_syntax(
                     report,
                     EdifactError::SegmentWithoutDataElements {
                         tag: segment.tag().to_owned(),
@@ -302,7 +388,7 @@ impl Validator for SyntaxValidator {
                 .is_some_and(|element| element.repetitions().flatten().all(|(v, _)| v.is_empty()))
                 && segment.elements.len() > 1
             {
-                report_error(
+                report_syntax(
                     report,
                     EdifactError::TrailingSeparator {
                         tag: segment.tag().to_owned(),
@@ -319,7 +405,7 @@ impl Validator for SyntaxValidator {
                 if element.components.len() > 1
                     && element.components.last().is_some_and(|(v, _)| v.is_empty())
                 {
-                    report_error(
+                    report_syntax(
                         report,
                         EdifactError::TrailingSeparator {
                             tag: segment.tag().to_owned(),
@@ -335,7 +421,7 @@ impl Validator for SyntaxValidator {
                         // shall not be allowed."  An empty value is a different
                         // thing entirely — that is how EDIFACT spells "absent".
                         if !value.is_empty() && value.bytes().all(|b| b == b' ') {
-                            report_error(
+                            report_syntax(
                                 report,
                                 EdifactError::BlankDataElementValue {
                                     tag: segment.tag().to_owned(),
@@ -448,7 +534,8 @@ impl Validator for CharsetValidator {
         if charset == crate::Charset::UnoY {
             return; // Everything is permitted; nothing to check.
         }
-        for segment in segments {
+        for (index, segment) in segments.iter().enumerate() {
+            let position = message_position(segments, index);
             for (element_index, element) in segment.elements.iter().enumerate() {
                 for components in element.repetitions() {
                     for (component_index, (value, span)) in components.iter().enumerate() {
@@ -472,15 +559,16 @@ impl Validator for CharsetValidator {
                         )
                         .with_segment(segment.tag())
                         .with_span(*span)
+                        .with_element_index(element_index)
+                        .with_component_index(component_index)
+                        .with_layer(ValidationLayer::Charset)
+                        .with_kind(FindingKind::Charset)
                         .with_suggestion(
                             "Transliterate the value, or declare a wider repertoire in UNB S001 \
                              (UNOC for Latin-1, UNOY for UTF-8)",
                         );
-                        if let Ok(index) = u8::try_from(element_index) {
-                            issue = issue.with_element_index(index);
-                        }
-                        if let Ok(index) = u8::try_from(component_index) {
-                            issue = issue.with_component_index(index);
+                        if let Some(position) = position {
+                            issue = issue.with_segment_position(position);
                         }
                         report.add_error(issue);
                     }
@@ -496,10 +584,82 @@ impl Validator for CharsetValidator {
     }
 }
 
-fn issue_from_error(err: EdifactError) -> ValidationIssue {
+// ── PlacementValidator ────────────────────────────────────────────────────────
+
+/// Resolves each message against a [`GroupSchema`][crate::group::GroupSchema]
+/// and reports what does not fit: unplaced segments, places and groups beyond
+/// their `max`, places and groups below their `min`.
+///
+/// The issues are exactly
+/// [`GroupResolution::findings`][crate::group::GroupResolution::findings], with
+/// layer [`Structure`](ValidationLayer::Structure) — register it under that
+/// layer. Give it the message (`UNH` to `UNT`) the schema describes: with the
+/// envelope layer on, the context already hides `UNB`/`UNZ`/`UNG`/`UNE`.
+///
+/// # Example
+///
+/// ```
+/// use std::sync::Arc;
+/// use edifact_rs::group::{Entry, GroupSchema, SegmentPlace};
+/// use edifact_rs::{FindingKind, PlacementValidator, ValidationContext, ValidationLayer};
+///
+/// let schema = GroupSchema::ordered(
+///     "MSG",
+///     ["UNH", "BGM", "UNT"].map(|t| Entry::Segment(SegmentPlace::new(t).with_min(1).with_max(1))),
+/// )?;
+/// let ctx = ValidationContext::builder()
+///     .with_validator(ValidationLayer::Structure, PlacementValidator::new(Arc::new(schema)))
+///     .build();
+///
+/// let segments: Vec<_> = edifact_rs::from_bytes(b"UNH+1+X:D:11A:UN'DTM+137:1:102'BGM+220'UNT+4+1'")
+///     .collect::<Result<_, _>>()?;
+/// let report = ctx.validate(&segments);
+/// let issue = &report.errors()[0];
+/// assert_eq!(issue.kind(), Some(FindingKind::Placement));
+/// assert_eq!(issue.segment_position(), Some(2));
+/// # Ok::<(), edifact_rs::EdifactError>(())
+/// ```
+#[derive(Debug, Clone)]
+pub struct PlacementValidator {
+    schema: std::sync::Arc<crate::group::GroupSchema>,
+}
+
+impl PlacementValidator {
+    /// A validator resolving against `schema`.
+    #[must_use]
+    pub fn new(schema: std::sync::Arc<crate::group::GroupSchema>) -> Self {
+        Self { schema }
+    }
+
+    /// The schema this validator resolves against.
+    #[must_use]
+    pub fn schema(&self) -> &crate::group::GroupSchema {
+        &self.schema
+    }
+}
+
+impl Validator for PlacementValidator {
+    fn validate_batch(
+        &self,
+        segments: &[Segment<'_>],
+        report: &mut ValidationReport,
+        _context: &ValidationRuleContext<'_>,
+    ) {
+        for issue in self.schema.resolve(segments).findings(segments) {
+            push_issue(report, issue);
+        }
+    }
+
+    fn fork(&self) -> Option<Box<dyn Validator + Send + Sync>> {
+        Some(Box::new(self.clone()))
+    }
+}
+
+pub(crate) fn issue_from_error(err: EdifactError) -> ValidationIssue {
     let code = err.stable_code();
     let mut issue = ValidationIssue::new(crate::report::severity_for_error(&err), err.to_string())
-        .with_error_code(code);
+        .with_error_code(code)
+        .with_kind(FindingKind::for_error(&err));
     let default_hint = err.recovery_hint();
 
     match err {
@@ -517,7 +677,7 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
         } => {
             issue = issue
                 .with_segment(tag)
-                .with_element_index(u8::try_from(element_index).unwrap_or(u8::MAX))
+                .with_element_index(element_index)
                 .with_span(span);
         }
         EdifactError::InvalidCodeValue {
@@ -529,7 +689,7 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
         } => {
             issue = issue
                 .with_segment(tag)
-                .with_element_index(u8::try_from(element_index).unwrap_or(u8::MAX))
+                .with_element_index(element_index)
                 .with_span(span);
             if let Some(s) = suggestion {
                 issue = issue.with_suggestion(s);
@@ -538,11 +698,17 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
         EdifactError::MissingSegment { tag, .. } => {
             issue = issue.with_segment(tag);
         }
+        EdifactError::SegmentNotPlaced { tag, span, .. }
+        | EdifactError::TooManySegmentOccurrences { tag, span, .. } => {
+            issue = issue.with_segment(tag).with_span(span);
+        }
+        EdifactError::TooManyGroupOccurrences { group, span, .. } => {
+            issue = issue.with_segment_group(group).with_span(span);
+        }
+        // The error names the segment, not an element: an index invented here
+        // would become a wrong S011 on the CONTRL that reports it.
         EdifactError::QualifierMismatch { tag, span, .. } => {
-            issue = issue
-                .with_segment(tag)
-                .with_element_index(0)
-                .with_span(span);
+            issue = issue.with_segment(tag).with_span(span);
         }
         EdifactError::ConditionalRequirementNotMet {
             tag,
@@ -552,7 +718,7 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
         } => {
             issue = issue
                 .with_segment(tag)
-                .with_element_index(u8::try_from(element_index).unwrap_or(u8::MAX))
+                .with_element_index(element_index)
                 .with_span(span);
         }
         EdifactError::DuplicateReference { tag, span, .. }
@@ -572,7 +738,7 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
             span,
         } => {
             issue = issue.with_segment(tag).with_span(span);
-            if let Some(index) = element_index.and_then(|i| u8::try_from(i).ok()) {
+            if let Some(index) = element_index {
                 issue = issue.with_element_index(index);
             }
         }
@@ -592,10 +758,10 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
             span,
             ..
         } => {
-            issue = issue.with_segment(tag).with_span(span);
-            if let Ok(index) = u8::try_from(element_index) {
-                issue = issue.with_element_index(index);
-            }
+            issue = issue
+                .with_segment(tag)
+                .with_span(span)
+                .with_element_index(element_index);
         }
         EdifactError::InvalidCharacterType {
             tag,
@@ -631,32 +797,24 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
             component_index,
             span,
         } => {
-            issue = issue.with_segment(tag).with_span(span);
-            if let Ok(index) = u8::try_from(element_index) {
-                issue = issue.with_element_index(index);
-            }
-            if let Ok(index) = u8::try_from(component_index) {
-                issue = issue.with_component_index(index);
-            }
+            issue = issue
+                .with_segment(tag)
+                .with_span(span)
+                .with_element_index(element_index)
+                .with_component_index(component_index);
         }
         EdifactError::MissingRequiredElement { tag, element_index } => {
-            issue = issue.with_segment(tag);
-            if let Ok(idx) = u8::try_from(element_index) {
-                issue = issue.with_element_index(idx);
-            }
+            issue = issue.with_segment(tag).with_element_index(element_index);
         }
         EdifactError::MissingRequiredComponent {
             tag,
             element_index,
             component_index,
         } => {
-            issue = issue.with_segment(tag);
-            if let Ok(ei) = u8::try_from(element_index) {
-                issue = issue.with_element_index(ei);
-            }
-            if let Ok(ci) = u8::try_from(component_index) {
-                issue = issue.with_component_index(ci);
-            }
+            issue = issue
+                .with_segment(tag)
+                .with_element_index(element_index)
+                .with_component_index(component_index);
         }
         // Lexical faults are a point in the byte stream, not a range: record a
         // zero-width span so `span` stays the single positional field.
@@ -665,7 +823,8 @@ fn issue_from_error(err: EdifactError) -> ValidationIssue {
         | EdifactError::InvalidText { offset }
         | EdifactError::UnexpectedEof { offset }
         | EdifactError::UnexpectedDataToken { offset }
-        | EdifactError::SegmentTooLong { offset, .. } => {
+        | EdifactError::SegmentTooLong { offset, .. }
+        | EdifactError::LimitExceeded { offset, .. } => {
             issue = issue.with_span(Span::new(offset, offset));
         }
         _ => {}

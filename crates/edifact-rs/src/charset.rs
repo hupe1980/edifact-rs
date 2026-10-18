@@ -54,7 +54,8 @@ use std::io::Read;
 /// is what lets the tokenizer scan for delimiters before decoding: bytes
 /// `0x00..=0x7F` mean the same thing in all of them.
 ///
-/// `UNOX` (ISO 2022 code extension) and `KECA` (Korean) are deliberately absent:
+/// `UNOX` (ISO/IEC 2022 code extension) and `KECA` (a Korean identifier outside
+/// ISO 9735) are deliberately absent:
 /// both are stateful or multi-byte in a way that would invalidate byte-level
 /// delimiter scanning, and pretending to support them would be worse than saying
 /// so. [`Charset::from_syntax_identifier`] reports
@@ -67,7 +68,7 @@ pub enum Charset {
     UnoA,
     /// `UNOB` — ISO 9735 level B: level A plus lower-case letters.
     UnoB,
-    /// `UNOC` — ISO 8859-1 (Latin-1). By far the most common non-ASCII repertoire.
+    /// `UNOC` — ISO 8859-1 (Latin-1).
     UnoC,
     /// `UNOD` — ISO 8859-2 (Latin-2, Central European).
     UnoD,
@@ -122,8 +123,7 @@ impl Charset {
     ///
     /// [`EdifactError::UnsupportedCharset`] for `UNOX` and `KECA`, which this
     /// crate cannot represent as a single-byte transform, and
-    /// [`EdifactError::UnrecognisedSyntaxIdentifier`] for anything not in
-    /// ISO 9735-1.
+    /// [`EdifactError::UnrecognisedSyntaxIdentifier`] for any other identifier.
     pub fn from_syntax_identifier(identifier: &str) -> Result<Self, EdifactError> {
         Ok(match identifier {
             "UNOA" => Self::UnoA,
@@ -298,8 +298,7 @@ impl Charset {
     /// Decode `bytes` from this repertoire into UTF-8 text.
     ///
     /// Returns [`Cow::Borrowed`] — and copies nothing — when `bytes` is pure
-    /// ASCII, which covers the overwhelming majority of real EDIFACT even in a
-    /// `UNOC` interchange.
+    /// ASCII, whatever the declared repertoire.
     ///
     /// # Errors
     ///
@@ -391,9 +390,13 @@ impl Charset {
     /// Wrap a reader so it yields UTF-8, transcoding from this repertoire.
     ///
     /// This is the streaming counterpart of
-    /// [`transcode_to_utf8`][Self::transcode_to_utf8]: it keeps the crate's
-    /// constant-memory guarantee intact for `UNOC`…`UNOK` input, which buffering
-    /// the whole interchange in order to decode it would not.
+    /// [`transcode_to_utf8`][Self::transcode_to_utf8]: memory stays one buffer
+    /// (see below) instead of the whole `UNOC`…`UNOK` interchange.
+    ///
+    /// # Resource bounds
+    ///
+    /// As [`DecodingReader`]: one 8 KiB buffer, no limit of its own; the
+    /// parser's [`ReaderConfig`][crate::ReaderConfig] limits count decoded bytes.
     ///
     /// # Example
     ///
@@ -431,6 +434,13 @@ impl std::fmt::Display for Charset {
 /// Adapter that transcodes a single-byte EDIFACT repertoire to UTF-8 on the fly.
 ///
 /// Built by [`Charset::decoding_reader`].
+///
+/// # Resource bounds
+///
+/// Holds one 8 KiB source buffer and at most one partly written character;
+/// it applies no limit of its own. Bound the parse that reads from it with a
+/// [`ReaderConfig`][crate::ReaderConfig] — its limits then count **decoded**
+/// bytes, and a Latin-1 interchange can be up to twice as long once decoded.
 pub struct DecodingReader<R> {
     inner: R,
     charset: Charset,
@@ -572,10 +582,18 @@ const SNIFF_PROBE_BYTES: usize = 4096;
 /// when the repertoire is not known in advance:
 /// [`Charset::decoding_reader`] requires naming it, because a `Read` cannot be
 /// rewound after peeking.  This buffers the first 4 KiB, reads `UNB` S001 out of
-/// them, and chains them back in front of the rest — so nothing is lost and peak
-/// memory stays bounded regardless of interchange size.
+/// them, and chains them back in front of the rest — so nothing is lost, and the
+/// memory held does not grow with the interchange (see the bounds below).
 ///
 /// A stream with no `UNB` is passed through unchanged.
+///
+/// # Resource bounds
+///
+/// Reads at most the 4 KiB probe before returning, then holds the probe and
+/// one 8 KiB decoding buffer. It applies no limit of its own: bound the parse
+/// with [`from_reader_with_config`][crate::from_reader_with_config], whose
+/// limits then count **decoded** bytes (up to twice the raw length for
+/// Latin-1).
 ///
 /// # Example
 ///

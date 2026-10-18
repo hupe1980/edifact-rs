@@ -26,3 +26,9 @@ FINDINGS.md
 .DS_Store
 # Zola build output and search index
 site/public/
+
+# Maintainers' local design notes and Spec Kit planning (never published).
+/concepts/
+/specs/
+/.specify/
+/.claude/

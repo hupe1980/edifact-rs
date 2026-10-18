@@ -476,3 +476,313 @@ mod suppression_rules {
         );
     }
 }
+
+// ── 019: exact positions, layer and kind on every built-in issue ─────────────
+
+mod issue_model {
+    use edifact_rs::{
+        DirectoryValidator, ElementRef, FindingKind, ProfileRulePack, SegmentDefinition, Status,
+        ValidationContext, ValidationIssue, ValidationLayer, ValidationReport, from_bytes, service,
+    };
+
+    fn parse(input: &[u8]) -> Vec<edifact_rs::Segment<'_>> {
+        from_bytes(input)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("fixture should parse")
+    }
+
+    fn codes(report: &ValidationReport) -> Vec<&str> {
+        report
+            .iter_issues()
+            .filter_map(ValidationIssue::error_code)
+            .collect()
+    }
+
+    fn by_code<'r>(report: &'r ValidationReport, code: &str) -> &'r ValidationIssue {
+        report
+            .iter_issues()
+            .find(|i| i.error_code() == Some(code))
+            .unwrap_or_else(|| panic!("no {code} in {report:#?}"))
+    }
+
+    /// Every issue carries a layer and a kind; returns the report for more checks.
+    fn assert_classified(report: ValidationReport) -> ValidationReport {
+        assert!(report.has_any_issues(), "fixture produced no issues");
+        for issue in report.iter_issues() {
+            assert!(issue.layer().is_some(), "no layer: {issue:#?}");
+            assert!(issue.kind().is_some(), "no kind: {issue:#?}");
+        }
+        report
+    }
+
+    #[test]
+    fn seventy_thousand_segment_occurrence_is_exact() {
+        // MSCONS-shaped: UNH, BGM, LIN, then 70 000 QTY of which only the last
+        // carries the wrong qualifier.  A u16 field saturated at 65 535 here.
+        let mut input = String::from("UNH+1+MSCONS:D:04B:UN'BGM+7+1'LIN+1'");
+        for _ in 0..69_999 {
+            input.push_str("QTY+220:1'");
+        }
+        input.push_str("QTY+999:1'UNT+70004+1'");
+        let segments = parse(input.as_bytes());
+        assert_eq!(segments.len(), 70_004);
+
+        let pack = ProfileRulePack::new("MSCONS-DEMO").require_qualifier(
+            "QTY",
+            0,
+            0,
+            "220",
+            "MSCONS-QTY-CODE",
+        );
+        let report = ValidationContext::builder()
+            .with_profile_pack(pack)
+            .build()
+            .validate(&segments);
+
+        assert_eq!(report.total_issues(), 1, "{report:#?}");
+        let issue = &report.errors()[0];
+        assert_eq!(issue.segment_occurrence(), Some(69_999));
+        // UNH = 1, BGM = 2, LIN = 3, first QTY = 4, so QTY #70 000 = 70 003.
+        assert_eq!(issue.segment_position(), Some(70_003));
+        assert_eq!(
+            segments[70_002].get_element(0).unwrap().get_component(0),
+            Some("999")
+        );
+        assert_eq!(issue.element_index(), Some(0));
+        assert_eq!(issue.component_index(), Some(0));
+        assert_eq!(issue.kind(), Some(FindingKind::Code));
+        assert_eq!(issue.layer(), Some(ValidationLayer::Profile));
+        assert_eq!(issue.pack(), Some("MSCONS-DEMO"));
+    }
+
+    #[test]
+    fn every_builtin_issue_has_layer_and_kind() {
+        // Envelope: wrong UNT count and reference, wrong UNZ count and reference.
+        let envelope = |input: &[u8]| {
+            let report = assert_classified(
+                ValidationContext::builder()
+                    .with_envelope_validation()
+                    .build()
+                    .validate(&parse(input)),
+            );
+            for issue in report.iter_issues() {
+                assert_eq!(issue.layer(), Some(ValidationLayer::Envelope), "{issue:#?}");
+            }
+            report
+        };
+        let report = envelope(
+            b"UNB+UNOC:3+S+R+200101:0900+IC1'UNH+1+ORDERS:D:96A:UN'BGM+220'UNT+5+2'UNZ+2+IC2'",
+        );
+        for code in ["E004", "E005", "E016"] {
+            assert!(codes(&report).contains(&code), "{code}: {report:#?}");
+        }
+        assert_eq!(
+            by_code(&report, "E004").kind(),
+            Some(FindingKind::ControlMismatch)
+        );
+        let report = envelope(b"UNB+UNOC:3+S+R+200101:0900+IC1'UNZ+0+IC1'");
+        assert_eq!(by_code(&report, "E042").kind(), Some(FindingKind::Envelope));
+        let report =
+            envelope(b"UNB+UNOC:3+S+R+200101:0900+IC1'UNH+1+ORDERS:D:96A:UN'UNT+2+1'UNZ+1+IC1'");
+        assert_eq!(by_code(&report, "E043").kind(), Some(FindingKind::Envelope));
+        let report = envelope(
+            b"UNB+UNOC:3+S+R+200101:0900+IC1'UNG+ORDERS+S+R+200101:0900+G1+UN+D:96A'\
+              UNH+1+ORDERS:D:96A:UN'BGM+220'UNT+3+1'UNE+1+G1'\
+              UNH+2+ORDERS:D:96A:UN'BGM+220'UNT+3+2'UNZ+2+IC1'",
+        );
+        assert_eq!(by_code(&report, "E052").kind(), Some(FindingKind::Envelope));
+
+        // Syntax: blank value, segment without data, trailing separator.
+        let report = assert_classified(
+            ValidationContext::builder()
+                .with_syntax_validation()
+                .build()
+                .validate(&parse(
+                    b"UNH+1+ORDERS:D:96A:UN'FTX+   'DTM'NAD+BY+'UNT+5+1'",
+                )),
+        );
+        for (code, kind, position) in [
+            ("E045", FindingKind::Representation, 2),
+            ("E046", FindingKind::Syntax, 3),
+            ("E051", FindingKind::Syntax, 4),
+        ] {
+            let issue = by_code(&report, code);
+            assert_eq!(issue.layer(), Some(ValidationLayer::Syntax), "{code}");
+            assert_eq!(issue.kind(), Some(kind), "{code}");
+            assert_eq!(issue.segment_position(), Some(position), "{code}");
+        }
+
+        // Charset: a lower-case letter in UNOA.  The slice starts at UNB, so
+        // there is no message position to report.
+        let report = assert_classified(
+            ValidationContext::builder()
+                .with_charset_validation()
+                .build()
+                .validate(&parse(
+                    b"UNB+UNOA:3+S+R+200101:0900+1'NAD+BY+Acme Ltd'UNZ+0+1'",
+                )),
+        );
+        let issue = by_code(&report, "E038");
+        assert_eq!(issue.layer(), Some(ValidationLayer::Charset));
+        assert_eq!(issue.kind(), Some(FindingKind::Charset));
+        assert_eq!(issue.segment_position(), None);
+
+        // Directory: code list, missing element, component count, plus the
+        // two hand-built structure findings (missing and out-of-order segment).
+        static DTM_ELEMENTS: &[ElementRef] = &[
+            ElementRef::new(1, "C507", Status::Mandatory, 1),
+            ElementRef::new(2, "2380", Status::Conditional, 1),
+        ];
+        static NAD_ELEMENTS: &[ElementRef] = &[
+            ElementRef::new(1, "3035", Status::Mandatory, 1),
+            ElementRef::new(2, "C082", Status::Mandatory, 1),
+        ];
+        static DTM_DEF: SegmentDefinition =
+            SegmentDefinition::new("DTM", "Date/time/period", DTM_ELEMENTS);
+        static NAD_DEF: SegmentDefinition =
+            SegmentDefinition::new("NAD", "Name and address", NAD_ELEMENTS);
+        let directory = DirectoryValidator::new(
+            "TEST",
+            |tag| match tag {
+                "DTM" => Some(&DTM_DEF),
+                "NAD" => Some(&NAD_DEF),
+                _ => None,
+            },
+            |de, code| !(de == "3035" && code == "XX"),
+            |_, _| None,
+            |tag, element| (tag == "DTM" && element == 0).then_some(3),
+            None,
+        )
+        .with_required_segments(|_| &["UNH", "BGM", "DTM", "FTX", "UNT"]);
+        let segments =
+            parse(b"UNH+1+ORDERS:D:96A:UN'NAD+XX'DTM+137:20240101:102:9'BGM+220'UNT+5+1'");
+        let report = assert_classified(
+            ValidationContext::builder()
+                .with_validator(ValidationLayer::Structure, directory)
+                .build()
+                .validate(&segments),
+        );
+        let code_list = by_code(&report, "E014");
+        assert_eq!(code_list.layer(), Some(ValidationLayer::CodeList));
+        assert_eq!(code_list.kind(), Some(FindingKind::Code));
+        assert_eq!(code_list.segment_position(), Some(2));
+        let missing_element = by_code(&report, "E008");
+        assert_eq!(missing_element.layer(), Some(ValidationLayer::Structure));
+        assert_eq!(missing_element.kind(), Some(FindingKind::Missing));
+        let component_count = by_code(&report, "E013");
+        assert_eq!(component_count.layer(), Some(ValidationLayer::Structure));
+        assert_eq!(component_count.kind(), Some(FindingKind::Count));
+        assert_eq!(component_count.segment_position(), Some(3));
+        let missing_segment = report
+            .iter_issues()
+            .find(|i| i.error_code().is_none() && i.segment_tag() == Some("FTX"))
+            .expect("missing FTX finding");
+        assert_eq!(missing_segment.layer(), Some(ValidationLayer::Structure));
+        assert_eq!(missing_segment.kind(), Some(FindingKind::Missing));
+        let out_of_order = report
+            .iter_issues()
+            .find(|i| i.kind() == Some(FindingKind::Placement) && i.error_code().is_none())
+            .unwrap_or_else(|| panic!("out-of-order finding: {report:#?}"));
+        assert_eq!(out_of_order.segment_tag(), Some("DTM"));
+        assert_eq!(out_of_order.error_code(), None, "kind only, no code");
+        assert_eq!(out_of_order.segment_position(), Some(3));
+
+        // Directory representation checks with the service directory.
+        let service_directory = DirectoryValidator::new(
+            "iso-9735-service",
+            service::lookup,
+            |_, _| true,
+            |_, _| None,
+            |_, _| None,
+            None,
+        );
+        let report = assert_classified(
+            ValidationContext::builder()
+                .with_validator(ValidationLayer::Structure, service_directory)
+                .build()
+                .validate(&parse(b"UNZ+abc+IC1234567890123'")),
+        );
+        assert_eq!(
+            by_code(&report, "E048").kind(),
+            Some(FindingKind::Representation)
+        );
+        assert_eq!(
+            by_code(&report, "E049").kind(),
+            Some(FindingKind::Representation)
+        );
+        assert_eq!(
+            by_code(&report, "E048").layer(),
+            Some(ValidationLayer::Structure)
+        );
+
+        // Profile helpers.
+        let pack = ProfileRulePack::new("PROFILE")
+            .require_segment("FTX", "P-FTX-M")
+            .forbid_segment("DTM", "P-DTM-X")
+            .require_qualifier("BGM", 0, 0, "380", "P-BGM-CODE");
+        let report = assert_classified(
+            ValidationContext::builder()
+                .with_profile_pack(pack)
+                .build()
+                .validate(&parse(
+                    b"UNH+1+ORDERS:D:96A:UN'BGM+220'DTM+137:20240101:102'UNT+4+1'",
+                )),
+        );
+        for (rule, kind, position) in [
+            ("P-FTX-M", FindingKind::Missing, None),
+            ("P-DTM-X", FindingKind::NotPermitted, Some(3)),
+            ("P-BGM-CODE", FindingKind::Code, Some(2)),
+        ] {
+            let issue = report.issues_for_rule_id(rule).next().expect(rule);
+            assert_eq!(issue.layer(), Some(ValidationLayer::Profile), "{rule}");
+            assert_eq!(issue.kind(), Some(kind), "{rule}");
+            assert_eq!(issue.pack(), Some("PROFILE"), "{rule}");
+            assert_eq!(issue.segment_position(), position, "{rule}");
+        }
+    }
+
+    #[test]
+    fn fork_exclusion_notice_has_kind_other_and_no_layer() {
+        struct NotForkable;
+        impl edifact_rs::Validator for NotForkable {
+            fn validate_batch(
+                &self,
+                _segments: &[edifact_rs::Segment<'_>],
+                _report: &mut ValidationReport,
+                _context: &edifact_rs::ValidationRuleContext<'_>,
+            ) {
+            }
+        }
+        let report = ValidationContext::builder()
+            .with_validator(ValidationLayer::Structure, NotForkable)
+            .build()
+            .fork_with_message_ref("1")
+            .validate(&parse(b"UNH+1+ORDERS:D:96A:UN'UNT+2+1'"));
+        let notice = &report.infos()[0];
+        assert_eq!(
+            notice.rule_id(),
+            Some("edifact-rs::fork::excluded-validator")
+        );
+        assert_eq!(notice.kind(), Some(FindingKind::Other));
+        assert_eq!(notice.layer(), None, "static issues are not stamped");
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn reads_legacy_issue_json() {
+        // A compatibility fixture in the legacy serialised form
+        // (`serde_json::to_string_pretty` of an issue with element_index 1 and
+        // segment_occurrence 3): the fields it lacks must default to `None`.
+        let json = include_str!("fixtures/issue_v0_17.json");
+        let issue: ValidationIssue = serde_json::from_str(json).expect("legacy JSON must load");
+        assert_eq!(issue.error_code(), Some("E014"));
+        assert_eq!(issue.element_index(), Some(1));
+        assert_eq!(issue.segment_occurrence(), Some(3));
+        assert_eq!(issue.component_index(), None);
+        assert_eq!(issue.segment_position(), None);
+        assert_eq!(issue.group_path(), None);
+        assert_eq!(issue.layer(), None);
+        assert_eq!(issue.kind(), None);
+        assert_eq!(issue.pack(), None);
+    }
+}

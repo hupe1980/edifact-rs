@@ -89,7 +89,7 @@ so a writer can round-trip the UNA it was handed and `DecimalFloat` has a house
 style to format with.
 
 **The repetition separator depends on the syntax version.** Version 4 introduced
-it and §5.1 makes `*` its default; versions 1–3 have no such service character at
+it and §5.2 makes `*` its default; versions 1–3 have no such service character at
 all, and their UNA carries a space in that position. With no UNA to say
 otherwise, `edifact-rs` reads the version from `UNB` S001 DE 0002 and activates
 `*` only for version 4 — splitting on `*` in a version 3 interchange would
@@ -142,7 +142,7 @@ NAD+BY+4000001000002::9'
 ```
 
 The `::` is not a typo. Component 1 is *omitted*, and its position is held by the
-separator that would have followed it (ISO 9735-1 §8.7.2) — so the agency
+separator that would have followed it (ISO 9735-1 §8.8.3) — so the agency
 qualifier stays at component 2 rather than sliding into component 1.
 
 Element 0 of `NAD` is `BY` — this is the **qualifier**. `edifact-rs` derive macros
@@ -187,7 +187,8 @@ pub struct Segment<'a> {
 ```
 
 - `from_bytes` borrows straight out of the input buffer and yields
-  `Segment<'input>` — no allocation for segment data.
+  `Segment<'input>` — text is borrowed; the element vector is the only
+  allocation ([budget](@/docs/performance.md#allocation-per-segment)).
 - `from_reader` has no buffer to borrow from, so it yields `Segment<'static>`,
   which is aliased as **`OwnedSegment`**.
 
@@ -250,7 +251,7 @@ Every accessor lives on `Segment`, so it is available on both parsing paths:
 
 ### Repeating data elements
 
-ISO 9735-1 §8.6 lets one data element occur several times in a single slot,
+ISO 9735-1 §8.7 lets one data element occur several times in a single slot,
 separated by the repetition separator — UNA position 050, or `*` by default in a
 syntax version 4 interchange:
 

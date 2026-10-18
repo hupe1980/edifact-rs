@@ -635,6 +635,143 @@ fn fuzz_reader_no_panic_and_equivalence() {
 }
 
 #[test]
+fn fuzz_reader_and_slice_agree_on_limit_errors() {
+    // FR: for every input and every `ReaderConfig`, the slice and reader paths
+    // yield the same segments followed by the same limit error — code, limit,
+    // ceiling and byte offset — and a limit error ends both iterators.
+    //
+    // Only inputs on which the two paths already agree without count or byte
+    // budgets are compared: the non-limit divergences between them (for
+    // example a doubled segment terminator, which the reader skips and the
+    // slice tokenizer refuses) are a separate parity question, and must not
+    // make this target fail.
+    use edifact_rs::{
+        EdifactError, ReaderConfig, from_bufread_with_config, from_bytes_with_config,
+    };
+
+    fn outcome<T: std::fmt::Debug>(
+        mut iter: impl Iterator<Item = Result<T, EdifactError>>,
+    ) -> (Vec<String>, Option<EdifactError>) {
+        let mut items = Vec::new();
+        while let Some(item) = iter.next() {
+            match item {
+                Ok(value) => items.push(format!("{value:?}")),
+                Err(error) => {
+                    assert!(iter.next().is_none(), "an item followed {error:?}");
+                    return (items, Some(error));
+                }
+            }
+        }
+        (items, None)
+    }
+
+    fn both(input: &[u8], config: ReaderConfig) -> [(Vec<String>, Option<EdifactError>); 3] {
+        [
+            outcome(from_bytes_with_config(input, config).map(|r| r.map(|s| s.into_owned()))),
+            outcome(from_bufread_with_config(
+                std::io::BufReader::with_capacity(8, input),
+                config,
+            )),
+            outcome(from_bufread_with_config(
+                std::io::BufReader::new(input),
+                config,
+            )),
+        ]
+    }
+
+    check!()
+        .with_type::<(Vec<u8>, u8, u8, u8, u8, u16, u8)>()
+        .cloned()
+        .for_each(
+            |(bytes, segment_bytes, segments, messages, per_message, input_bytes, shape): (
+                Vec<u8>,
+                u8,
+                u8,
+                u8,
+                u8,
+                u16,
+                u8,
+            )| {
+                // Half the cases corrupt a valid interchange (with a BOM,
+                // whitespace and a UNA in some of them) at fuzzed positions.
+                let input = if shape % 2 == 0 {
+                    let mut template = Vec::new();
+                    if shape % 4 == 0 {
+                        template.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+                    }
+                    if shape % 8 < 4 {
+                        template.extend_from_slice(b"UNA:+.? '");
+                    }
+                    template.extend_from_slice(
+                        b"UNB+UNOC:3+S:14+R:14+260101:0900+IC1'\r\n\
+UNH+M1+ORDERS:D:96A:UN'BGM+220+PO?+1+9'DTM+137:20260101:102'UNT+4+M1'\n\
+UNH+M2+ORDERS:D:96A:UN'BGM+220+PO2'UNT+3+M2'UNZ+2+IC1'  \n",
+                    );
+                    for pair in bytes.chunks_exact(2).take(4) {
+                        let at = usize::from(pair[0]) % template.len();
+                        template[at] = pair[1];
+                    }
+                    template
+                } else {
+                    bytes
+                };
+
+                let mut base = ReaderConfig::default();
+                if segment_bytes % 2 == 0 {
+                    base = base.max_segment_bytes(usize::from(segment_bytes / 2) + 1);
+                }
+                let [slice, slow, fast] = both(&input, base);
+                if slice != slow || slice != fast {
+                    return; // a non-limit divergence; not this target's question
+                }
+
+                let mut config = base;
+                if segments % 3 != 0 {
+                    config = config.max_segments(usize::from(segments % 24));
+                }
+                if messages % 3 != 0 {
+                    config = config.max_messages(usize::from(messages % 4));
+                }
+                if per_message % 3 != 0 {
+                    config = config.max_segments_per_message(usize::from(per_message % 8));
+                }
+                if input_bytes % 3 != 0 {
+                    config =
+                        config.max_input_bytes(u64::from(input_bytes) % (input.len() as u64 + 8));
+                }
+                let [slice, slow, fast] = both(&input, config);
+                let head = &input[..input.len().min(64)];
+                assert_eq!(
+                    slice, slow,
+                    "slice vs slow reader for {head:?} under {config:?}"
+                );
+                assert_eq!(
+                    slice, fast,
+                    "slice vs fast reader for {head:?} under {config:?}"
+                );
+
+                // A limit never hides bytes it admitted: the segments before
+                // the limit are exactly those of the unlimited parse.
+                let [unlimited, _, _] = both(&input, base);
+                assert!(
+                    unlimited.0.starts_with(&slice.0),
+                    "a limit changed the segments before it for {head:?}"
+                );
+                if let Some(EdifactError::LimitExceeded {
+                    limit, offset, max, ..
+                }) = &slice.1
+                {
+                    if *limit == "max_input_bytes" {
+                        assert_eq!(*offset as u64, *max, "byte budget offset");
+                    } else {
+                        assert!(*offset < input.len(), "count budget offset in bounds");
+                    }
+                }
+            },
+        );
+}
+
+#[test]
 fn fuzz_from_bytes_no_panic() {
     // `ServiceStringAdvice::from_bytes` must not panic or unwind for any
     // arbitrary byte input.  It may return errors or valid SSAs.
@@ -885,7 +1022,7 @@ fn fuzz_validate_envelope_lenient_no_panic() {
         });
 }
 
-// ── F-030: ProfileRulePack + group validation never panics ────────────────────
+// ── ProfileRulePack + group validation never panics ──────────────────────────
 
 /// Fuzz property: parsing arbitrary bytes and running them through a
 /// `ProfileRulePack` with representative flat and group rules must never panic.
@@ -902,21 +1039,10 @@ fn fuzz_profile_rule_pack_no_panic() {
         group::{GroupDef, group_segments_indexed},
     };
 
+    static SG3: &[GroupDef] = &[GroupDef::new("SG3", "RFF")];
     static FUZZ_SCHEMA: &[GroupDef] = &[
-        GroupDef {
-            name: "SG1",
-            trigger: "BGM",
-            children: &[],
-        },
-        GroupDef {
-            name: "SG2",
-            trigger: "NAD",
-            children: &[GroupDef {
-                name: "SG3",
-                trigger: "RFF",
-                children: &[],
-            }],
-        },
+        GroupDef::new("SG1", "BGM"),
+        GroupDef::with_children("SG2", "NAD", SG3),
     ];
 
     check!()
@@ -943,35 +1069,343 @@ fn fuzz_profile_rule_pack_no_panic() {
         });
 }
 
-/// Fuzz property: group_segments_indexed on arbitrary byte input must never panic.
-#[test]
-fn fuzz_group_segments_indexed_no_panic() {
-    use edifact_rs::group::{GroupDef, group_segments_indexed};
+// ── 005: grouping output contracts ─────────────────────────────────────────────
 
-    static DEEP_SCHEMA: &[GroupDef] = &[GroupDef {
-        name: "G1",
-        trigger: "AAA",
-        children: &[GroupDef {
-            name: "G2",
-            trigger: "BBB",
-            children: &[GroupDef {
-                name: "G3",
-                trigger: "CCC",
-                children: &[],
-            }],
-        }],
-    }];
+#[path = "common/legacy_grouping.rs"]
+mod legacy_grouping;
+
+const GROUP_TAGS: [&str; 5] = ["AAA", "BBB", "CCC", "DDD", "EEE"];
+
+/// A trigger-only schema from fuzz bytes: depth ≤ 3, ≤ 4 children per level,
+/// triggers from a five-tag alphabet, names from four (so same-name siblings
+/// and shared triggers both occur).
+fn legacy_schema(
+    seed: &mut impl Iterator<Item = u8>,
+    depth: usize,
+) -> Vec<legacy_grouping::LegacyDef> {
+    let count = usize::from(seed.next().unwrap_or(0) % 5);
+    (0..count)
+        .map(|_| {
+            let name = format!("G{}", seed.next().unwrap_or(0) % 4);
+            let trigger = GROUP_TAGS[usize::from(seed.next().unwrap_or(0)) % 5].to_owned();
+            let children = if depth < 3 {
+                legacy_schema(seed, depth + 1)
+            } else {
+                Vec::new()
+            };
+            legacy_grouping::LegacyDef {
+                name,
+                trigger,
+                children,
+            }
+        })
+        .collect()
+}
+
+fn owned_open(def: &legacy_grouping::LegacyDef) -> edifact_rs::GroupDef {
+    def.children
+        .iter()
+        .fold(
+            edifact_rs::GroupDef::builder(
+                def.name.as_str(),
+                edifact_rs::SegmentPlace::owned(def.trigger.as_str()),
+            ),
+            |b, child| b.group(owned_open(child)),
+        )
+        .build()
+        .expect("generated schemas are valid")
+}
+
+fn to_legacy(node: &edifact_rs::SegmentGroupIndexed<'_>) -> legacy_grouping::LegacyNode {
+    legacy_grouping::LegacyNode {
+        definition: node.definition.to_owned(),
+        total_span: node.total_span.clone(),
+        children: node.children.iter().map(to_legacy).collect(),
+        occurrence_index: node.occurrence_index,
+    }
+}
+
+/// Every node's direct indices agree with the legacy oracle
+/// (`common/legacy_grouping.rs`).
+fn assert_same_direct(
+    new: &edifact_rs::SegmentGroupIndexed<'_>,
+    old: &legacy_grouping::LegacyNode,
+) {
+    assert!(new.unplaced.is_empty(), "an open group never unplaces");
+    assert_eq!(
+        new.direct_segment_indices().collect::<Vec<_>>(),
+        legacy_grouping::legacy_direct(old)
+    );
+    for (n, o) in new.children.iter().zip(&old.children) {
+        assert_same_direct(n, o);
+    }
+}
+
+/// For trigger-only schemas the engine builds exactly the tree of the legacy
+/// oracle (`common/legacy_grouping.rs`) — names, spans, occurrence indices,
+/// children, direct segments.
+#[test]
+fn fuzz_group_open_matches_legacy_reference() {
+    use edifact_rs::group::{GroupDef, group_segments_indexed};
+    use edifact_rs::{Element, Segment};
+
+    // The const-constructed (static) form, checked on every input as well.
+    static G3: &[GroupDef] = &[GroupDef::new("G3", "CCC")];
+    static G2: &[GroupDef] = &[
+        GroupDef::with_children("G2", "BBB", G3),
+        GroupDef::new("G4", "AAA"),
+    ];
+    static DEEP_SCHEMA: &[GroupDef] = &[
+        GroupDef::with_children("G1", "AAA", G2),
+        GroupDef::new("G5", "BBB"),
+    ];
+    let deep_legacy = {
+        use legacy_grouping::LegacyDef as D;
+        let d = |n: &str, t: &str, c: Vec<D>| D {
+            name: n.into(),
+            trigger: t.into(),
+            children: c,
+        };
+        vec![
+            d(
+                "G1",
+                "AAA",
+                vec![
+                    d("G2", "BBB", vec![d("G3", "CCC", vec![])]),
+                    d("G4", "AAA", vec![]),
+                ],
+            ),
+            d("G5", "BBB", vec![]),
+        ]
+    };
 
     check!()
-        .with_type::<Vec<u8>>()
+        .with_type::<(Vec<u8>, Vec<u8>)>()
         .cloned()
-        .for_each(|input: Vec<u8>| {
-            let Ok(segs) = from_bytes(&input).collect::<Result<Vec<_>, _>>() else {
-                return;
-            };
-            // Must not panic regardless of segment content.
-            let _ = group_segments_indexed(&segs, DEEP_SCHEMA, "ROOT");
+        .for_each(|(schema_seed, tag_seed): (Vec<u8>, Vec<u8>)| {
+            let legacy = legacy_schema(&mut schema_seed.into_iter(), 1);
+            let schema: Vec<GroupDef> = legacy.iter().map(owned_open).collect();
+
+            let tags: Vec<&str> = tag_seed
+                .iter()
+                .take(64)
+                .map(|b| match b % 7 {
+                    5 => "ZZZ",
+                    6 => "UNT",
+                    i => GROUP_TAGS[usize::from(i)],
+                })
+                .collect();
+            let segments: Vec<Segment<'_>> = tags
+                .iter()
+                .map(|t| Segment::new(*t, vec![Element::of(&["x"])]))
+                .collect();
+
+            let new = group_segments_indexed(&segments, &schema, "ROOT");
+            let old = legacy_grouping::legacy_group(&tags, &legacy, "ROOT");
+            assert_eq!(to_legacy(&new), old, "schema {legacy:?}, tags {tags:?}");
+            assert_same_direct(&new, &old);
+
+            let new = group_segments_indexed(&segments, DEEP_SCHEMA, "ROOT");
+            let old = legacy_grouping::legacy_group(&tags, &deep_legacy, "ROOT");
+            assert_eq!(to_legacy(&new), old, "static schema, tags {tags:?}");
+            assert_same_direct(&new, &old);
         });
+}
+
+/// A random ordered/open schema using every discriminator kind and bounds.
+fn ordered_entries(
+    seed: &mut impl Iterator<Item = u8>,
+    depth: usize,
+) -> Vec<edifact_rs::group::Entry> {
+    use edifact_rs::group::{Entry, GroupDef};
+    let count = usize::from(seed.next().unwrap_or(0) % 5);
+    let mut entries = Vec::new();
+    for _ in 0..count {
+        let kind = seed.next().unwrap_or(0);
+        if kind % 3 == 0 && depth < 3 {
+            let trigger = fuzz_place(seed);
+            let mut builder = GroupDef::builder(format!("G{}", kind % 4), trigger);
+            for entry in ordered_entries(seed, depth + 1) {
+                builder = match entry {
+                    Entry::Segment(place) => builder.segment(place),
+                    Entry::Group(group) => builder.group(group),
+                    _ => builder,
+                };
+            }
+            if kind % 2 == 0 {
+                builder = builder.ordered();
+            }
+            if let Some(max) = fuzz_max(seed) {
+                builder = builder.max(max);
+            }
+            entries.push(Entry::Group(
+                builder.build().expect("valid generated group"),
+            ));
+        } else {
+            entries.push(Entry::Segment(fuzz_place(seed)));
+        }
+    }
+    entries
+}
+
+fn fuzz_max(seed: &mut impl Iterator<Item = u8>) -> Option<u32> {
+    match seed.next().unwrap_or(0) % 4 {
+        0 => None,
+        n => Some(u32::from(n)),
+    }
+}
+
+fn fuzz_place(seed: &mut impl Iterator<Item = u8>) -> edifact_rs::SegmentPlace {
+    use edifact_rs::group::{Discriminator, SegmentPlace};
+    let byte = seed.next().unwrap_or(0);
+    let mut place = SegmentPlace::new(GROUP_TAGS[usize::from(byte % 5)]);
+    let code = ["A", "B", "C"][usize::from(byte / 5 % 3)];
+    place = match byte / 15 % 6 {
+        0 => place,
+        1 => place.when(Discriminator::one_of(0, 0, [code])),
+        2 => place.when(Discriminator::one_of(0, 0, [code]).optional()),
+        3 => place.when(Discriminator::one_of(0, 0, [code]).accept_unclaimed()),
+        4 => place.when(Discriminator::not_used(0, 0)),
+        _ => place.when(
+            Discriminator::one_of(0, 1, [code, "D"])
+                .optional()
+                .accept_unclaimed(),
+        ),
+    };
+    match fuzz_max(seed) {
+        Some(max) => place.with_max(max),
+        None => place,
+    }
+}
+
+/// `(definition, span, occurrence, unplaced, children)` of a tree, recursively.
+fn tree_shape(node: &edifact_rs::SegmentGroupIndexed<'_>) -> String {
+    let mut out = format!(
+        "{}#{}{:?}u{:?}[",
+        node.definition, node.occurrence_index, node.total_span, node.unplaced
+    );
+    for child in &node.children {
+        out.push_str(&tree_shape(child));
+    }
+    out.push(']');
+    out
+}
+
+fn assert_tree_invariants(node: &edifact_rs::SegmentGroupIndexed<'_>, owner: &mut [u32]) {
+    let mut last_end = node.total_span.start;
+    for (k, child) in node.children.iter().enumerate() {
+        assert!(
+            child.total_span.start < child.total_span.end,
+            "empty child span"
+        );
+        assert!(
+            child.total_span.start >= last_end,
+            "child spans overlap or are unordered"
+        );
+        if k == 0 {
+            assert!(child.total_span.start >= node.total_span.start);
+        }
+        assert!(
+            child.total_span.end <= node.total_span.end,
+            "child outside its parent"
+        );
+        last_end = child.total_span.end;
+        assert_tree_invariants(child, owner);
+    }
+    assert!(
+        node.unplaced.windows(2).all(|w| w[0] < w[1]),
+        "unplaced sorted"
+    );
+    for i in node
+        .direct_segment_indices()
+        .chain(node.unplaced.iter().copied())
+    {
+        assert!(node.total_span.contains(&i));
+        owner[i] += 1;
+    }
+}
+
+/// With ordered groups and discriminators, every segment
+/// is exactly once a direct segment of one instance or unplaced; child spans
+/// are ordered, disjoint and inside their parent; resolution is deterministic;
+/// every finding carries kind, layer and (for a segment) its span.
+#[test]
+fn fuzz_group_ordered_invariants() {
+    use edifact_rs::group::{Entry, GroupSchema};
+    use edifact_rs::{Element, Segment, ValidationLayer};
+
+    check!()
+        .with_type::<(Vec<u8>, Vec<u8>, bool)>()
+        .cloned()
+        .for_each(
+            |(schema_seed, seg_seed, ordered_root): (Vec<u8>, Vec<u8>, bool)| {
+                let entries = ordered_entries(&mut schema_seed.into_iter(), 1);
+                let schema = if ordered_root {
+                    GroupSchema::ordered("ROOT", entries)
+                } else {
+                    GroupSchema::new(
+                        "ROOT",
+                        entries.into_iter().filter_map(|e| match e {
+                            Entry::Group(g) => Some(g),
+                            _ => None,
+                        }),
+                    )
+                }
+                .expect("generated schemas are valid");
+
+                let segments: Vec<Segment<'_>> = seg_seed
+                    .chunks(2)
+                    .take(64)
+                    .map(|pair| {
+                        let tag = GROUP_TAGS[usize::from(pair[0] % 5)];
+                        let value = ["", "A", "B", "C", "D"][usize::from(pair[0] / 5 % 5)];
+                        let second =
+                            ["", "A", "D"][usize::from(pair.get(1).copied().unwrap_or(0) % 3)];
+                        Segment::new(tag, vec![Element::of(&[value, second])])
+                    })
+                    .collect();
+
+                let resolution = schema.resolve(&segments);
+                let tree = resolution.tree();
+                assert_eq!(tree.total_span, 0..segments.len());
+
+                let mut owner = vec![0_u32; segments.len()];
+                assert_tree_invariants(tree, &mut owner);
+                assert!(
+                    owner.iter().all(|&n| n == 1),
+                    "every segment exactly once direct or unplaced: {owner:?}"
+                );
+
+                let mut on_nodes: Vec<usize> = tree
+                    .descendants()
+                    .flat_map(|n| n.unplaced.iter().copied())
+                    .collect();
+                on_nodes.sort_unstable();
+                let listed: Vec<usize> = resolution.unplaced().iter().map(|u| u.index).collect();
+                assert_eq!(on_nodes, listed);
+                for u in resolution.unplaced() {
+                    assert!(resolution.placement(u.index).is_none());
+                }
+
+                // Every non-root instance starts with a segment its trigger matches.
+                for node in tree.descendants().skip(1) {
+                    let def = node.def.expect("non-root instances name their group");
+                    assert_eq!(segments[node.total_span.start].tag(), def.trigger_tag());
+                }
+
+                let again = schema.resolve(&segments);
+                assert_eq!(tree_shape(tree), tree_shape(again.tree()), "deterministic");
+                assert_eq!(resolution.unplaced(), again.unplaced());
+
+                for issue in resolution.findings(&segments) {
+                    assert!(issue.kind().is_some());
+                    assert_eq!(issue.layer(), Some(ValidationLayer::Structure));
+                    if issue.error_code() != Some("E015") {
+                        assert!(issue.span().is_some(), "{issue:?}");
+                    }
+                }
+            },
+        );
 }
 
 /// parse → write → reparse must preserve ISO 9735-4 repetitions exactly.
@@ -1034,4 +1468,298 @@ fn fuzz_repetition_round_trip_is_stable() {
                 assert_eq!(actual, expected.as_str(), "value changed at repetition {i}");
             }
         });
+}
+
+#[test]
+fn fuzz_recovering_scan_matches_strict() {
+    // The recovering scan drives the strict parser and resumes after a fault,
+    // so on the bytes the strict parser reads it must agree with it exactly:
+    //
+    // C1  accepted input → the same segments, no fault;
+    // C2  refused input  → the same segments up to the error, then a fault
+    //                      carrying that error (offsets included);
+    // C3  bounded        → at most `max_faults + 1` faults, at most
+    //                      `max_segments + 1` items, nothing past
+    //                      `max_input_bytes` except the limit fault itself;
+    // C4  a terminal fault is the last item.
+    //
+    // C1/C2 run with and without `max_input_bytes`: both paths count every
+    // consumed byte against it. C3 runs with it in every case.
+    use edifact_rs::recover::Scanned;
+    use edifact_rs::{
+        EdifactError, ReaderConfig, RecoveryConfig, from_bytes_with_config, scan_recovering,
+    };
+
+    check!()
+        .with_type::<(Vec<u8>, u16, u8, u8, u8, u16)>()
+        .cloned()
+        .for_each(
+            |(bytes, segment_bytes, segments, messages, faults, input_bytes): (
+                Vec<u8>,
+                u16,
+                u8,
+                u8,
+                u8,
+                u16,
+            )| {
+                // Half the cases corrupt a valid interchange at fuzzed positions,
+                // so faults land between real segments rather than only in
+                // random garbage the strict parser refuses at byte 0.
+                let input = if segments % 2 == 0 {
+                    let mut template = b"UNB+UNOC:3+S:14+R:14+260101:0900+IC1'\
+UNH+M1+ORDERS:D:96A:UN'BGM+220+PO?+1+9'DTM+137:20260101:102'UNT+4+M1'\
+UNH+M2+ORDERS:D:96A:UN'BGM+220+PO2'UNT+3+M2'UNZ+2+IC1'"
+                        .to_vec();
+                    for pair in bytes.chunks_exact(2).take(6) {
+                        let at = usize::from(pair[0]) % template.len();
+                        template[at] = pair[1];
+                    }
+                    template
+                } else {
+                    bytes
+                };
+                let mut reader = ReaderConfig::default().max_segment_bytes(usize::from(segment_bytes % 512) + 1);
+                if segments % 3 != 0 {
+                    reader = reader.max_segments(usize::from(segments % 32));
+                }
+                if messages % 3 != 0 {
+                    reader = reader.max_messages(usize::from(messages % 8));
+                }
+                if faults % 4 == 1 {
+                    reader = reader.max_segments_per_message(usize::from(faults % 8));
+                }
+                if input_bytes % 3 == 1 {
+                    reader = reader.max_input_bytes(u64::from(input_bytes % 1024));
+                }
+                let config = RecoveryConfig::new()
+                    .reader(reader)
+                    .max_faults(usize::from(faults % 16));
+
+                // ── C1 / C2 ──────────────────────────────────────────────────
+                let strict: Vec<_> = from_bytes_with_config(&input, reader).collect();
+                let items: Vec<Scanned<'_>> = scan_recovering(&input, &config).collect();
+                let accepted = strict.iter().take_while(|r| r.is_ok()).count();
+                for (index, result) in strict.iter().take(accepted).enumerate() {
+                    let segment = result.as_ref().expect("prefix is Ok");
+                    assert_eq!(items[index].as_segment(), Some(segment), "C1/C2 item {index}");
+                }
+                match strict.get(accepted) {
+                    None => assert_eq!(items.len(), accepted, "C1: accepted input has no fault"),
+                    Some(Err(error)) => {
+                        let fault = items[accepted]
+                            .as_fault()
+                            .expect("C2: the strict error is a fault");
+                        let budget_boundary = matches!(
+                            fault.error(),
+                            EdifactError::LimitExceeded { limit, .. }
+                                if (*limit == "max_segments" && Some(accepted) == reader.max_segments)
+                                    || *limit == "max_messages"
+                                    || *limit == "max_segments_per_message"
+                                    || (*limit == "max_faults" && config.fault_budget() == 0)
+                        );
+                        assert!(
+                            fault.error() == error || budget_boundary,
+                            "C2: strict {error:?}, scan {:?}",
+                            fault.error()
+                        );
+                    }
+                    Some(Ok(_)) => unreachable!("take_while stopped at an error"),
+                }
+                assert_bounded(&input, &items, &config);
+
+                // ── C3 with a byte budget ───────────────────────────────────
+                let config = config.reader(reader.max_input_bytes(u64::from(input_bytes % 1024)));
+                let items: Vec<Scanned<'_>> = scan_recovering(&input, &config).collect();
+                assert_bounded(&input, &items, &config);
+            },
+        );
+
+    fn assert_bounded(input: &[u8], items: &[Scanned<'_>], config: &RecoveryConfig) {
+        let reader = config.reader_config();
+        let faults: Vec<_> = items.iter().filter_map(Scanned::as_fault).collect();
+        assert!(
+            faults.len() <= config.fault_budget() + 1,
+            "C3: fault budget"
+        );
+        if let Some(max) = reader.max_segments {
+            assert!(items.len() <= max + 1, "C3: segment budget");
+        }
+        for (index, item) in items.iter().enumerate() {
+            let span = item.span();
+            assert!(
+                span.start <= span.end && span.end <= input.len(),
+                "span in bounds"
+            );
+            let is_limit = item
+                .as_fault()
+                .is_some_and(|f| matches!(f.error(), EdifactError::LimitExceeded { .. }));
+            if let (Some(max), false) = (reader.max_input_bytes, is_limit) {
+                assert!(
+                    span.end as u64 <= max,
+                    "C3: item {index} past max_input_bytes"
+                );
+            }
+            if let Some(fault) = item.as_fault() {
+                assert_eq!(fault.ordinal() as usize, index, "ordinal");
+                if fault.is_terminal() {
+                    assert_eq!(index + 1, items.len(), "C4: terminal fault is last");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fuzz_contrl_options_reparse() {
+    // Any subject × any options: building a CONTRL either fails, or yields a
+    // message that
+    //
+    // K3  carries only DE 0083 codes the action policy permits (UCI, UCF, UCM);
+    // K4  reparses and, wrapped in its own interchange, passes
+    //     `validate_envelope` — including the UNT count it computes itself.
+    //
+    // Both constructors that take options from a subject are exercised: the
+    // validation path (when the corrupted subject still parses) and the
+    // recovering path (always).
+    //
+    // The wrapper's `validate_envelope` half of K4 needs a subject whose UNB
+    // sender and recipient are non-empty — the precondition `from_recovered`
+    // enforces. The lenient envelope also yields an interchange with an empty
+    // party, and `to_interchange_bytes` then writes a reply UNB without S002 or
+    // S003; that is a property of the wrapper, unchanged by the options.
+    use edifact_rs::contrl::{
+        Action, ActionPolicy, Contrl, ContrlIdentifier, ContrlOptions, RejectionScope,
+        ReportingLevel,
+    };
+    use edifact_rs::{
+        RecoveredInterchange, RecoveryConfig, ValidationContext, validate_envelope,
+        validate_envelope_lenient,
+    };
+
+    fn actions(bits: u8) -> Vec<Action> {
+        [Action::Rejected, Action::Acknowledged, Action::Received]
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| bits & (1 << i) != 0)
+            .map(|(_, a)| a)
+            .collect()
+    }
+
+    fn action_of(code: &str) -> Action {
+        match code {
+            "4" => Action::Rejected,
+            "7" => Action::Acknowledged,
+            "8" => Action::Received,
+            other => panic!("DE 0083 {other:?} is not an action code"),
+        }
+    }
+
+    fn check_contrl(contrl: &Contrl, policy: &ActionPolicy, addressed: bool) {
+        let contrl = contrl.clone().with_message_reference("ACK1");
+        let bytes = contrl.to_bytes().expect("K4: a built CONTRL renders");
+        let segments: Vec<_> = from_bytes(&bytes)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("K4: a built CONTRL reparses");
+        for segment in &segments {
+            let (level, position) = match segment.tag() {
+                "UCI" => (ReportingLevel::Interchange, 3),
+                "UCF" => (ReportingLevel::Group, 3),
+                "UCM" => (ReportingLevel::Message, 2),
+                _ => continue,
+            };
+            let code = segment.component_str(position, 0).expect("DE 0083 present");
+            assert!(
+                policy.permits(level, action_of(code)),
+                "K3: {} carries {code}, which the policy forbids",
+                segment.tag()
+            );
+        }
+        let wrapped = contrl
+            .to_interchange_bytes("UNOC", "3", "261001", "0800", "R1")
+            .expect("K4: the wrapper renders");
+        let wrapped: Vec<_> = from_bytes(&wrapped)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("K4: the wrapped CONTRL reparses");
+        if addressed {
+            validate_envelope(&wrapped).expect("K4: the wrapped CONTRL passes validate_envelope");
+        }
+    }
+
+    /// Corruptions, grouped, identifier choice, UCI/UCF/UCM sets, scope, warnings.
+    type Case = (Vec<(u16, u8)>, bool, u8, [u8; 3], bool, bool);
+
+    check!().with_type::<Case>().cloned().for_each(
+        |(edits, grouped, identifier, sets, whole, warnings): Case| {
+            let mut input = if grouped {
+                b"UNB+UNOC:3+S:14+R:14+260101:0900+IC1'\
+UNG+ORDERS+SND+RCV+260101:0900+G1+UN+D:96A'\
+UNH+M1+ORDERS:D:96A:UN:EX1'BGM+220+PO1'FTX+   'UNT+4+M1'\
+UNH+M2+ORDERS:D:96A:UN'BGM+220+PO2'UNT+3+M2'UNE+2+G1'UNZ+1+IC1'"
+                    .to_vec()
+            } else {
+                b"UNB+UNOC:4+S:14+R:14+20260101:0900+IC1'\
+UNH+M1+ORDERS:D:96A:UN:EX1'BGM+220+PO1'FTX+   'UNT+4+M1'\
+UNH+M2+ORDERS:D:96A:UN'BGM+220+PO2'UNT+3+M2'UNZ+2+IC1'"
+                    .to_vec()
+            };
+            for (at, byte) in edits.iter().take(6) {
+                let at = usize::from(*at) % input.len();
+                input[at] = *byte;
+            }
+
+            let mut options = ContrlOptions::new()
+                .actions(
+                    ActionPolicy::new()
+                        .permit(ReportingLevel::Interchange, &actions(sets[0]))
+                        .permit(ReportingLevel::Group, &actions(sets[1]))
+                        .permit(ReportingLevel::Message, &actions(sets[2])),
+                )
+                .rejection(if whole {
+                    RejectionScope::Interchange
+                } else {
+                    RejectionScope::PerLevel
+                })
+                .report_warnings(warnings);
+            match identifier % 3 {
+                0 => {}
+                1 => options = options.identifier(ContrlIdentifier::syntax_4()),
+                _ => {
+                    options = options.identifier(
+                        ContrlIdentifier::syntax_3()
+                            .with_association("EX1")
+                            .expect("an..6"),
+                    );
+                }
+            }
+            let policy = ActionPolicy::new()
+                .permit(ReportingLevel::Interchange, &actions(sets[0]))
+                .permit(ReportingLevel::Group, &actions(sets[1]))
+                .permit(ReportingLevel::Message, &actions(sets[2]));
+
+            let recovered = RecoveredInterchange::scan(&input, &RecoveryConfig::default());
+            if let Ok(contrl) = Contrl::from_recovered(&recovered, &[], &options) {
+                check_contrl(&contrl, &policy, true);
+            }
+
+            let Ok(segments) = from_bytes(&input).collect::<Result<Vec<_>, _>>() else {
+                return;
+            };
+            let Some(validated) = validate_envelope_lenient(&segments).interchange else {
+                return;
+            };
+            let report = ValidationContext::builder()
+                .with_envelope_validation()
+                .with_syntax_validation()
+                .build()
+                .validate(&segments);
+            let addressed = !validated.interchange.sender_id.is_empty()
+                && !validated.interchange.recipient_id.is_empty();
+            if let Ok(contrl) = Contrl::from_report_with(&validated, &segments, &report, &options) {
+                check_contrl(&contrl, &policy, addressed);
+            }
+            if let Ok(contrl) = Contrl::receipt_with(&validated.interchange, &options) {
+                check_contrl(&contrl, &policy, addressed);
+            }
+        },
+    );
 }

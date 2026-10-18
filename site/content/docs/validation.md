@@ -15,9 +15,11 @@ structural, code-list, and profile-level checks — each pluggable independently
 |---|---|
 | `Validator` | Trait — implement to create a custom validator |
 | `ValidationContext` | Orchestrates multiple validators across layers |
-| `ValidationLayer` | Enum — `Structure`, `CodeList`, `Profile` |
+| `ValidationLayer` | Enum — `Envelope`, `Syntax`, `Charset`, `Structure`, `CodeList`, `Profile`; registration key and an issue's producing stage |
 | `ValidationReport` | Aggregated result — `errors`, `warnings`, `infos` |
-| `ValidationIssue` | A single finding — severity, message, rule ID, offsets |
+| `ValidationIssue` | A single finding — severity, message, rule ID, kind, layer, pack, location |
+| `FindingKind` | What kind of fault — `Missing`, `NotPermitted`, `Code`, `Representation`, `Count`, `Placement`, … |
+| `GroupPath` / `GroupStep` | Occurrence path to the group instance holding a finding, e.g. `SG4[0]/SG8[1]` |
 | `ValidationSeverity` | `Critical`, `Error`, `Warning`, `Info` |
 | `ProfileRulePack` | Composable bundle of closure-based profile rules |
 | `validate_each` | Helper — run a per-segment function over a slice |
@@ -176,8 +178,8 @@ the *group* count rather than the message count — which is what Annex C.3.4
 requires once groups are in play.
 
 Two structural rules have no count to give them away and so are worth calling
-out. An interchange with no message and no group (§7.1) raises `E042`, and a
-message with nothing between its `UNH` and `UNT` (§7.3) raises `E043`. In both
+out. An interchange with no message and no group (§7.2) raises `E042`, and a
+message with nothing between its `UNH` and `UNT` (§7.4) raises `E043`. In both
 cases the declared counts agree with the content, so every other check passes.
 
 ### Syntax validation
@@ -187,9 +189,9 @@ partner in every directory, so it needs no configuration:
 
 | Rule | Source | Code |
 |---|---|---|
-| A segment carries at least one data element besides its tag | §7.5, §8.5 | `E046` |
-| No data element value is made only of spaces | §9.3 | `E045` (warning) |
-| No segment or composite ends in a separator with nothing after it | §8.7.1, §8.7.2 | `E051` (warning) |
+| A segment carries at least one data element besides its tag | §7.6, §8.6 | `E046` |
+| No data element value is made only of spaces | §9.4 | `E045` (warning) |
+| No segment or composite ends in a separator with nothing after it | §8.8.2, §8.8.3 | `E051` (warning) |
 
 All three are artefacts a hand-rolled writer produces by accident — an `ABC'`
 where a conditional segment should have been dropped entirely, a fixed-width
@@ -198,8 +200,8 @@ separator before checking whether another value follows. None trips a count
 check, and all are rejected downstream.
 
 The trailing-separator rule is narrower than it first looks. An **interior**
-omission must *keep* its separator (§8.7.1 Figure 1), so `BGM+220++9'` is correct
-and is not reported; and `BGM+'` is how §8.4 spells a mandatory segment with no
+omission must *keep* its separator (§8.8.2), so `BGM+220++9'` is correct
+and is not reported; and `BGM+'` is how §8.5 spells a mandatory segment with no
 data to carry. Only a separator with nothing after it at all is a fault.
 
 ```rust
@@ -217,8 +219,13 @@ assert_eq!(report.warnings()[0].error_code(), Some("E045")); // FTX value is onl
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
+Syntax findings carry `layer() == Some(ValidationLayer::Syntax)`; charset findings
+from `with_charset_validation()` carry `ValidationLayer::Charset`. Both stages are
+switched by the envelope switch and see the whole slice, like the envelope
+validator — they are separate layers only so an issue says which stage found it.
+
 Note that `DTM+'` is *not* `E046`: an empty data element is present, which is how
-EDIFACT spells a mandatory segment that has no data to carry (§8.4).
+EDIFACT spells a mandatory segment that has no data to carry (§8.5).
 
 ### Per-message reference stamping
 
@@ -344,21 +351,99 @@ let issue = ValidationIssue::new(
 |---|---|---|
 | `.with_rule_id(id)` | `&str` | Stable ID for filtering and mapping |
 | `.with_segment(tag)` | `&str` | Segment tag where the issue was found |
-| `.with_element_index(n)` | `usize` | Element index (0-based) |
+| `.with_element_index(n)` | `usize` | Element index (0-based; CONTRL DE 0098 is `n + 2`); stored as `u16`, a larger value leaves the field `None` |
+| `.with_component_index(n)` | `usize` | Component index (0-based; CONTRL DE 0104 is `n + 1`); stored as `u16`, a larger value leaves the field `None` |
 | `.with_error_code(code)` | `impl Into<Cow<'static, str>>` | Stable error code string (e.g. `"E007"`); a `&'static str` costs no allocation, and the field round-trips through `serde` |
 | `.with_suggestion(text)` | `&str` | Human-friendly remediation hint |
 | `.with_span(span)` | `Span` | Byte range of the issue in the input — the only positional field; read `issue.span.map(\|s\| s.start)` or `issue.start_offset()` for the start alone |
-| `.with_segment_occurrence(n)` | `u16` | Zero-based occurrence among segments with the same tag |
-| `.with_segment_group(name)` | `impl Into<String>` | Name of the segment group instance (e.g. `"SG5"`) — set automatically by group-scoped rules |
+| `.with_segment_occurrence(n)` | `usize` | Zero-based occurrence among segments with the same tag; stored as `u32` |
+| `.with_segment_position(n)` | `usize` | One-based position of the segment in its message, `UNH` = 1 (CONTRL DE 0096); stored as `u32` |
+| `.with_segment_group(name)` | `impl Into<Arc<str>>` | Name of the innermost segment group (e.g. `"SG5"`) — set automatically by group-scoped rules |
+| `.with_group_path(path)` | `GroupPath` | Occurrence path to the group instance (e.g. `SG4[0]/SG8[1]`) — set automatically by group-scoped rules; also fills an empty `segment_group` |
+| `.with_layer(layer)` | `ValidationLayer` | Stage that produced the issue — filled automatically from the registration layer when left unset |
+| `.with_kind(kind)` | `FindingKind` | What kind of fault this is |
+| `.with_pack(name)` | `impl Into<Arc<str>>` | Pack that produced the issue — set automatically by `ProfileRulePack` |
 | `.with_message_ref(r)` | `impl Into<String>` | `UNH` reference (DE 0062) — usually set automatically via `ValidationContextBuilder::with_message_ref` |
 | `.with_context_entry(k, v)` | `(impl Into<String>, impl Into<String>)` | Insert a single key-value pair into the domain metadata map |
 | `.with_context_entries(iter)` | `impl IntoIterator<Item=(K,V)>` | Bulk-insert domain metadata; duplicate keys overwrite |
 
-### Rule ID prefix convention
+Positional builders take the `usize` you already hold and never clamp: a value
+that does not fit the field leaves it `None`, because a clamped index points at a
+plausible but wrong segment. `segment_occurrence` and `segment_position` are
+different coordinates — the 70 000th `QTY` of an `MSCONS` is occurrence `69_999`,
+and if it follows `UNH`, `BGM` and `LIN` its position is `70_003`:
 
-`rule_id` doubles as a lightweight metadata carrier. Use a structured,
-namespaced prefix so downstream code can extract domain identifiers without
-parsing the human-readable message:
+```rust
+use edifact_rs::{FindingKind, ValidationIssue, ValidationLayer, ValidationSeverity};
+
+let index_in_message: usize = 70_002; // zero-based index into a slice starting at UNH
+let issue = ValidationIssue::new(ValidationSeverity::Error, "QTY qualifier must be 220")
+    .with_segment("QTY")
+    .with_segment_occurrence(69_999)
+    .with_segment_position(index_in_message + 1)
+    .with_element_index(0)
+    .with_component_index(0);
+assert_eq!(issue.segment_position(), Some(70_003));
+assert_eq!(issue.with_element_index(70_000).element_index(), None); // not 65_535
+```
+
+### Classifying findings: layer, kind and pack
+
+Every issue says what kind of fault it is, which stage found it and, for profile
+packs, which pack — as structured fields, so routing never parses a rule id:
+
+| Field | Type | Filled by |
+|---|---|---|
+| `kind()` | `Option<FindingKind>` | Every built-in validator; errors converted to issues use `FindingKind::for_error`. A caller's issue without a kind stays `None`. |
+| `layer()` | `Option<ValidationLayer>` | Built-in validators set their own; `ValidationContext` fills the registration layer into every issue left without one. Explicit wins. |
+| `pack()` | `Option<&str>` | `ProfileRulePack` stamps its name on every issue it emits without one. |
+| `group_path()` | `Option<&GroupPath>` | The group pass of `validate_grouped`, for issues from group rules. |
+
+The built-in classification:
+
+| Validator | Layer | Kind |
+|---|---|---|
+| `EnvelopeValidator` | `Envelope` | `FindingKind::for_error` (`ControlMismatch`, `Envelope`, `Duplicate`, …) |
+| `SyntaxValidator` | `Syntax` | `Representation` (`E045`), `Syntax` (`E046`, `E051`) |
+| `CharsetValidator` | `Charset` | `Charset` |
+| `DirectoryValidator` | `CodeList` for `E014`, `Structure` otherwise | `FindingKind::for_error`; missing required segment → `Missing`, out-of-order segment → `Placement` |
+| `ProfileRulePack` helpers | `Profile` (from the context) | `require_segment*` → `Missing`, `forbid_segment*` → `NotPermitted`, `require_qualifier*` → `Code` |
+
+```rust
+use edifact_rs::{FindingKind, ProfileRulePack, ValidationContext, ValidationLayer, from_bytes};
+
+let segs: Vec<_> = from_bytes(b"UNH+1+ORDERS:D:96A:UN'BGM+220'DTM+137:20240101:102'UNT+4+1'")
+    .collect::<Result<_, _>>()?;
+let report = ValidationContext::builder()
+    .with_syntax_validation()
+    .with_profile_pack(ProfileRulePack::new("AHB-ORDERS").forbid_segment("DTM", "AHB-DTM-X"))
+    .build()
+    .validate(&segs);
+
+let issue = &report.errors()[0];
+assert_eq!(issue.layer(), Some(ValidationLayer::Profile));
+assert_eq!(issue.kind(), Some(FindingKind::NotPermitted));
+assert_eq!(issue.pack(), Some("AHB-ORDERS"));
+assert_eq!(issue.segment_position(), Some(3)); // UNH = 1
+// Syntax, envelope and charset findings answer with a CONTRL; the rest do not.
+let for_contrl = report.iter_issues().filter(|i| {
+    matches!(
+        i.layer(),
+        Some(ValidationLayer::Envelope | ValidationLayer::Syntax | ValidationLayer::Charset)
+    )
+});
+assert_eq!(for_contrl.count(), 0);
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+With the `serde` feature, optional fields serialise only when set and read back
+as `None` when absent; an unknown kind reads as `FindingKind::Other`.
+
+### Rule ID naming convention
+
+`rule_id` is an identifier: it names a rule so a report can be filtered and a
+rule overridden. Layer, kind and pack have their own fields (above). A
+structured, namespaced id still helps people reading a report:
 
 ```text
 "<PACK>-<SCOPE>-<TAG>-<STATUS>"
@@ -369,7 +454,8 @@ parsing the human-readable message:
 ```
 
 Example: `"PROFILE-4711-BGM-M"` — pack `PROFILE`, scope `4711`, segment `BGM`,
-mandatory (`M`). Recover the scope:
+mandatory (`M`). Domain detail that has no structured field, such as the scope,
+can be recovered with a split:
 
 ```rust
 let rule_id = "PROFILE-4711-BGM-M";
@@ -516,7 +602,7 @@ let segs: Vec<_> = from_bytes(
       UNT+5+1'"
 ).collect::<Result<_, _>>()?;
 
-// Build the indexed group tree (O(n × schema_depth), no segment clones):
+// Build the indexed group tree (O(n × reachable places), no segment clones):
 let tree = group_segments_indexed(&segs, SCHEMA, "ROOT");
 
 let pack = ProfileRulePack::new("ORDERS")
@@ -531,25 +617,36 @@ let ctx = ValidationContext::builder()
 // `validate_grouped` runs the flat pass, then the group pass:
 let report = ctx.validate_grouped(&tree, &segs);
 println!("{} error(s)", report.errors().len());
+
+// The second SG5 (LIN+2) has no QTY; the issue says which occurrence.
+let issue = &report.errors()[0];
+assert_eq!(issue.segment_group(), Some("SG5"));
+assert_eq!(issue.group_path().map(|p| p.to_string()).as_deref(), Some("SG5[1]"));
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
+
+Group-rule issues carry a `group_path` (see
+[Profile Packs](@/docs/profile-packs.md)); `render_deterministic` prints it with
+the segment tag as `[path=SG4[0]/SG8[1]/RFF]`.
 
 Segments read from a reader go into the same call unchanged, and `.result()`
 converts the report exactly as it does for the flat pass.
 
 ### Schemas built at runtime
 
-`GroupDef<'a>` borrows its names and its child slice, so a `static` table is
-`GroupDef<'static>` and costs nothing, while a schema read out of a MIG at
-startup borrows from storage you own. Both go through the same function:
+`GroupDef::new` and `GroupDef::with_children` are `const` over `'static` data,
+so a `static` table costs nothing. A schema read out of a MIG at startup goes
+through `GroupDef::builder`, which owns its strings (shared behind `Arc`, so
+cloning a group is O(1)) — no borrowed arena, no `Box::leak`:
 
 ```rust
-use edifact_rs::group::{GroupDef, group_segments_indexed};
+use edifact_rs::group::{GroupDef, SegmentPlace, group_segments_indexed};
 use edifact_rs::from_bytes;
 
 // Stand-in for names read out of a MIG file at startup.
 let names: Vec<String> = vec!["SG5".into(), "LIN".into()];
-let schema = vec![GroupDef::new(&names[0], &names[1])];
+let schema = vec![GroupDef::builder(names[0].as_str(), SegmentPlace::owned(names[1].as_str())).build()?];
+drop(names); // the schema owns what it needs
 
 let segs: Vec<_> = from_bytes(b"UNH+1+ORDERS:D:96A:UN'LIN+1'UNT+3+1'")
     .collect::<Result<_, _>>()?;
@@ -559,14 +656,150 @@ assert_eq!(tree.children[0].definition, "SG5");
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
+A nested child slice in a `static` must be a named `static` of its own
+(`static SG6: &[GroupDef] = …` above): written inline as
+`with_children("SG5", "LIN", &[GroupDef::new(..)])` it fails with `E0493`,
+because `GroupDef` can own shared data.
+
+### Open and ordered groups
+
+A group that declares only its trigger and child groups is **open**: every
+segment that triggers nothing is a direct segment of it. That is all the
+`const` constructors build.
+
+A group built with `GroupDef::builder` that declares member segments with
+`.segment(..)` — or is marked `.ordered()` — is **ordered**, the way an
+implementation guide (MIG) lists it: trigger first, then member places and
+child groups in guide order. Its entries are walked front to back. Each
+`SegmentPlace` and group can carry:
+
+- `min` / `max` occurrences per parent instance (default 0 / unbounded);
+- an `id` (e.g. the MIG segment number), returned with placements and findings;
+- `Discriminator`s on a segment place, all of which must match:
+  `one_of(element, component, codes)` (strict: an absent value or another code
+  does not match), `.optional()` (an absent value cannot rule the place out),
+  `.accept_unclaimed()` (a code that no place of the same tag admits there still
+  matches — a code fault, not a misplacement), and `not_used(element, component)`
+  (a value there rules the place out). Positions are zero-based and read the
+  element's first repetition.
+
+A segment that fits no entry of an ordered group is **unplaced**: skipped,
+recorded on the instance it was skipped in (`SegmentGroupIndexed::unplaced`,
+excluded from `direct_segment_indices`), with a reason — `OutOfOrder` (it fits a
+place already passed), `NotHere` (it fits a place elsewhere in the schema) or
+`Unknown`. It is never attached to a wrong group.
+
+Shared tags are where this matters. With `SG4(IDE){SG6(RFF), SG8(SEQ)}` all
+open, the `RFF+Z19` that belongs to `SG8` opens a second `SG6` — nothing says
+otherwise, and open schemas build that tree. Declaring `SG8`'s members
+fixes it:
+
+```rust
+use edifact_rs::group::{GroupDef, SegmentPlace, group_segments_indexed};
+
+let sg8 = GroupDef::builder("SG8", SegmentPlace::new("SEQ"))
+    .segment(SegmentPlace::new("RFF"))
+    .segment(SegmentPlace::new("CCI"))
+    .build()?;
+let schema = [GroupDef::builder("SG4", SegmentPlace::new("IDE"))
+    .group(GroupDef::new("SG6", "RFF"))
+    .group(sg8)
+    .build()?];
+
+let segments: Vec<_> = edifact_rs::from_bytes(b"IDE+24+X'RFF+Z13:1'SEQ+Z01'RFF+Z19:ABC'CCI+Z30'")
+    .collect::<Result<_, _>>()?;
+let tree = group_segments_indexed(&segments, &schema, "ROOT");
+let sg4 = &tree.children[0];
+assert_eq!(
+    sg4.children.iter().map(|g| (g.definition, g.total_span.clone())).collect::<Vec<_>>(),
+    [("SG6", 1..2), ("SG8", 2..5)],
+);
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+### Placements and findings: `GroupSchema`
+
+`GroupSchema::new(root, groups)` (open root) or `GroupSchema::ordered(root,
+entries)` (ordered root — declare `UNT` as its last entry, or it is unplaced)
+checks a schema once — tags are three upper-case letters, `min <= max`,
+`max >= 1`, `one_of` lists a code, at most 64 nested groups; otherwise
+`E071 InvalidGroupSchema` — and `resolve(&segments)` returns a
+`GroupResolution`: the tree, `placement(i)` (the place, group and occurrence of
+segment `i`), `unplaced()`, `group_path(i)`, and `findings(&segments)`:
+
+| Finding | Code | Kind |
+|---|---|---|
+| unplaced segment | `E068 SegmentNotPlaced` | `placement` |
+| a place beyond its `max` | `E069 TooManySegmentOccurrences` | `count` |
+| a group beyond its `max` | `E070 TooManyGroupOccurrences` | `count` |
+| a place or group below its `min` | `E015 MissingSegment` | `missing` |
+
+Every finding has layer `structure`, the `group_path` of its instance, the
+segment's span and — when the slice starts at `UNH` — its `segment_position`; a
+place `id` is in the context under `place`. `PlacementValidator` runs the same
+resolution inside a `ValidationContext`:
+
+```rust
+use std::sync::Arc;
+use edifact_rs::group::{Discriminator, Entry, GroupDef, GroupSchema, SegmentPlace};
+use edifact_rs::{FindingKind, PlacementValidator, ValidationContext, ValidationLayer};
+
+let malo = |code: &str, id: &str| {
+    GroupDef::builder("SG5", SegmentPlace::new("LOC").with_id(id).when(Discriminator::one_of(0, 0, [code])))
+        .ordered()
+        .build()
+};
+let sg4 = GroupDef::builder("SG4", SegmentPlace::new("IDE"))
+    .group(malo("Z16", "00047")?)
+    .group(malo("Z22", "00048")?)
+    .ordered()
+    .build()?;
+let schema = GroupSchema::ordered(
+    "UTILMD",
+    [
+        Entry::Segment(SegmentPlace::new("UNH").with_min(1).with_max(1)),
+        Entry::Group(sg4),
+        Entry::Segment(SegmentPlace::new("UNT").with_min(1).with_max(1)),
+    ],
+)?;
+
+let segments: Vec<_> = edifact_rs::from_bytes(
+    b"UNH+1+UTILMD:D:11A:UN'IDE+24+V1'LOC+Z22+1'LOC+Z16+2'UNT+5+1'",
+)
+.collect::<Result<_, _>>()?;
+
+let resolution = schema.resolve(&segments);
+assert_eq!(resolution.placement(2).and_then(|p| p.place.id()), Some("00048"));
+
+let report = ValidationContext::builder()
+    .with_validator(ValidationLayer::Structure, PlacementValidator::new(Arc::new(schema)))
+    .build()
+    .validate(&segments);
+// LOC+Z16 after LOC+Z22 is out of guide order.
+let issue = &report.errors()[0];
+assert_eq!(issue.kind(), Some(FindingKind::Placement));
+assert_eq!(issue.error_code(), Some("E068"));
+assert_eq!(issue.segment_position(), Some(4));
+# Ok::<(), edifact_rs::EdifactError>(())
+```
+
+Resolution is `O(n × reachable places)` time and `O(n)` extra memory, with no
+recursion over the input; `direct_segment_indices` is linear in the span plus
+the number of children.
+
 ### How a tag is resolved
 
-At every level the traversal asks, in this order:
+For each segment, innermost open group first:
 
-1. **Does a child group at *this* level trigger on the tag?** If so, open it.
-2. **Does a group further out trigger on it?** If so, close this group and let
-   the outer level handle it.
-3. Otherwise the segment belongs directly to the group currently open.
+1. **The innermost group's own candidates.** Open: its child-group triggers, in
+   declaration order. Ordered: its current entry, then later entries — the first
+   that matches wins, except that a place already at its `max` yields to a later
+   entry that also matches.
+2. **The reachable places of each enclosing group, innermost first.** Open: all
+   its child-group triggers. Ordered: its current and later entries. A match
+   closes the groups inside it.
+3. Otherwise the segment is a direct segment of an open group, or unplaced in an
+   ordered one.
 
 Step 1 comes first because the same trigger tag routinely appears at more than
 one level. `UTILMD` names its message-level parties in SG2 and a Vorgang's
@@ -575,9 +808,10 @@ parties in SG12 inside SG4 — both triggered by `NAD`:
 ```rust
 use edifact_rs::group::{GroupDef, group_segments_indexed};
 
+static SG12: &[GroupDef] = &[GroupDef::new("SG12", "NAD")];
 static SCHEMA: &[GroupDef] = &[
     GroupDef::new("SG2", "NAD"),
-    GroupDef::with_children("SG4", "IDE", &[GroupDef::new("SG12", "NAD")]),
+    GroupDef::with_children("SG4", "IDE", SG12),
 ];
 
 let segments: Vec<_> = edifact_rs::from_bytes(
@@ -602,8 +836,8 @@ A group ends at the first segment the current branch cannot consume, never at
 one an outer branch could also have consumed — the other order would make SG12
 unreachable from any input.
 
-A group's own trigger is not among its children, so a repeated trigger opens the
-**next occurrence** rather than nesting.
+A group's own trigger is not among its candidates, so a repeated trigger opens
+the **next occurrence** rather than nesting.
 
 ### Reading groups back
 
@@ -615,9 +849,10 @@ depth:
 ```rust
 use edifact_rs::group::{GroupDef, group_segments_indexed};
 
+static SG12: &[GroupDef] = &[GroupDef::new("SG12", "NAD")];
 static SCHEMA: &[GroupDef] = &[
     GroupDef::new("SG2", "NAD"),
-    GroupDef::with_children("SG4", "IDE", &[GroupDef::new("SG12", "NAD")]),
+    GroupDef::with_children("SG4", "IDE", SG12),
 ];
 
 let segments: Vec<_> = edifact_rs::from_bytes(
@@ -638,8 +873,8 @@ assert_eq!(parties, ["Z09", "VY"]);
 
 ### What a group actually spans
 
-A tag that triggers nothing is a direct segment of whichever group is open when
-it arrives. Nothing stops the last group of a message at `UNT`, so the trailer
+In an open group, a tag that triggers nothing is a direct segment of whichever
+group is open when it arrives. Nothing stops the last group of a message at `UNT`, so the trailer
 lands inside whichever group ran last.
 
 `MessageWindow::segments` deliberately includes `UNH` and `UNT` so that
@@ -776,7 +1011,7 @@ neither, such as seven digits, is still rejected.
 
 ### Suppression of insignificant characters
 
-With a representation attached, `DirectoryValidator` also applies §9.1: leading
+With a representation attached, `DirectoryValidator` also applies §9.2: leading
 zeroes must be suppressed in a **variable-length** numeric value, trailing spaces
 in a variable-length text one. Both raise
 [`E053`](@/docs/error-reference.md#e053-insignificantcharacters) as a warning.
@@ -892,7 +1127,7 @@ that matter — ask `SegmentLayout::audit` directly for those.
 
 ### Mandatory components of an absent composite
 
-ISO 9735-1 §8.6 makes a mandatory component required "**if** the composite data
+ISO 9735-1 §8.7 makes a mandatory component required "**if** the composite data
 element is present", not unconditionally — and the audit follows that. `UNB` S005
 component 1 (DE 0022, the recipient password) is mandatory *inside* a composite
 that is itself conditional, so a conformant `UNB` with no password does not

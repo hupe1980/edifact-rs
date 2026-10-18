@@ -2,8 +2,12 @@
 
 use super::ValidationRuleContext;
 use super::Validator;
+use super::{message_position, push_issue};
 use crate::group::SegmentGroupIndexed;
-use crate::{EdifactError, Segment, ValidationIssue, ValidationReport, ValidationSeverity};
+use crate::{
+    EdifactError, FindingKind, GroupPath, GroupStep, Segment, ValidationIssue, ValidationReport,
+    ValidationSeverity,
+};
 use std::sync::Arc;
 
 /// A profile rule that can be added to a [`ProfileRulePack`].
@@ -137,12 +141,33 @@ impl Clone for NamedGroupRule {
 }
 
 /// A profile/MIG rule pack that can be plugged into `ValidationContext`.
+///
+/// Every issue the pack emits without a [`pack`][ValidationIssue::pack] is
+/// stamped with the pack's [`name`][Self::name], so a consumer running several
+/// packs tells their findings apart without parsing rule ids. It is the name of
+/// the pack that *runs* the rule: rules taken over with
+/// [`extend_from`][Self::extend_from] or
+/// [`merge_with_override`][Self::merge_with_override] carry the combined pack's
+/// name, so register packs separately when their findings must stay apart, or
+/// set [`with_pack`][ValidationIssue::with_pack] in the rule. In the group
+/// pass ([`ValidationContext::validate_grouped`][super::ValidationContext::validate_grouped])
+/// issues are also stamped with the [`group_path`][ValidationIssue::group_path]
+/// of the group instance being evaluated, relative to the tree root passed in
+/// (the root itself has no path), and with its
+/// [`segment_group`][ValidationIssue::segment_group]. Values a rule set itself
+/// are kept.
+///
+/// The built-in helper rules set their own [`kind`][ValidationIssue::kind]:
+/// `require_segment[_in_group]` → [`FindingKind::Missing`],
+/// `forbid_segment[_in_group]` → [`FindingKind::NotPermitted`],
+/// `require_qualifier[_in_group]` → [`FindingKind::Code`]. Rules written as
+/// closures set whatever kind they choose, or none.
 pub struct ProfileRulePack {
-    name: String,
+    /// Shared with every issue the pack stamps, so stamping is a refcount bump.
+    name: Arc<str>,
     /// Set of EDIFACT message types this pack is scoped to (e.g. `"ORDERS"`, `"INVOIC"`).
     ///
-    /// Most packs target one or two message types, so a `SmallVec<[String; 2]>` avoids
-    /// any heap allocation for the common case.
+    /// A `SmallVec<[String; 2]>`: up to two message types are stored inline.
     message_types: smallvec::SmallVec<[String; 2]>,
     /// Association-assigned code (DE 0057) this pack is bound to, e.g. `"5.5.3a"`.
     release: Option<String>,
@@ -161,7 +186,7 @@ impl ProfileRulePack {
     /// Create an empty rule pack.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
-            name: name.into(),
+            name: Arc::from(name.into()),
             message_types: smallvec::SmallVec::new(),
             release: None,
             rules: Vec::new(),
@@ -384,6 +409,7 @@ impl ProfileRulePack {
                         format!("mandatory segment {tag} is missing"),
                     )
                     .with_segment(tag)
+                    .with_kind(FindingKind::Missing)
                     .with_rule_id(id.as_ref()),
                 );
             }
@@ -392,19 +418,27 @@ impl ProfileRulePack {
 
     /// Add a rule that asserts segment `tag` does **not** appear.
     ///
-    /// Emits an `Error`-severity issue for each occurrence found.
+    /// Emits an `Error`-severity issue for each occurrence found, with its
+    /// [`segment_occurrence`][ValidationIssue::segment_occurrence] and — when
+    /// the slice starts at `UNH` — its
+    /// [`segment_position`][ValidationIssue::segment_position].
     pub fn forbid_segment(self, tag: &'static str, rule_id: impl Into<Arc<str>>) -> Self {
         let id: Arc<str> = rule_id.into();
         self.with_named_rule_fn(id.clone(), move |segments, issues| {
-            for (occ, s) in segments.iter().filter(|s| s.tag == tag).enumerate() {
+            for (occ, (index, s)) in tagged(segments, tag).enumerate() {
                 issues.push(
-                    ValidationIssue::new(
-                        ValidationSeverity::Error,
-                        format!("segment {tag} must not appear"),
+                    located(
+                        ValidationIssue::new(
+                            ValidationSeverity::Error,
+                            format!("segment {tag} must not appear"),
+                        ),
+                        segments,
+                        index,
+                        occ,
                     )
                     .with_span(s.span)
                     .with_segment(tag)
-                    .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
+                    .with_kind(FindingKind::NotPermitted)
                     .with_rule_id(id.as_ref()),
                 );
             }
@@ -423,24 +457,29 @@ impl ProfileRulePack {
     ) -> Self {
         let id: Arc<str> = rule_id.into();
         self.with_named_rule_fn(id.clone(), move |segments, issues| {
-            for (occ, s) in segments.iter().filter(|s| s.tag == tag).enumerate() {
+            for (occ, (index, s)) in tagged(segments, tag).enumerate() {
                 let actual = s
-                    .get_element(element as usize)
-                    .and_then(|e| e.get_component(component as usize));
+                    .get_element(usize::from(element))
+                    .and_then(|e| e.get_component(usize::from(component)));
                 if actual != Some(qualifier) {
                     issues.push(
-                        ValidationIssue::new(
-                            ValidationSeverity::Error,
-                            format!(
-                                "segment {tag} element {element} component {component} must be \
-                                 {qualifier:?} but found {:?}",
-                                actual.unwrap_or("<absent>")
+                        located(
+                            ValidationIssue::new(
+                                ValidationSeverity::Error,
+                                format!(
+                                    "segment {tag} element {element} component {component} must be \
+                                     {qualifier:?} but found {:?}",
+                                    actual.unwrap_or("<absent>")
+                                ),
                             ),
+                            segments,
+                            index,
+                            occ,
                         )
                         .with_segment(tag)
-                        .with_element_index(element)
-                        .with_component_index(component)
-                        .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
+                        .with_element_index(usize::from(element))
+                        .with_component_index(usize::from(component))
+                        .with_kind(FindingKind::Code)
                         .with_rule_id(id.as_ref()),
                     );
                 }
@@ -575,6 +614,7 @@ impl ProfileRulePack {
                         format!("mandatory segment {tag} is missing from group {scope_msg}"),
                     )
                     .with_segment(tag)
+                    .with_kind(FindingKind::Missing)
                     .with_rule_id(id.as_ref()),
                 );
             }
@@ -596,15 +636,20 @@ impl ProfileRulePack {
         let id: Arc<str> = rule_id.into();
         let scope_msg = Arc::clone(&scope);
         self.with_scoped_group_rule_fn(scope, id.clone(), move |_group, segs, _ctx, issues| {
-            for (occ, s) in segs.iter().filter(|s| s.tag == tag).enumerate() {
+            for (occ, (index, s)) in tagged(segs, tag).enumerate() {
                 issues.push(
-                    ValidationIssue::new(
-                        ValidationSeverity::Error,
-                        format!("segment {tag} must not appear in group {scope_msg}"),
+                    located(
+                        ValidationIssue::new(
+                            ValidationSeverity::Error,
+                            format!("segment {tag} must not appear in group {scope_msg}"),
+                        ),
+                        segs,
+                        index,
+                        occ,
                     )
                     .with_span(s.span)
                     .with_segment(tag)
-                    .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
+                    .with_kind(FindingKind::NotPermitted)
                     .with_rule_id(id.as_ref()),
                 );
             }
@@ -628,24 +673,29 @@ impl ProfileRulePack {
         let id: Arc<str> = rule_id.into();
         let scope_msg = Arc::clone(&scope);
         self.with_scoped_group_rule_fn(scope, id.clone(), move |_group, segs, _ctx, issues| {
-            for (occ, s) in segs.iter().filter(|s| s.tag == tag).enumerate() {
+            for (occ, (index, s)) in tagged(segs, tag).enumerate() {
                 let actual = s
-                    .get_element(element as usize)
-                    .and_then(|e| e.get_component(component as usize));
+                    .get_element(usize::from(element))
+                    .and_then(|e| e.get_component(usize::from(component)));
                 if actual != Some(qualifier) {
                     issues.push(
-                        ValidationIssue::new(
-                            ValidationSeverity::Error,
-                            format!(
-                                "segment {tag} element {element} component {component} must be \
-                                 {qualifier:?} in group {scope_msg}, found {:?}",
-                                actual.unwrap_or("<absent>")
+                        located(
+                            ValidationIssue::new(
+                                ValidationSeverity::Error,
+                                format!(
+                                    "segment {tag} element {element} component {component} must be \
+                                     {qualifier:?} in group {scope_msg}, found {:?}",
+                                    actual.unwrap_or("<absent>")
+                                ),
                             ),
+                            segs,
+                            index,
+                            occ,
                         )
                         .with_segment(tag)
-                        .with_element_index(element)
-                        .with_component_index(component)
-                        .with_segment_occurrence(u16::try_from(occ).unwrap_or(u16::MAX))
+                        .with_element_index(usize::from(element))
+                        .with_component_index(usize::from(component))
+                        .with_kind(FindingKind::Code)
                         .with_rule_id(id.as_ref()),
                     );
                 }
@@ -696,9 +746,13 @@ impl ProfileRulePack {
     /// this call.  It is threaded through the recursion rather than reset per
     /// group: [`with_max_issues_per_rule`][Self::with_max_issues_per_rule] caps
     /// *per rule per call*, and a group rule fires once per group occurrence.
+    ///
+    /// `path` is the occurrence path of `group` — `None` for the tree root and
+    /// for the (unreachable) case of an occurrence that does not fit `u32`.
     fn walk_group_tree(
         &self,
         group: &SegmentGroupIndexed<'_>,
+        path: Option<&GroupPath>,
         all_segments: &[Segment<'_>],
         report: &mut ValidationReport,
         context: &ValidationRuleContext<'_>,
@@ -726,21 +780,15 @@ impl ProfileRulePack {
                 budget[index] -= rule_issues.len();
             }
             for mut issue in rule_issues.drain(..) {
-                // Auto-stamp the group name if the rule didn't set it explicitly.
+                // Auto-stamp what the rule didn't set explicitly.
+                if issue.group_path.is_none() {
+                    issue.group_path = path.cloned();
+                }
                 if issue.segment_group.is_none() {
                     issue = issue.with_segment_group(group.definition);
                 }
-                match issue.severity {
-                    ValidationSeverity::Critical | ValidationSeverity::Error => {
-                        report.add_error(issue);
-                    }
-                    ValidationSeverity::Warning => {
-                        report.add_warning(issue);
-                    }
-                    ValidationSeverity::Info => {
-                        report.add_info(issue);
-                    }
-                }
+                self.stamp_pack(&mut issue);
+                push_issue(report, issue);
             }
             if self.bail_on_first_error && report.errors.len() > errors_before {
                 return;
@@ -749,10 +797,28 @@ impl ProfileRulePack {
 
         for child in &group.children {
             let errors_before_child = report.errors.len();
-            self.walk_group_tree(child, all_segments, report, context, budget);
+            let child_path = match path {
+                Some(parent) => parent.child(child.definition, child.occurrence_index),
+                None => GroupPath::new(GroupStep::new(child.definition, child.occurrence_index)),
+            };
+            self.walk_group_tree(
+                child,
+                child_path.as_ref(),
+                all_segments,
+                report,
+                context,
+                budget,
+            );
             if self.bail_on_first_error && report.errors.len() > errors_before_child {
                 return;
             }
+        }
+    }
+
+    /// Stamp this pack's name onto `issue` unless it names a pack already.
+    fn stamp_pack(&self, issue: &mut ValidationIssue) {
+        if issue.pack.is_none() {
+            issue.pack = Some(Arc::clone(&self.name));
         }
     }
 
@@ -924,6 +990,32 @@ impl ProfileRulePack {
     }
 }
 
+/// The segments tagged `tag`, with their index in `segments`.
+fn tagged<'s, 'a>(
+    segments: &'s [Segment<'a>],
+    tag: &'static str,
+) -> impl Iterator<Item = (usize, &'s Segment<'a>)> {
+    segments
+        .iter()
+        .enumerate()
+        .filter(move |(_, s)| s.tag == tag)
+}
+
+/// Set the same-tag occurrence and — when `segments` starts at `UNH` — the
+/// message position of `segments[index]` on `issue`.
+fn located(
+    issue: ValidationIssue,
+    segments: &[Segment<'_>],
+    index: usize,
+    occurrence: usize,
+) -> ValidationIssue {
+    let issue = issue.with_segment_occurrence(occurrence);
+    match message_position(segments, index) {
+        Some(position) => issue.with_segment_position(position),
+        None => issue,
+    }
+}
+
 /// The `UNH` S009 composite (message identifier), if the slice carries a `UNH`.
 ///
 /// One lookup answers both scope questions: message type is component 0,
@@ -970,18 +1062,9 @@ impl Validator for ProfileRulePack {
             if let Some(limit) = self.max_issues_per_rule {
                 rule_issues.truncate(limit);
             }
-            for issue in rule_issues.drain(..) {
-                match issue.severity {
-                    ValidationSeverity::Critical | ValidationSeverity::Error => {
-                        report.add_error(issue);
-                    }
-                    ValidationSeverity::Warning => {
-                        report.add_warning(issue);
-                    }
-                    ValidationSeverity::Info => {
-                        report.add_info(issue);
-                    }
-                }
+            for mut issue in rule_issues.drain(..) {
+                self.stamp_pack(&mut issue);
+                push_issue(report, issue);
             }
             if self.bail_on_first_error && report.errors.len() > errors_before {
                 return;
@@ -1007,7 +1090,7 @@ impl Validator for ProfileRulePack {
         // One budget slot per group rule, spent across the whole tree walk.
         let mut budget =
             vec![self.max_issues_per_rule.unwrap_or(usize::MAX); self.group_rules.len()];
-        self.walk_group_tree(root, all_segments, report, context, &mut budget);
+        self.walk_group_tree(root, None, all_segments, report, context, &mut budget);
     }
 
     fn has_group_rules(&self) -> bool {
@@ -1022,7 +1105,7 @@ impl Validator for ProfileRulePack {
 impl Clone for ProfileRulePack {
     fn clone(&self) -> Self {
         Self {
-            name: self.name.clone(),
+            name: Arc::clone(&self.name),
             message_types: self.message_types.clone(),
             release: self.release.clone(),
             rules: self.rules.clone(),
@@ -1048,9 +1131,9 @@ impl std::fmt::Debug for ProfileRulePack {
 
 /// `Arc<ProfileRulePack>` can be plugged directly into a [`super::context::ValidationContext`].
 ///
-/// Forking (for `fork_with_message_ref`) only increments the reference count — no
-/// deep copy of the rule vec is performed.  This is the zero-allocation path for
-/// downstream code that caches packs in a `LazyLock` or `OnceLock`.
+/// Forking (for `fork_with_message_ref`) shares the pack by reference count
+/// instead of deep-copying its rules, which suits a pack cached in a
+/// `LazyLock` or `OnceLock`.
 ///
 /// # Example
 ///

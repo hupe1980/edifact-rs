@@ -338,7 +338,7 @@ pub enum Token<'a> {
         span: Span,
     },
     /// First component of a further repetition of the current data element
-    /// (ISO 9735-1 §8.6).
+    /// (ISO 9735-1 §8.7).
     ///
     /// Only produced when the active [`ServiceStringAdvice`] declares a
     /// repetition separator — see
@@ -502,6 +502,29 @@ impl<'a> Tokenizer<'a> {
             state: TokState::ExpectTag,
             max_segment_bytes,
             segment_start: 0,
+        }
+    }
+
+    /// Construct a tokenizer that starts at absolute offset `pos` of a whole
+    /// interchange, with no prologue or `UNA` skipping.
+    ///
+    /// Used by the recovering scan to resume after a faulted segment: spans stay
+    /// absolute because the tokenizer still indexes the complete input, which is
+    /// what makes a resumed segment identical to the one the strict parser would
+    /// have produced from the same bytes.
+    pub(crate) fn resume_at(
+        input: &'a [u8],
+        ssa: ServiceStringAdvice,
+        max_segment_bytes: usize,
+        pos: usize,
+    ) -> Self {
+        Self {
+            input,
+            pos: pos.min(input.len()),
+            ssa,
+            state: TokState::ExpectTag,
+            max_segment_bytes,
+            segment_start: pos.min(input.len()),
         }
     }
 
@@ -998,7 +1021,7 @@ mod tests {
 
     #[test]
     fn chunked_reader_parses_via_parser() {
-        // The reader tokenizer path was removed; verify the equivalent via the parser.
+        // Chunked input is read through the parser's reader path.
         let input = b"UNA:+.? 'BGM+220+test?+value'UNT+2+1'";
         let segments: Vec<_> =
             crate::parser::from_bufread(std::io::BufReader::new(std::io::Cursor::new(input)))

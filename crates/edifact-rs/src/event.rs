@@ -1,9 +1,8 @@
 //! Event model for EDIFACT serialization.
 //!
-//! [`EdifactEvent`] carries its text as a [`Cow`], so one type serves both the
-//! zero-allocation emission path (where every value borrows from the value being
-//! serialized) and [`VecEmitter`], which has to keep events past the borrow that
-//! produced them.
+//! [`EdifactEvent`] carries its text as a [`Cow`], so one type serves both
+//! streaming emission (every value borrows from the value being serialized) and
+//! [`VecEmitter`], which has to keep events past the borrow that produced them.
 
 use crate::EdifactError;
 use std::borrow::Cow;
@@ -158,10 +157,12 @@ enum EmitterState {
 
 /// Writes EDIFACT events directly to any [`Write`] implementation.
 ///
-/// Each event is written to the underlying writer immediately — no intermediate
-/// buffering of element strings occurs, so no heap allocation is required per
-/// event.  This makes `WriterEmitter` suitable for high-throughput serialization
-/// of large EDIFACT messages.
+/// Each event is written to the underlying writer immediately, escaping in
+/// place, so the emitter allocates nothing per event (asserted by the
+/// `allocation_budget` test `writer_emitter_allocates_nothing_per_event`). Two
+/// exceptions: a bound repertoire ([`with_charset`][Self::with_charset])
+/// transcodes non-ASCII text into a temporary buffer, and the underlying
+/// `Write` may allocate on its own (a `Vec<u8>` grows).
 ///
 /// # Protocol
 ///
@@ -202,11 +203,11 @@ impl<W: Write> WriterEmitter<W> {
 
     /// Bind this emitter's writer to a character repertoire.
     ///
-    /// The typed serialization path had no way to reach
-    /// [`Writer::with_charset`][crate::Writer::with_charset], so a `#[derive(EdifactSerialize)]`
-    /// struct could only ever go out as UTF-8 — which is wrong for every
-    /// `UNOC`…`UNOK` partner, and wrong in the silent way: `ü` arrives as two
-    /// mojibake characters rather than as an error.
+    /// The typed-serialization counterpart of
+    /// [`Writer::with_charset`][crate::Writer::with_charset]. Without it a
+    /// `#[derive(EdifactSerialize)]` struct goes out as UTF-8, which a
+    /// `UNOC`…`UNOK` partner reads as mojibake (`ü` becomes two characters)
+    /// rather than as an error.
     ///
     /// # Example
     ///

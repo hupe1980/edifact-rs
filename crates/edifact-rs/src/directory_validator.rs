@@ -1,8 +1,12 @@
-//! Shared UN/EDIFACT directory validation engine used by D.11A, D.01B and D.96A.
+//! Directory validation engine over caller-supplied segment definitions.
 
 use crate::error::Insignificant;
-use crate::validator::{ValidationRuleContext, Validator, report_error};
-use crate::{EdifactError, Segment, ValidationIssue, ValidationReport, ValidationSeverity};
+use crate::validator::{
+    ValidationLayer, ValidationRuleContext, Validator, message_position, report_error_at,
+};
+use crate::{
+    EdifactError, FindingKind, Segment, ValidationIssue, ValidationReport, ValidationSeverity,
+};
 use std::sync::Arc;
 
 /// Mandatory/Conditional status of a data element within a segment.
@@ -704,8 +708,8 @@ impl ElementRef {
 
 /// Definition of an EDIFACT segment (tag + element structure).
 ///
-/// Construct with [`SegmentDefinition::new`] rather than a struct literal, so
-/// that future fields (max repeat, description, …) are not a breaking change.
+/// `#[non_exhaustive]`: fields may be added without a breaking change, so
+/// construct one with [`SegmentDefinition::new`] rather than a struct literal.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct SegmentDefinition {
@@ -1138,7 +1142,7 @@ fn audit_layout(tag: &str, slots: &[LayoutSlot], segments: &[crate::Segment<'_>]
         audit.segments_examined += 1;
         for (element_index, element) in segment.elements.iter().enumerate() {
             // Every occurrence counts: a repeating element populates the same
-            // declared positions each time (ISO 9735-1 §8.6).
+            // declared positions each time (ISO 9735-1 §8.7).
             for occurrence in element.repetitions() {
                 for (component_index, (value, _)) in occurrence.iter().enumerate() {
                     // A trailing empty component is how EDIFACT spells "absent"
@@ -1367,7 +1371,7 @@ impl SegmentDefinition {
     /// `true` when `data_element` names a component *inside* a composite rather
     /// than a data element of the segment.
     ///
-    /// Lets a caller — the derive macro, in practice — pick the right
+    /// Lets a caller — such as the derive macro — pick the right
     /// "missing required" error variant without a second lookup:
     /// [`EdifactError::MissingRequiredComponent`] rather than
     /// [`EdifactError::MissingRequiredElement`]. `component_slot` alone cannot
@@ -2906,10 +2910,18 @@ impl Validator for DirectoryValidator {
         // representation applies; `UNB` S001 DE 0002 is where it is stated.
         let syntax_version = detect_syntax_version(segments);
         let mut issues = Vec::new();
-        for seg in segments {
+        for (index, seg) in segments.iter().enumerate() {
             self.collect_segment_issues(seg, syntax_version, &mut issues);
+            let position = message_position(segments, index);
             for err in issues.drain(..) {
-                report_error(report, err);
+                // Code-list findings belong to the code-list stage; everything
+                // else this validator finds is directory structure.
+                let layer = if matches!(err, EdifactError::InvalidCodeValue { .. }) {
+                    ValidationLayer::CodeList
+                } else {
+                    ValidationLayer::Structure
+                };
+                report_error_at(report, err, layer, position);
             }
         }
 
@@ -2937,6 +2949,10 @@ impl Validator for DirectoryValidator {
                                 ),
                             )
                             .with_segment(*required_tag)
+                            .with_layer(ValidationLayer::Structure)
+                            // Kind only: an error code here would change the
+                            // DE 0085 a CONTRL reports for it.
+                            .with_kind(FindingKind::Missing)
                             .with_suggestion("Add the mandatory segment at the correct position"),
                         );
                     }
@@ -2947,19 +2963,24 @@ impl Validator for DirectoryValidator {
                     if let Some(&idx) = first_index.get(*tag) {
                         if let Some(prev) = last_idx {
                             if idx < prev {
-                                report.add_error(
-                                    ValidationIssue::new(
-                                        ValidationSeverity::Error,
-                                        format!(
-                                            "segment sequence violation for message type {}: '{}' appears out of order",
-                                            message_type, tag
-                                        ),
-                                    )
-                                    .with_segment(*tag)
-                                    .with_suggestion(
-                                        "Ensure required segments follow UN/EDIFACT canonical order",
+                                let mut issue = ValidationIssue::new(
+                                    ValidationSeverity::Error,
+                                    format!(
+                                        "segment sequence violation for message type {}: '{}' appears out of order",
+                                        message_type, tag
                                     ),
+                                )
+                                .with_segment(*tag)
+                                .with_layer(ValidationLayer::Structure)
+                                .with_kind(FindingKind::Placement)
+                                .with_suggestion(
+                                    "Ensure required segments follow UN/EDIFACT canonical order",
                                 );
+                                // The first occurrence is the one out of order.
+                                if let Some(position) = message_position(segments, idx) {
+                                    issue = issue.with_segment_position(position);
+                                }
+                                report.add_error(issue);
                             }
                         }
                         last_idx = Some(idx);

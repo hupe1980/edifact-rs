@@ -4,7 +4,7 @@
 /// - `DEMO-P001` (Error): rejects `BGM` document code `220`.
 /// - `DEMO-P002` (Warning): flags purchase-order reference `PO-4711` as reserved.
 pub fn demo_orders_profile_pack() -> edifact_rs::ProfileRulePack {
-    use edifact_rs::{ProfileRulePack, ValidationIssue, ValidationSeverity};
+    use edifact_rs::{FindingKind, ProfileRulePack, ValidationIssue, ValidationSeverity};
 
     ProfileRulePack::new("ORDERS-DEMO")
         .for_message_type("ORDERS")
@@ -20,6 +20,7 @@ pub fn demo_orders_profile_pack() -> edifact_rs::ProfileRulePack {
                     .with_rule_id("DEMO-P001")
                     .with_segment("BGM")
                     .with_element_index(0)
+                    .with_kind(FindingKind::Code)
                     .with_suggestion("Use a different BGM document code in this demo pack")
                 })
             })());
@@ -36,6 +37,7 @@ pub fn demo_orders_profile_pack() -> edifact_rs::ProfileRulePack {
                     .with_rule_id("DEMO-P002")
                     .with_segment("BGM")
                     .with_element_index(1)
+                    .with_kind(FindingKind::NotPermitted)
                     .with_suggestion("Use a non-reserved reference in this demo pack")
                 })
             })());

@@ -1,6 +1,6 @@
 +++
 title = "Streaming"
-description = "Process gigabyte interchanges in constant memory with reader iterators, message windows, and typed extraction."
+description = "Process large interchanges one segment or one message at a time with reader iterators, message windows, and typed extraction."
 weight = 60
 +++
 
@@ -15,16 +15,22 @@ synchronous (`std::io::Read`) and can be bridged to async runtimes — see
 
 | API | Source | Output | Memory model |
 |---|---|---|---|
-| `from_reader(reader)` | `impl Read` | `Iterator<Item = Result<OwnedSegment, _>>` | O(1) — one segment at a time |
-| `message_windows(input)` | `&[u8]` | `Iterator<Item = Result<MessageWindow<'_>, _>>` | O(window) — one message window |
-| `message_windows_from_reader(reader)` | `impl Read` | `Iterator<Item = Result<MessageWindow, _>>` | O(window) — lazy I/O |
-| `deserialize_each(input)` | `&[u8]` | `Iterator<Item = Result<T, _>>` | O(1) — one matching segment at a time |
-| `deserialize_each_from_reader(reader)` | `impl Read` | `Iterator<Item = Result<T, _>>` | O(1) — lazy I/O |
-| `deserialize_messages(input)` | `&[u8]` | `Iterator<Item = Result<T, _>>` | One typed message per window |
-| `deserialize_messages_from_reader(reader)` | `impl Read` | `Iterator<Item = Result<T, _>>` | One typed message per window |
+| `from_reader(reader)` | `impl Read` | `Iterator<Item = Result<OwnedSegment, _>>` | One segment |
+| `message_windows(input)` | `&[u8]` | `Iterator<Item = Result<MessageWindow<'_>, _>>` | One message window |
+| `message_windows_from_reader(reader)` | `impl Read` | `Iterator<Item = Result<MessageWindow, _>>` | One message window |
+| `deserialize_each(input)` | `&[u8]` | `Iterator<Item = Result<T, _>>` | One segment |
+| `deserialize_each_from_reader(reader)` | `impl Read` | `Iterator<Item = Result<T, _>>` | One segment |
+| `deserialize_messages(input)` | `&[u8]` | `Iterator<Item = Result<T, _>>` | One message window |
+| `deserialize_messages_from_reader(reader)` | `impl Read` | `Iterator<Item = Result<T, _>>` | One message window |
 
 Every one is a lazy iterator, so "first match" is `.next()` and "all matches" is
 `.collect()`. There is no separate eager entry point for either.
+
+A segment is at most `max_segment_bytes` (64 KiB by default). A message window
+is unbounded unless you cap it: each function has a `_with_config` variant that
+enforces every [`ReaderConfig`](@/docs/parsing.md#dos-hardening-with-readerconfig)
+budget, and `max_segments_per_message` bounds a window regardless of how long the
+stream runs. Measured figures are in [Performance](@/docs/performance.md#memory-by-entry-point).
 
 ---
 
@@ -49,8 +55,8 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 }
 ```
 
-> **Memory**: a single `OwnedSegment` is allocated per iteration. Previous segments
-> are dropped before the next one is parsed.
+> **Memory**: one `OwnedSegment` per iteration; each is dropped before the next
+> is parsed.
 
 ---
 
@@ -204,9 +210,8 @@ hands the window's segments straight to `T::edifact_deserialize`. There is no
 owned-specific trait method, and **no intermediate `Vec<Segment<'_>>` is
 allocated** — the borrowed and reader paths run the identical code.
 
-The reader path therefore allocates at most:
-- One `MessageWindow` per message window (released after deserialization)
-- The deserialized `T` value itself
+The reader path holds one message window (released after deserialization) and
+the deserialized `T`.
 
 ---
 
@@ -304,25 +309,6 @@ for result in from_reader(input) {
 
 ---
 
-## Memory budget summary
-
-| Scenario | Peak heap usage |
-|---|---|
-| `from_bytes` on a 1 MB slice | One `Vec<Element<'_>>` per segment (tags borrow from slice) |
-| `from_reader` on a 1 GB file | ~O(1 segment) at any time |
-| `message_windows_from_reader` on 100 messages of 20 segments each | O(20 segments) — one window at a time |
-| `deserialize_messages_from_reader` typed | O(20 segments) window + O(1 typed struct) |
-
----
-
-## Next steps
-
-- [Validation](@/docs/validation.md) — validate windows and messages
-- [Async Integration](@/docs/async-integration.md) — bridging to tokio
-- [Performance](@/docs/performance.md) — allocation analysis and benchmarks
-
----
-
 ## Decoding a stream without making it eager
 
 A `UNOC`…`UNOK` interchange has to be transcoded before it can be parsed, and the
@@ -352,7 +338,7 @@ assert_eq!(segments[1].element_str(1), Some("Müller"));
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-A repertoire this crate cannot decode — `UNOX`, `KECA` — arrives as the first
+A repertoire this crate refuses — `UNOX`, `KECA` — arrives as the first
 item of the iterator, in the same shape as a parse error, and the iterator then
 ends:
 
@@ -377,3 +363,11 @@ zero-copy path, hold the buffer yourself: `decode_interchange` then `from_bytes`
 Reach for the decoding entry points by default. A `UNOC` corpus that happens to
 be stored as UTF-8 parses fine without them — so the tests pass, and the first
 *conformant* counterparty message is the one that fails.
+
+---
+
+## Next steps
+
+- [Validation](@/docs/validation.md) — validate windows and messages
+- [Async Integration](@/docs/async-integration.md) — bridging to tokio
+- [Performance](@/docs/performance.md) — allocation budget, memory bounds and benchmarks

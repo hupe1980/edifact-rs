@@ -207,21 +207,17 @@ fn guides_only_reference_public_api_items() {
     );
 }
 
-/// Every `EdifactError` variant must have an entry in the error reference guide.
-///
-/// The guide previously documented a variant that had been removed (and told
-/// readers functional groups were unsupported, long after they were), while
-/// omitting two live variants entirely. Nothing caught it because the guide was
-/// prose only.
+/// Every `EdifactError` variant must have an entry in the error reference guide,
+/// and the guide must not document a code the crate does not emit; prose alone
+/// drifts silently.
 #[test]
 fn error_reference_documents_every_stable_code() {
     // Driven by `error.rs` itself rather than a hand-maintained list of sample
-    // values.  The previous shape built an array of one value per variant and
-    // claimed a new variant "fails to compile" — it does not: an array is not a
-    // match, and `EdifactError` is `#[non_exhaustive]`, so an integration test
-    // cannot match it exhaustively anyway.  Two variants had already slipped
-    // through.  `stable_code` *is* an exhaustive match inside the crate, so
-    // reading the codes out of it covers every variant by construction.
+    // values: `EdifactError` is `#[non_exhaustive]`, so an integration test
+    // cannot match it exhaustively, and an array of sample values does not fail
+    // to compile when a variant is added.  `stable_code` *is* an exhaustive
+    // match inside the crate, so reading the codes out of it covers every
+    // variant by construction.
     let source =
         std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/error.rs"))
             .expect("src/error.rs must be readable");
@@ -271,5 +267,83 @@ fn error_reference_documents_every_stable_code() {
     assert!(
         table_missing.is_empty(),
         "error-reference.md summary table is missing rows for: {table_missing:?}"
+    );
+}
+
+/// Every public function or type that takes a `Read` or `BufRead` states the
+/// limits that bound it, in a `# Resource bounds` rustdoc section — the
+/// memory bound of a streaming entry point is a public claim, and an entry
+/// point without one is how an unbounded convenience went unnoticed.
+#[test]
+fn read_entry_points_state_resource_bounds() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut missing = Vec::new();
+    let mut found = BTreeSet::new();
+    // Named explicitly: they bound a reader without naming `Read` themselves.
+    let required = ["MessageWindows", "ReaderConfig", "DecodingReader"];
+
+    for path in walk(&src) {
+        let source = std::fs::read_to_string(&path).expect("source is readable");
+        let lines: Vec<&str> = source.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            let Some(item) = trimmed
+                .strip_prefix("pub fn ")
+                .or_else(|| trimmed.strip_prefix("pub struct "))
+            else {
+                continue;
+            };
+            let name: String = item
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+
+            // The signature runs to the opening brace or the closing semicolon.
+            let mut signature = String::new();
+            for next in &lines[index..] {
+                signature.push_str(next);
+                signature.push(' ');
+                if next.contains('{') || next.trim_end().ends_with(';') {
+                    break;
+                }
+            }
+            let takes_reader = signature
+                .split(|c: char| !c.is_alphanumeric() && c != '_')
+                .any(|word| word == "Read" || word == "BufRead");
+            if !takes_reader && !required.contains(&name.as_str()) {
+                continue;
+            }
+
+            // The doc block (and attributes) directly above the item.
+            let documented = lines[..index]
+                .iter()
+                .rev()
+                .take_while(|l| {
+                    let l = l.trim_start();
+                    l.starts_with("///") || l.starts_with("#[")
+                })
+                .any(|l| l.trim_start() == "/// # Resource bounds");
+            found.insert(name.clone());
+            if !documented {
+                let file = path.file_name().unwrap().to_string_lossy().into_owned();
+                missing.push(format!("{file}: {name}"));
+            }
+        }
+    }
+
+    for name in required {
+        assert!(found.contains(name), "{name} was not found in src/");
+    }
+    for name in [
+        "from_reader",
+        "message_windows_from_reader_with_config",
+        "decode_reader",
+    ] {
+        assert!(found.contains(name), "{name} was not scanned");
+    }
+    assert!(
+        missing.is_empty(),
+        "public items taking Read/BufRead without a `# Resource bounds` section:\n  {}",
+        missing.join("\n  ")
     );
 }

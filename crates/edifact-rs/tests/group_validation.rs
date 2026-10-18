@@ -1,4 +1,4 @@
-//! Integration tests for group-scoped validation (F-011 / F-029).
+//! Integration tests for group-scoped validation.
 //!
 //! These tests verify that [`ProfileRulePack`] group rules:
 //! - Only fire for the group they are scoped to.
@@ -24,21 +24,10 @@ use edifact_rs::{
 ///   SG5 (trigger: LOC) — location group
 ///     SG6 (trigger: QTY) — quantity sub-group
 /// ```
+static SG6: &[GroupDef] = &[GroupDef::new("SG6", "QTY")];
 static SCHEMA: &[GroupDef] = &[
-    GroupDef {
-        name: "SG1",
-        trigger: "RFF",
-        children: &[],
-    },
-    GroupDef {
-        name: "SG5",
-        trigger: "LOC",
-        children: &[GroupDef {
-            name: "SG6",
-            trigger: "QTY",
-            children: &[],
-        }],
-    },
+    GroupDef::new("SG1", "RFF"),
+    GroupDef::with_children("SG5", "LOC", SG6),
 ];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -59,7 +48,7 @@ fn parse_segs(input: &str) -> Vec<edifact_rs::Segment<'static>> {
         .expect("fixture should parse")
 }
 
-// ── F-029 Test 1: group rule fires only for the scoped group ──────────────────
+// ── group rule fires only for the scoped group ───────────────────────────────
 
 /// A rule scoped to "SG5" DOES fire when DTM is absent from SG5, even though it
 /// appears in SG1. Cross-group contamination must not suppress the missing-segment
@@ -103,7 +92,7 @@ fn group_rule_does_not_fire_when_segment_present_in_scoped_group() {
     );
 }
 
-// ── F-029 Test 2: forbid_segment_in_group ─────────────────────────────────────
+// ── forbid_segment_in_group ──────────────────────────────────────────────────
 
 #[test]
 fn forbid_segment_in_group_fires_when_segment_present() {
@@ -133,7 +122,7 @@ fn forbid_segment_in_group_does_not_fire_when_segment_absent() {
     assert!(ctx.validate_grouped(&tree, &segs).is_valid());
 }
 
-// ── F-029 Test 3: cross-group non-contamination ───────────────────────────────
+// ── cross-group non-contamination ────────────────────────────────────────────
 
 /// The same segment tag in two different groups must produce independent issues:
 /// a rule on SG5/DTM must not mark the SG1/DTM occurrence and vice-versa.
@@ -162,7 +151,7 @@ fn group_rules_for_different_groups_do_not_cross_contaminate() {
     );
 }
 
-// ── F-029 Test 4: segment_group auto-stamped ──────────────────────────────────
+// ── segment_group auto-stamped ───────────────────────────────────────────────
 
 #[test]
 fn group_rule_issues_are_auto_stamped_with_group_name() {
@@ -185,7 +174,7 @@ fn group_rule_issues_are_auto_stamped_with_group_name() {
     }
 }
 
-// ── F-029 Test 5: validate_lenient_grouped_owned ──────────────────────────────
+// ── validate_lenient_grouped_owned ───────────────────────────────────────────
 
 #[test]
 fn validate_lenient_grouped_owned_works_with_owned_segments() {
@@ -203,7 +192,7 @@ fn validate_lenient_grouped_owned_works_with_owned_segments() {
     );
 }
 
-// ── F-029 Test 6: multiple group occurrences (repetition) ────────────────────
+// ── multiple group occurrences (repetition) ──────────────────────────────────
 
 /// When SG5 repeats, the rule fires per-occurrence.
 #[test]
@@ -225,7 +214,7 @@ fn group_rule_fires_per_occurrence_when_group_repeats() {
     );
 }
 
-// ── F-029 Test 7: with_scoped_group_rule_fn custom closure ───────────────────
+// ── with_scoped_group_rule_fn custom closure ─────────────────────────────────
 
 #[test]
 fn custom_scoped_group_rule_fn_fires_and_sets_segment_group() {
@@ -266,7 +255,7 @@ fn custom_scoped_group_rule_fn_fires_and_sets_segment_group() {
     );
 }
 
-// ── F-029 Test 8: message-type scoping works with group rules ─────────────────
+// ── message-type scoping works with group rules ──────────────────────────────
 
 #[test]
 fn group_rules_respect_message_type_scoping() {
@@ -287,7 +276,7 @@ fn group_rules_respect_message_type_scoping() {
     );
 }
 
-// ── F-029 Test 9: flat + group phases both run ─────────────────────────────────
+// ── flat + group phases both run ─────────────────────────────────────────────
 
 #[test]
 fn flat_and_group_validation_both_run_in_grouped_mode() {
@@ -329,7 +318,7 @@ fn forbid_segment_segment_occurrence_is_relative_not_absolute() {
     let pack = ProfileRulePack::new("TEST").forbid_segment("QTY", "TEST-FORBID-QTY");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
     let report = ctx.validate(&segs);
-    let mut occurrences: Vec<u16> = report
+    let mut occurrences: Vec<u32> = report
         .errors()
         .iter()
         .filter_map(|i| i.segment_occurrence)
@@ -351,7 +340,7 @@ fn forbid_segment_in_group_occurrence_is_relative_not_absolute() {
     let pack = ProfileRulePack::new("TEST").forbid_segment_in_group("SG5", "QTY", "TEST-SG5-QTY");
     let ctx = ValidationContext::builder().with_profile_pack(pack).build();
     let report = ctx.validate_grouped(&tree, &segs);
-    let mut occurrences: Vec<u16> = report
+    let mut occurrences: Vec<u32> = report
         .errors()
         .iter()
         .filter_map(|i| i.segment_occurrence)
@@ -410,10 +399,9 @@ fn bail_on_first_error_does_not_skip_sibling_groups_due_to_earlier_flat_errors()
 
 // ── Runtime-loaded schemas ────────────────────────────────────────────────────
 
-/// A MIG loaded at startup cannot produce `&'static str`.  `GroupDef` used to
-/// hard-code `'static`, which made every runtime-loaded group schema impossible
-/// even though the directory side of the crate (`OwnedSegmentDef`,
-/// `DirectoryValidatorBuilder`) has always supported them.
+/// A MIG loaded at startup cannot produce `&'static str`. The builder owns its
+/// strings (shared behind `Arc`), so a run-time schema needs neither a
+/// borrowed arena nor `Box::leak`.
 #[test]
 fn a_schema_built_at_runtime_groups_identically_to_a_static_one() {
     // Stand-in for names parsed out of a MIG file at startup.
@@ -425,11 +413,17 @@ fn a_schema_built_at_runtime_groups_identically_to_a_static_one() {
         "SG6".to_owned(),
         "QTY".to_owned(),
     ];
-    let sg6 = vec![GroupDef::new(&names[4], &names[5])];
+    let owned = |name: &str, trigger: &str| {
+        GroupDef::builder(name, edifact_rs::SegmentPlace::owned(trigger))
+    };
     let runtime_schema = vec![
-        GroupDef::new(&names[0], &names[1]),
-        GroupDef::with_children(&names[2], &names[3], &sg6),
+        owned(&names[0], &names[1]).build().expect("valid group"),
+        owned(&names[2], &names[3])
+            .group(owned(&names[4], &names[5]).build().expect("valid group"))
+            .build()
+            .expect("valid group"),
     ];
+    drop(names);
 
     let input =
         b"UNH+1+ORDERS:D:96A:UN'RFF+ON:1'LOC+172+DE1'DTM+163:20260101:102'QTY+220:5'UNT+6+1'";
@@ -491,21 +485,10 @@ fn max_issues_per_rule_caps_a_group_rule_across_the_whole_tree() {
 
 /// The `UTILMD` shape: SG2 (message-level parties) and SG12 (a Vorgang's
 /// parties, inside SG4) both trigger on `NAD`.
+static SG12: &[GroupDef] = &[GroupDef::new("SG12", "NAD")];
 static UTILMD_LIKE: &[GroupDef] = &[
-    GroupDef {
-        name: "SG2",
-        trigger: "NAD",
-        children: &[],
-    },
-    GroupDef {
-        name: "SG4",
-        trigger: "IDE",
-        children: &[GroupDef {
-            name: "SG12",
-            trigger: "NAD",
-            children: &[],
-        }],
-    },
+    GroupDef::new("SG2", "NAD"),
+    GroupDef::with_children("SG4", "IDE", SG12),
 ];
 
 /// A group-scoped rule must see the group the message structure assigns, not the
@@ -593,4 +576,233 @@ fn every_nested_party_group_is_enumerable_from_the_tree() {
         .collect();
 
     assert_eq!(per_vorgang, [vec!["Z09"], vec!["VY", "DP"]]);
+}
+
+// ── group occurrence paths ───────────────────────────────────────────────────
+
+/// `ROOT > SG4#0 > SG8#0, SG8#1`, plus a second `SG4` so occurrences are
+/// visibly counted per parent.
+static SG8: &[GroupDef] = &[GroupDef::new("SG8", "SEQ")];
+static PATH_SCHEMA: &[GroupDef] = &[GroupDef::with_children("SG4", "IDE", SG8)];
+
+#[test]
+fn group_path_is_stamped() {
+    use edifact_rs::{FindingKind, GroupPath, GroupStep};
+
+    let segs = parse_segs(
+        "UNH+1+UTILMD:D:11A:UN'BGM+E01'IDE+24+A'SEQ+Z01'SEQ+Z02'IDE+24+B'SEQ+Z01'UNT+8+1'",
+    );
+    let tree = group_segments_indexed(&segs, PATH_SCHEMA, "ROOT");
+    let pack = ProfileRulePack::new("AHB-UTILMD")
+        // Fails in every SG8: no RFF anywhere.
+        .require_segment_in_group("SG8", "RFF", "SG8-RFF-M")
+        // A rule that sets its own path keeps it.
+        .with_scoped_group_rule_fn("SG4", "SG4-OWN-PATH", |_group, _segs, _ctx, issues| {
+            issues.push(
+                ValidationIssue::new(ValidationSeverity::Warning, "own path")
+                    .with_group_path(GroupPath::new(GroupStep::new("CUSTOM", 7)).unwrap()),
+            );
+        })
+        // Root-level rules get no path.
+        .with_scoped_group_rule_fn("ROOT", "ROOT-RULE", |_group, _segs, _ctx, issues| {
+            issues.push(ValidationIssue::new(ValidationSeverity::Info, "at root"));
+        });
+    let report = ValidationContext::builder()
+        .with_profile_pack(pack)
+        .build()
+        .validate_grouped(&tree, &segs);
+
+    let paths: Vec<String> = report
+        .issues_for_rule_id("SG8-RFF-M")
+        .map(|issue| {
+            assert_eq!(issue.segment_group(), Some("SG8"));
+            assert_eq!(issue.kind(), Some(FindingKind::Missing));
+            assert_eq!(issue.pack(), Some("AHB-UTILMD"));
+            issue.group_path().expect("path").to_string()
+        })
+        .collect();
+    assert_eq!(paths, ["SG4[0]/SG8[0]", "SG4[0]/SG8[1]", "SG4[1]/SG8[0]"]);
+
+    let own: Vec<String> = report
+        .warnings()
+        .iter()
+        .map(|issue| issue.group_path().expect("path").to_string())
+        .collect();
+    assert_eq!(own, ["CUSTOM[7]", "CUSTOM[7]"]);
+
+    let root = &report.infos()[0];
+    assert_eq!(root.message, "at root");
+    assert_eq!(root.group_path(), None);
+    assert_eq!(root.segment_group(), Some("ROOT"));
+
+    // The deterministic rendering shows the path with the segment tag.
+    assert!(
+        report
+            .render_deterministic()
+            .contains("[path=SG4[0]/SG8[1]/RFF]"),
+        "{}",
+        report.render_deterministic()
+    );
+}
+
+// ── placement findings ───────────────────────────────────────────────────────
+
+mod placement_findings {
+    use super::parse_segs;
+    use edifact_rs::group::{Discriminator, Entry, GroupDef, GroupSchema, SegmentPlace};
+    use edifact_rs::{
+        FindingKind, PlacementValidator, ValidationContext, ValidationIssue, ValidationLayer,
+    };
+    use std::sync::Arc;
+
+    /// `UNH BGM SG4[IDE, DTM(max 1), SG5(LOC, min 1)] UNT`, ordered throughout.
+    fn schema() -> GroupSchema {
+        let sg5 = GroupDef::builder("SG5", SegmentPlace::new("LOC").with_id("00047"))
+            .id("SG5-MALO")
+            .ordered()
+            .min(1)
+            .max(1)
+            .build()
+            .unwrap();
+        let sg4 = GroupDef::builder(
+            "SG4",
+            SegmentPlace::new("IDE").when(Discriminator::one_of(0, 0, ["24"])),
+        )
+        .segment(SegmentPlace::new("DTM").with_id("00020").with_max(1))
+        .group(sg5)
+        .build()
+        .unwrap();
+        GroupSchema::ordered(
+            "UTILMD",
+            [
+                Entry::Segment(SegmentPlace::new("UNH").with_min(1).with_max(1)),
+                Entry::Segment(SegmentPlace::new("BGM").with_min(1).with_max(1)),
+                Entry::Group(sg4),
+                Entry::Segment(SegmentPlace::new("UNT").with_min(1).with_max(1)),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn only<'a>(issues: &'a [ValidationIssue], code: &str) -> Vec<&'a ValidationIssue> {
+        issues
+            .iter()
+            .filter(|i| i.error_code() == Some(code))
+            .collect()
+    }
+
+    #[test]
+    fn placement_findings_unplaced() {
+        let segs = parse_segs(
+            "UNH+1+UTILMD:D:11A:UN'BGM+E01'IDE+24+A'LOC+Z16'IDE+24+B'LOC+Z16'IDE+24+C'LOC+Z16'FTX+ACB'UNT+10+1'",
+        );
+        let schema = schema();
+        let resolution = schema.resolve(&segs);
+        let findings = resolution.findings(&segs);
+        let unplaced = only(&findings, "E068");
+        assert_eq!(unplaced.len(), 1, "{findings:#?}");
+        let issue = unplaced[0];
+        assert_eq!(issue.kind(), Some(FindingKind::Placement));
+        assert_eq!(issue.layer(), Some(ValidationLayer::Structure));
+        assert_eq!(issue.segment_tag(), Some("FTX"));
+        assert_eq!(issue.span(), Some(segs[8].span));
+        assert_eq!(issue.segment_position(), Some(9));
+        assert_eq!(
+            issue.group_path().map(ToString::to_string).as_deref(),
+            Some("SG4[2]/SG5[0]"),
+            "the instance it was skipped in",
+        );
+        assert_eq!(findings.len(), 1, "nothing else is wrong: {findings:#?}");
+    }
+
+    #[test]
+    fn placement_findings_count() {
+        let segs = parse_segs(
+            "UNH+1+UTILMD:D:11A:UN'BGM+E01'IDE+24+A'DTM+92:1'DTM+93:2'LOC+Z16'LOC+Z17'UNT+8+1'",
+        );
+        let schema = schema();
+        let findings = schema.resolve(&segs).findings(&segs);
+
+        let dtm = only(&findings, "E069");
+        assert_eq!(dtm.len(), 1, "{findings:#?}");
+        assert_eq!(dtm[0].kind(), Some(FindingKind::Count));
+        assert_eq!(dtm[0].span(), Some(segs[4].span));
+        assert_eq!(dtm[0].segment_position(), Some(5));
+        assert_eq!(dtm[0].context_get("place"), Some("00020"));
+        assert_eq!(
+            dtm[0].group_path().map(ToString::to_string).as_deref(),
+            Some("SG4[0]")
+        );
+
+        let sg5 = only(&findings, "E070");
+        assert_eq!(sg5.len(), 1, "{findings:#?}");
+        assert_eq!(sg5[0].kind(), Some(FindingKind::Count));
+        assert_eq!(sg5[0].span(), Some(segs[6].span));
+        assert_eq!(sg5[0].context_get("place"), Some("SG5-MALO"));
+        assert_eq!(
+            sg5[0].group_path().map(ToString::to_string).as_deref(),
+            Some("SG4[0]/SG5[1]")
+        );
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+    }
+
+    #[test]
+    fn placement_findings_missing() {
+        let segs = parse_segs("UNH+1+UTILMD:D:11A:UN'BGM+E01'IDE+24+A'UNT+4+1'");
+        let schema = schema();
+        let findings = schema.resolve(&segs).findings(&segs);
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        let issue = &findings[0];
+        assert_eq!(issue.error_code(), Some("E015"));
+        assert_eq!(issue.kind(), Some(FindingKind::Missing));
+        assert_eq!(issue.layer(), Some(ValidationLayer::Structure));
+        assert_eq!(issue.segment_tag(), Some("LOC"), "the group's trigger tag");
+        assert_eq!(
+            issue.group_path().map(ToString::to_string).as_deref(),
+            Some("SG4[0]")
+        );
+        assert_eq!(issue.context_get("place"), Some("SG5-MALO"));
+        assert_eq!(issue.span(), None, "nothing to point at");
+
+        // A missing root place has no path.
+        let segs = parse_segs("UNH+1+UTILMD:D:11A:UN'UNT+2+1'");
+        let findings = schema.resolve(&segs).findings(&segs);
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert_eq!(findings[0].segment_tag(), Some("BGM"));
+        assert!(findings[0].group_path().is_none());
+    }
+
+    #[test]
+    fn placement_findings_through_a_validation_context() {
+        let segs =
+            parse_segs("UNH+1+UTILMD:D:11A:UN'BGM+E01'IDE+24+A'DTM+92:1'DTM+93:2'FTX+ACB'UNT+7+1'");
+        let schema = Arc::new(schema());
+        let direct = schema.resolve(&segs).findings(&segs);
+        let report = ValidationContext::builder()
+            .with_validator(
+                ValidationLayer::Structure,
+                PlacementValidator::new(Arc::clone(&schema)),
+            )
+            .build()
+            .validate(&segs);
+
+        let codes = |issues: Vec<&ValidationIssue>| -> Vec<String> {
+            let mut codes: Vec<String> = issues
+                .iter()
+                .map(|i| format!("{:?}@{:?}", i.error_code(), i.segment_position()))
+                .collect();
+            codes.sort();
+            codes
+        };
+        assert_eq!(
+            codes(report.iter_issues().collect()),
+            codes(direct.iter().collect()),
+        );
+        assert!(
+            report
+                .iter_issues()
+                .all(|i| i.layer() == Some(ValidationLayer::Structure))
+        );
+        assert_eq!(report.total_issues(), 3, "{report}");
+    }
 }

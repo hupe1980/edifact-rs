@@ -24,6 +24,15 @@ jobs:
       - name: Clippy (all targets, all features, warnings denied)
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
+  concepts-check:
+    runs-on: ubuntu-latest
+    name: concepts-check
+    steps:
+      - uses: actions/checkout@v4
+      # Published files must not cite the gitignored planning paths.
+      - run: bash scripts/test-concepts-check.sh
+      - run: bash scripts/concepts-check.sh
+
   deny:
     runs-on: ubuntu-latest
     name: deny
@@ -148,10 +157,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # critcmp exits non-zero both on regressions and when there are no
-          # matching benchmarks (e.g. baseline pre-dates a benchmark rename).
-          # Use an `if` so bash does not apply set -e to the condition itself,
-          # then distinguish the two failure modes from the captured output.
+          # Report only: critcmp `--threshold` filters output and exits 0 on a
+          # regression; it fails on errors such as no matching benchmarks
+          # (a baseline from before a rename), which is skipped below.
           if output=$(critcmp main pr --threshold 5 2>&1); then
             echo "$output" | tee bench-compare.log
           elif echo "$output" | grep -qi "no benchmark comparisons"; then

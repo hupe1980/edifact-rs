@@ -76,9 +76,9 @@ impl std::fmt::Display for Insignificant {
 ///
 /// * **`offset: usize`** — a single byte position in the input stream.  Used by
 ///   the lexical variants (`UnexpectedEof`, `InvalidDelimiter`, `InvalidText`,
-///   `InvalidReleaseSequence`, `SegmentTooLong`, `UnexpectedDataToken`), where
-///   the fault is a *point* in the byte stream and no meaningful end position
-///   exists.
+///   `InvalidReleaseSequence`, `SegmentTooLong`, `UnexpectedDataToken`) and by
+///   `LimitExceeded`, where the fault is a *point* in the byte stream and no
+///   meaningful end position exists.
 /// * **`span: Span`** — a half-open byte range.  Used by every variant produced
 ///   while validating an already-parsed [`Segment`][crate::Segment], where the
 ///   exact source range is known.  A [`ValidationIssue`][crate::ValidationIssue]
@@ -92,8 +92,8 @@ impl std::fmt::Display for Insignificant {
 pub enum EdifactError {
     /// Unexpected end of input while parsing.
     ///
-    /// This typically occurs when a segment terminator or expected delimiter
-    /// is not found before the end of the input stream.
+    /// Raised when a segment terminator or expected delimiter is not found
+    /// before the end of the input stream.
     #[error("unexpected end of input at byte offset {offset}")]
     UnexpectedEof {
         /// Byte offset where the parser exhausted input.
@@ -381,9 +381,7 @@ pub enum EdifactError {
     /// An interchange or message contains more segments or messages than can be
     /// represented in a `u32` counter (> 4 294 967 295).
     ///
-    /// This is effectively unreachable in practice — no real-world EDIFACT
-    /// interchange has billions of segments — but the parser returns this error
-    /// rather than silently saturating or wrapping the counter.
+    /// Returned rather than silently saturating or wrapping the counter.
     #[error("interchange too large: count {count} exceeds u32::MAX")]
     InterchangeTooLarge {
         /// The count that could not be represented as `u32`.
@@ -453,18 +451,15 @@ pub enum EdifactError {
         offset: usize,
     },
 
-    /// The interchange syntax identifier (`UNB` S001 DE 0001) names no defined
-    /// character repertoire.
+    /// The interchange syntax identifier (`UNB` S001 DE 0001) names no
+    /// repertoire this crate recognises.
     ///
-    /// DE 0001 is `UN` followed by a two-character repertoire code, so the
-    /// defined values are `UNOA` through `UNOK`, `UNOX`, `UNOY`, and `KECA`
-    /// (Korean EDI Centre A).  Anything else is a non-standard generator or a
-    /// corrupted `UNB`.
-    ///
-    /// A value that *is* defined but that this crate cannot decode is
-    /// [`UnsupportedCharset`][Self::UnsupportedCharset] instead — the two say
-    /// different things about whose problem it is.
-    #[error("unrecognised syntax identifier '{0}': expected UNOA-UNOK, UNOX, UNOY, or KECA")]
+    /// DE 0001 is `UN` plus a repertoire code from the ISO 9735-10 code list.
+    /// This crate recognises `UNOA`–`UNOK` and `UNOY`; `UNOX` and `KECA` (a
+    /// Korean identifier outside ISO 9735) are refused as
+    /// [`UnsupportedCharset`][Self::UnsupportedCharset]; anything else is
+    /// reported here.
+    #[error("unrecognised syntax identifier '{0}': expected UNOA-UNOK or UNOY")]
     UnrecognisedSyntaxIdentifier(String),
 
     /// A control reference was reused within the scope that requires it to be unique.
@@ -523,20 +518,34 @@ pub enum EdifactError {
     /// **truncated** interchange as complete.
     ///
     /// [`SegmentTooLong`][Self::SegmentTooLong] covers the per-segment size
-    /// guard; this variant covers the whole-input budgets.
-    #[error("input exceeded the configured {limit} limit of {max}")]
+    /// guard; this variant covers the count and byte budgets.
+    ///
+    /// The variant is `#[non_exhaustive]`: match it as
+    /// `LimitExceeded { limit, max, .. }`.
+    #[error("input exceeded the configured {limit} limit of {max} at byte offset {offset}")]
+    #[non_exhaustive]
     LimitExceeded {
         /// Name of the limit that tripped: `"max_segments"`, `"max_messages"`,
-        /// or `"max_input_bytes"`.
+        /// `"max_segments_per_message"`, `"max_input_bytes"`, or — for the
+        /// recovering scan's fault budget,
+        /// [`RecoveryConfig::max_faults`][crate::RecoveryConfig::max_faults] —
+        /// `"max_faults"`.
         limit: &'static str,
         /// The configured ceiling.
         max: u64,
+        /// Where the budget ran out.
+        ///
+        /// For a count budget (`max_segments`, `max_messages`,
+        /// `max_segments_per_message`, `max_faults`): the start of the segment
+        /// that would have exceeded it. For `max_input_bytes`: the budget
+        /// itself — the first byte outside it — saturated to `usize::MAX`.
+        offset: usize,
     },
 
     /// A repeating data element was written under a service string advice that
     /// declares no repetition separator.
     ///
-    /// ISO 9735-1 §8.6 repetitions can only be expressed when `UNA` position 7
+    /// ISO 9735-1 §8.7 repetitions can only be expressed when `UNA` position 7
     /// carries a real separator.  With the space "not used" sentinel there is no
     /// byte to write between occurrences, and joining them anyway would emit
     /// output that reads back as a single occurrence — silent data corruption.
@@ -596,8 +605,8 @@ pub enum EdifactError {
 
     /// The interchange declares a character repertoire this crate cannot decode.
     ///
-    /// `UNOX` (ISO 2022 code extension) and `KECA` (Korean) are stateful or
-    /// multi-byte in ways that break the byte-level delimiter scanning every
+    /// `UNOX` (ISO/IEC 2022 code extension) and `KECA` (a Korean identifier
+    /// outside ISO 9735) are stateful or multi-byte in ways that break the byte-level delimiter scanning every
     /// other repertoire allows.  They are reported rather than silently
     /// mis-decoded.
     #[error("character repertoire '{syntax_identifier}' is not supported")]
@@ -844,6 +853,89 @@ pub enum EdifactError {
         /// Tag of the segment the layout was applied to.
         actual: String,
     },
+
+    /// A `CONTRL` would carry an action code its configured policy forbids.
+    ///
+    /// Raised when a `CONTRL` is constructed with
+    /// [`ContrlOptions`][crate::contrl::ContrlOptions] whose
+    /// [`ActionPolicy`][crate::contrl::ActionPolicy] does not admit the DE 0083
+    /// value a reporting level would need — for example a receipt (`8`) under a
+    /// policy that admits only `7` and `4` on `UCI`. The code is neither emitted
+    /// nor rewritten: a `CONTRL` the partner's guide does not admit is one it
+    /// rejects, and a silently changed verdict says something that is not true.
+    #[error("CONTRL {segment_tag} action code {action} is not permitted by the action policy")]
+    ActionNotPermitted {
+        /// The reporting segment that would carry the code: `UCI`, `UCF` or `UCM`.
+        segment_tag: &'static str,
+        /// The DE 0083 action code that is not permitted: `4`, `7` or `8`.
+        action: &'static str,
+    },
+
+    /// A `CONTRL` message identifier component violates its representation.
+    ///
+    /// [`ContrlIdentifier`][crate::contrl::ContrlIdentifier] validates the
+    /// components of its `UNH` S009 against ISO 9735: DE 0052, DE 0054 and
+    /// DE 0051 are mandatory `an..3`, DE 0057 is an optional `an..6` that is
+    /// non-empty when given.
+    #[error("CONTRL message identifier: data element {data_element} value {value:?} is not valid")]
+    InvalidContrlIdentifier {
+        /// The S009 component at fault: `0052`, `0054`, `0051` or `0057`.
+        data_element: &'static str,
+        /// The rejected value.
+        value: String,
+    },
+
+    /// A segment fits no place at its position in an ordered segment group.
+    ///
+    /// Raised by [`GroupResolution::findings`][crate::group::GroupResolution::findings]
+    /// for every segment the resolver skipped. The segment is never attached to
+    /// a wrong group; `reason` says whether it fits a place already passed, a
+    /// place elsewhere in the message, or none at all.
+    #[error("segment {tag} is not placed: {reason}")]
+    SegmentNotPlaced {
+        /// Segment tag.
+        tag: String,
+        /// Why it fits nowhere here.
+        reason: crate::group::UnplacedReason,
+        /// Byte span of the segment.
+        span: Span,
+    },
+
+    /// A segment place occurs more often in one group instance than its `max`.
+    #[error("segment {tag} occurs more than {max} time(s) in its group")]
+    TooManySegmentOccurrences {
+        /// Segment tag.
+        tag: String,
+        /// The place's maximum.
+        max: u32,
+        /// Byte span of the occurrence beyond the maximum.
+        span: Span,
+    },
+
+    /// A segment group occurs more often in its parent instance than its `max`.
+    #[error("segment group {group} occurs more than {max} time(s)")]
+    TooManyGroupOccurrences {
+        /// Group name.
+        group: String,
+        /// The group's maximum.
+        max: u32,
+        /// Byte span of the trigger segment of the instance beyond the maximum.
+        span: Span,
+    },
+
+    /// A group schema is malformed: bounds, tag form, empty code list, or
+    /// nesting deeper than 64 groups.
+    ///
+    /// Raised by [`GroupDefBuilder::build`][crate::group::GroupDefBuilder::build]
+    /// and [`GroupSchema`][crate::group::GroupSchema] construction — a
+    /// configuration fault, never a fault of a message.
+    #[error("invalid group schema at {group:?}: {reason}")]
+    InvalidGroupSchema {
+        /// Name of the group at fault (the root name for a root entry).
+        group: String,
+        /// What is wrong.
+        reason: &'static str,
+    },
 }
 
 impl From<std::io::Error> for EdifactError {
@@ -874,20 +966,18 @@ impl EdifactError {
             Self::MissingSegment { .. } => "E015",
             Self::QualifierMismatch { .. } => "E016",
             Self::ConditionalRequirementNotMet { .. } => "E017",
-            // E018 is permanently retired (was ValidationFailed, removed in 0.8.0)
+            // E018 retired — never reuse (see error-reference).
             Self::InvalidReleaseSequence { .. } => "E019",
             Self::SegmentTooLong { .. } => "E020",
             Self::MissingRequiredComponent { .. } => "E021",
-            // E022 is permanently retired (was UnexpectedMessageType, removed
-            // in 0.17.0 along with the type-erased MessageDispatch it served).
+            // E022 retired — never reuse (see error-reference).
             Self::InterchangeTooLarge { .. } => "E023",
             Self::InvalidEventSequence { .. } => "E024",
             Self::InvalidElementPosition => "E025",
             Self::IncompatibleReleaseScopes { .. } => "E026",
             Self::InvalidFieldValue { .. } => "E027",
             Self::UnexpectedDataToken { .. } => "E028",
-            // E029 is permanently retired (was FunctionalGroupNotSupported, removed when
-            // full UNG/UNE support was added — functional groups are now parsed natively)
+            // E029 retired — never reuse (see error-reference).
             Self::ValidationErrors { .. } => "E030",
             Self::UnrecognisedSyntaxIdentifier(_) => "E031",
             Self::DuplicateReference { .. } => "E032",
@@ -912,6 +1002,13 @@ impl EdifactError {
             Self::TrailingSeparator { .. } => "E051",
             Self::GroupsAndMessagesMixed { .. } => "E052",
             Self::InsignificantCharacters { .. } => "E053",
+            // E054–E065 are reserved; never reuse them for anything else.
+            Self::ActionNotPermitted { .. } => "E066",
+            Self::InvalidContrlIdentifier { .. } => "E067",
+            Self::SegmentNotPlaced { .. } => "E068",
+            Self::TooManySegmentOccurrences { .. } => "E069",
+            Self::TooManyGroupOccurrences { .. } => "E070",
+            Self::InvalidGroupSchema { .. } => "E071",
         }
     }
 
@@ -1048,7 +1145,25 @@ impl EdifactError {
                 "Suppress the insignificant characters before sending: leading zeroes in a variable-length numeric value, trailing spaces in a variable-length text one",
             ),
             Self::UnrecognisedSyntaxIdentifier(_) => Some(
-                "UNB S001 DE 0001 must name a defined repertoire: UNOA-UNOK, UNOX, UNOY, or KECA",
+                "UNB S001 DE 0001 must name a repertoire this crate recognises: UNOA-UNOK or UNOY",
+            ),
+            Self::ActionNotPermitted { .. } => Some(
+                "Permit the action code at that level in the ActionPolicy, or report the outcome the policy admits (for example a rejection instead of a receipt)",
+            ),
+            Self::InvalidContrlIdentifier { .. } => Some(
+                "S009 version, release and agency must be 1-3 characters; the association assigned code must be 1-6 characters",
+            ),
+            Self::SegmentNotPlaced { .. } => Some(
+                "Move the segment to the place the implementation guide gives it, or remove it if the guide has no place for it",
+            ),
+            Self::TooManySegmentOccurrences { .. } => {
+                Some("Reduce the segment's repetitions in this group to the guide's maximum")
+            }
+            Self::TooManyGroupOccurrences { .. } => {
+                Some("Reduce the segment group's repetitions to the guide's maximum")
+            }
+            Self::InvalidGroupSchema { .. } => Some(
+                "Fix the group schema: tags are three upper-case letters, min <= max, max >= 1, one_of lists at least one code, at most 64 nested groups",
             ),
             Self::ValidationErrors { .. }
             | Self::MessageCountMismatch { .. }
@@ -1236,8 +1351,8 @@ impl miette::Diagnostic for EdifactError {
                 "Validation found {error_count} error(s). Inspect the ValidationReport for details",
             ))),
             Self::UnrecognisedSyntaxIdentifier(id) => Some(Box::new(format!(
-                "Syntax identifier '{id}' is not defined in ISO 9735-1. \
-                 Valid values are UNOA, UNOB, UNOC, UNOD, UNOE, UNOF (or KECA for KEC-A profile)",
+                "Syntax identifier '{id}' is not a repertoire this crate recognises \
+                 (UNOA-UNOK, UNOY). Check UNB S001 DE 0001",
             ))),
             Self::DuplicateReference { tag, reference, .. } => Some(Box::new(format!(
                 "Reference '{reference}' is used by more than one {tag} in this interchange; \
@@ -1279,8 +1394,8 @@ impl miette::Diagnostic for EdifactError {
                 "The value {value} is not finite. EDIFACT numeric data elements have no \
                  representation for NaN or infinity",
             ))),
-            Self::LimitExceeded { limit, max } => Some(Box::new(format!(
-                "The input exceeds the configured {limit} limit of {max}. \
+            Self::LimitExceeded { limit, max, offset } => Some(Box::new(format!(
+                "The input exceeds the configured {limit} limit of {max} at byte offset {offset}. \
                  Raise it via ReaderConfig if the input is legitimate, or reject the input",
             ))),
             Self::EmptyInterchange { control_ref } => Some(Box::new(format!(
@@ -1360,6 +1475,33 @@ impl miette::Diagnostic for EdifactError {
                 "Segment {tag}: {kind}. ISO 9735-1 §9.1 requires insignificant characters to be \
                  suppressed before transfer",
             ))),
+            Self::ActionNotPermitted {
+                segment_tag,
+                action,
+            } => Some(Box::new(format!(
+                "The CONTRL would carry action code {action} on {segment_tag}, which the configured \
+                 ActionPolicy does not admit. Permit it, or change what is being reported",
+            ))),
+            Self::InvalidContrlIdentifier {
+                data_element,
+                value,
+            } => Some(Box::new(format!(
+                "CONTRL S009 data element {data_element} cannot be {value:?}: DE 0052, 0054 and \
+                 0051 are mandatory an..3, DE 0057 is an..6 and non-empty when present",
+            ))),
+            Self::SegmentNotPlaced { tag, reason, .. } => Some(Box::new(format!(
+                "Segment {tag} was skipped: {reason}. The implementation guide walks its places \
+                 front to back; a segment is never attached to a place it does not fit",
+            ))),
+            Self::TooManySegmentOccurrences { tag, max, .. } => Some(Box::new(format!(
+                "Segment {tag} may occur at most {max} time(s) at this place in one group instance",
+            ))),
+            Self::TooManyGroupOccurrences { group, max, .. } => Some(Box::new(format!(
+                "Segment group {group} may occur at most {max} time(s) in its parent",
+            ))),
+            Self::InvalidGroupSchema { group, reason } => Some(Box::new(format!(
+                "The group schema is malformed at {group:?}: {reason}",
+            ))),
         }
     }
 }
@@ -1386,5 +1528,52 @@ mod tests {
             suggestion: None,
         };
         assert!(err.recovery_hint().is_some());
+    }
+
+    #[test]
+    fn a_limit_error_names_its_budget_and_position() {
+        let err = EdifactError::LimitExceeded {
+            limit: "max_segments_per_message",
+            max: 1_000,
+            offset: 63_105,
+        };
+        assert_eq!(err.stable_code(), "E036");
+        assert_eq!(
+            err.to_string(),
+            "input exceeded the configured max_segments_per_message limit of 1000 \
+             at byte offset 63105"
+        );
+        assert!(err.recovery_hint().is_some());
+    }
+
+    #[test]
+    fn group_resolution_codes_are_distinct_from_every_other_code() {
+        let span = Span::new(0, 3);
+        let new = [
+            EdifactError::SegmentNotPlaced {
+                tag: "LOC".into(),
+                reason: crate::group::UnplacedReason::OutOfOrder,
+                span,
+            },
+            EdifactError::TooManySegmentOccurrences {
+                tag: "DTM".into(),
+                max: 1,
+                span,
+            },
+            EdifactError::TooManyGroupOccurrences {
+                group: "SG5".into(),
+                max: 1,
+                span,
+            },
+            EdifactError::InvalidGroupSchema {
+                group: "SG5".into(),
+                reason: "max is 0",
+            },
+        ];
+        let codes: Vec<&str> = new.iter().map(EdifactError::stable_code).collect();
+        assert_eq!(codes, ["E068", "E069", "E070", "E071"]);
+        for err in &new {
+            assert!(err.recovery_hint().is_some(), "{err:?}");
+        }
     }
 }

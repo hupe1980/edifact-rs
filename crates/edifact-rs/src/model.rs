@@ -5,10 +5,15 @@
 //! [`Segment<'a>`] holds its text as [`Cow<'a, str>`], so the *same* type covers
 //! both parsing modes:
 //!
-//! - [`from_bytes`][crate::from_bytes] borrows straight out of the input and
-//!   yields `Segment<'input>` — no allocation for segment data.
+//! - [`from_bytes`][crate::from_bytes] yields `Segment<'input>`: text borrows
+//!   from the input ([`Cow::Borrowed`]) unless a release escape forced a copy,
+//!   and the segment's own allocation is its element vector.
 //! - [`from_reader`][crate::from_reader] cannot borrow from a stream, so it
-//!   yields `Segment<'static>`, aliased as [`OwnedSegment`].
+//!   yields `Segment<'static>`, aliased as [`OwnedSegment`], whose tag and
+//!   non-empty values are owned.
+//!
+//! Per-segment counts for both paths are asserted by the `allocation_budget`
+//! integration test.
 //!
 //! `Segment` is covariant in `'a`, so a `&[OwnedSegment]` is accepted anywhere a
 //! `&[Segment<'_>]` is expected: every API takes one shape and serves both.
@@ -131,17 +136,18 @@ pub type OwnedElement = Element<'static>;
 /// [`and_repeat`][Element::and_repeat] / [`with_span`][Element::with_span])
 /// rather than a struct literal.
 ///
-/// Uses [`SmallVec`] with an inline capacity of 4 to avoid heap allocation
-/// for the common case (≤ 4 components). Each entry is a `(value, span)` pair,
-/// guaranteeing that the component string and its byte span stay in sync.
+/// Components are a `SmallVec<[_; 4]>`: up to four are stored inline, and an
+/// occurrence with a fifth moves its components to the heap (one allocation).
+/// Each entry is a `(value, span)` pair, so a component's text and its byte
+/// span stay in sync.
 /// A value that contained a release-character sequence is stored as
 /// [`Cow::Owned`]; everything else borrows from the input.
 ///
-/// # Repetition (ISO 9735-1 §8.6)
+/// # Repetition (ISO 9735-1:2002 §8.7)
 ///
 /// [`components`][Self::components] holds the **first** occurrence, which is the
-/// only one for every interchange that does not declare a repetition separator —
-/// that is, virtually all of them. Further occurrences land in
+/// only one for every interchange that does not declare a repetition separator.
+/// Further occurrences land in
 /// [`repeats`][Self::repeats]; read them together with
 /// [`repetitions`][Self::repetitions].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,8 +159,10 @@ pub struct Element<'a> {
     pub components: Components<'a>,
     /// Second and subsequent occurrences of this data element.
     ///
-    /// Empty — and therefore unallocated — unless the interchange declares a
-    /// repetition separator and the element actually repeats.
+    /// Empty — with capacity 0, so it costs no heap allocation — unless the
+    /// interchange declares a repetition separator and the element actually
+    /// repeats. Both parse paths uphold this, asserted by the
+    /// `allocation_budget` test `repeats_unallocated_on_both_paths`.
     pub repeats: Vec<Components<'a>>,
 }
 
@@ -248,7 +256,7 @@ impl<'a> Element<'a> {
         std::iter::once(self.components.as_slice()).chain(self.repeats.iter().map(|r| r.as_slice()))
     }
 
-    /// Read component `n` from every occurrence of this element (ISO 9735-1 §8.6).
+    /// Read component `n` from every occurrence of this element (ISO 9735-1 §8.7).
     ///
     /// One item per occurrence, using `""` where an occurrence omits the
     /// component: §8.7.3 makes occurrence position significant, so dropping the
@@ -270,7 +278,7 @@ impl<'a> Element<'a> {
         self
     }
 
-    /// Append a further occurrence of this data element (ISO 9735-1 §8.6).
+    /// Append a further occurrence of this data element (ISO 9735-1 §8.7).
     ///
     /// Useful when building segments for
     /// [`Writer::write_segment`][crate::Writer::write_segment]; the writer joins
@@ -404,7 +412,7 @@ impl<'a> Segment<'a> {
         self.elements.get(n)
     }
 
-    /// Shorthand: component 0 of element `n` — the most common access pattern.
+    /// Shorthand: component 0 of element `n`.
     #[inline]
     pub fn element_str(&self, n: usize) -> Option<&str> {
         self.elements.get(n)?.get_component(0)
@@ -576,7 +584,7 @@ impl<'a> Segment<'a> {
     /// Read a value by its UN/EDIFACT data element identifier.
     ///
     /// Positional access (`seg.element_str(4)`) fails silently when the index is
-    /// wrong: it reads a different, usually still-plausible value. Code-addressed
+    /// wrong: it reads a different value that may still look plausible. Code-addressed
     /// access cannot — a stale or mistyped identifier is a
     /// [`EdifactError::UnknownDataElement`], checked against the directory.
     ///

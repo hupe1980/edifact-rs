@@ -64,6 +64,13 @@ clippy:
 # Format, lint, and test — what to run before every commit.
 pre-commit: fmt-check clippy test
 
+# ── local planning ────────────────────────────────────────────────────────────
+
+# Published files must not cite the gitignored planning paths; mirrors CI.
+concepts-check:
+    bash scripts/test-concepts-check.sh
+    bash scripts/concepts-check.sh
+
 # ── site ──────────────────────────────────────────────────────────────────────
 
 # Serve the Zola site with live reload at http://127.0.0.1:1111.
@@ -231,7 +238,7 @@ bench-compare FROM="main" TO="pr":
 # Benchmarks and the MSRV job are not included — see `ci-full`.
 
 [doc("Everything CI runs, on this toolchain.")]
-ci: fmt-check clippy feature-matrix doc doc-docsrs deny release-check fuzz
+ci: fmt-check clippy concepts-check feature-matrix doc doc-docsrs deny release-check fuzz
 
 # `ci` plus the MSRV job and the benchmark smoke run: the full pre-release gate.
 ci-full: ci msrv bench-smoke

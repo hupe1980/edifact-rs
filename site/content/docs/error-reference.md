@@ -1,13 +1,13 @@
 +++
 title = "Error Reference"
-description = "Every EdifactError variant with its stable code E001-E053, the fields it carries, when it fires, and how to fix it."
+description = "Every EdifactError variant with its stable code E001-E053 and E066-E071, the fields it carries, when it fires, and how to fix it."
 weight = 110
 +++
 
 All errors returned by `edifact-rs` are variants of `EdifactError`. Every variant
-carries a stable, semver-protected code (`E001`–`E053`) accessible via
-`err.stable_code()`. The enum is marked `#[non_exhaustive]` so future variants can
-be added without breaking existing match arms.
+carries a stable, semver-protected code (`E001`–`E053`, `E066`–`E071`) accessible via
+`err.stable_code()`. The enum is `#[non_exhaustive]`, so variants can be added without a breaking
+change.
 
 ## Where an error points
 
@@ -62,7 +62,7 @@ needed.
 | E033 | `UnknownDataElement` | Code-addressed access | — |
 | E034 | `AmbiguousDataElement` | Code-addressed access | — |
 | E035 | `SegmentLayoutMismatch` | Code-addressed access | — |
-| E036 | `LimitExceeded` | Parser (`ReaderConfig` budgets) | — |
+| E036 | `LimitExceeded` | Parser (`ReaderConfig` budgets) | `offset` |
 | E037 | `RepetitionSeparatorNotDeclared` | Writer | — |
 | E038 | `CharacterNotInRepertoire` | Writer / `Charset::encode` | — |
 | E039 | `UnsupportedCharset` | `Charset::from_syntax_identifier` | — |
@@ -80,6 +80,12 @@ needed.
 | E051 | `TrailingSeparator` | Syntax validator | `span` |
 | E052 | `GroupsAndMessagesMixed` | Envelope validator | `span` |
 | E053 | `InsignificantCharacters` | Directory validator | `span` |
+| E066 | `ActionNotPermitted` | `Contrl` constructors with `ContrlOptions` | — |
+| E067 | `InvalidContrlIdentifier` | `ContrlIdentifier` | — |
+| E068 | `SegmentNotPlaced` | `GroupResolution::findings`, `PlacementValidator` | `span` |
+| E069 | `TooManySegmentOccurrences` | `GroupResolution::findings`, `PlacementValidator` | `span` |
+| E070 | `TooManyGroupOccurrences` | `GroupResolution::findings`, `PlacementValidator` | `span` |
+| E071 | `InvalidGroupSchema` | `GroupDefBuilder::build`, `GroupSchema::{new, ordered}` | — |
 
 ---
 
@@ -281,7 +287,7 @@ segment {tag} element {element_index} has {actual} components, expected {expecte
    declares (`ElementRef::composite` / `OwnedElementRef::with_components`), and
    the segment supplies **more** components than declared. Supplying fewer stays
    valid: conditional components may be omitted, and trailing empty components
-   are stripped first per ISO 9735-1 §8.7.2.
+   are stripped first per ISO 9735-1 §8.8.3.
 
 **Fields**: `tag`, `element_index`, `expected: u8` (the exact or maximum count),
 `actual: u8`, `span: Span`.
@@ -587,19 +593,16 @@ Enable the `diagnostics` feature to get `miette::Diagnostic` on all variants wit
 ### E031 — `UnrecognisedSyntaxIdentifier`
 
 ```text
-unrecognised syntax identifier 'XXXX': expected UNOA-UNOK, UNOX, UNOY, or KECA
+unrecognised syntax identifier 'XXXX': expected UNOA-UNOK or UNOY
 ```
 
-**When**: `UNB` S001 DE 0001 names no defined character repertoire. The value is
-`UN` plus a two-character repertoire code, so the defined set is `UNOA`–`UNOK`,
-`UNOX`, `UNOY`, and `KECA`.
+**When**: `UNB` S001 DE 0001 names a repertoire this crate does not recognise.
+It recognises `UNOA`–`UNOK` and `UNOY`; `UNOX` and `KECA` are refused with
+[E039](#e039-unsupportedcharset).
 
 **Fields**: `0: String` — the offending identifier.
 
-**Fix**: Declare the repertoire the payload is actually written in. A value that
-*is* defined but that this crate cannot decode — `UNOX`, `KECA` — raises
-[E039](#e039-unsupportedcharset) instead; the two make different claims about
-whose problem it is.
+**Fix**: Declare the repertoire the payload is actually written in.
 
 ---
 
@@ -680,25 +683,53 @@ prevent, so it is rejected before any lookup.
 ### E036 — `LimitExceeded`
 
 ```text
-input exceeded the configured {limit} limit of {max}
+input exceeded the configured {limit} limit of {max} at byte offset {offset}
 ```
 
-**When**: The input carries more than a `ReaderConfig` whole-input budget allows —
-`max_segments`, `max_messages`, or `max_input_bytes`. The per-segment size guard
-has its own code (`E020 SegmentTooLong`).
+**When**: The input carries more than a `ReaderConfig` budget allows —
+`max_segments` or `max_messages` for the whole input, `max_segments_per_message`
+for any one `UNH`…`UNT` message, or `max_input_bytes` — or the recovering scan
+recorded more faults than `RecoveryConfig::max_faults` allows. The per-segment
+size guard has its own code (`E020 SegmentTooLong`).
 
-**Why an error and not a quiet stop**: a budget that merely ended the iterator is
-indistinguishable from a clean end of input, so
-`collect::<Result<Vec<_>, _>>()` would succeed on a **truncated** interchange and
-everything downstream would treat a fragment as the whole message. Input that ends
-*exactly* at a limit is not a violation.
+`max_input_bytes` counts **every consumed byte**: a byte order mark, the `UNA`,
+whitespace and stray segment terminators as well as segments. Input is consumed
+in units (the prologue, a run of whitespace or stray terminators, one segment
+with its terminator), and a unit that ends past the budget is refused before it
+is parsed — so trailing whitespace beyond the budget is an `E036` too, and a
+syntax error that lies beyond the budget is reported as `E036`, not as the
+syntax error. When a segment is both too long and crosses the byte budget, the
+one detected first in the byte stream wins. The slice and reader paths report
+the same `E036` at the same offset for the same input.
 
-**Fields**: `limit: &'static str` (`"max_segments"`, `"max_messages"`, or
-`"max_input_bytes"`), `max: u64`.
+Input that ends *exactly* at a limit is not a violation. Why a limit is an error
+rather than a quiet stop: [Parsing](@/docs/parsing.md#why-the-limits-are-errors-and-not-a-quiet-stop).
+
+**Fields** (the variant is `#[non_exhaustive]`; match it with `..`):
+`limit: &'static str` (`"max_segments"`, `"max_messages"`,
+`"max_segments_per_message"`, `"max_input_bytes"`, or `"max_faults"`),
+`max: u64`, and `offset: usize` — for a count budget the start of the segment
+that would have exceeded it, for `max_input_bytes` the budget itself (the first
+byte outside it).
+
+```rust
+use edifact_rs::{EdifactError, ReaderConfig, from_bytes_with_config};
+
+let config = ReaderConfig::default().max_input_bytes(8);
+let err = from_bytes_with_config(b"BGM+220'   \n", config)
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap_err();
+assert!(matches!(
+    err,
+    EdifactError::LimitExceeded { limit: "max_input_bytes", max: 8, offset: 8, .. }
+));
+```
 
 **Fix**: Raise the corresponding `ReaderConfig` budget if the input is legitimate,
 or reject it as oversized. Segments parsed before the violation are still
-delivered, so a manual iteration can keep the partial result.
+delivered, so a manual iteration can keep the partial result. On a long-lived
+stream bound each message with `max_segments_per_message` rather than the whole
+stream with `max_segments`.
 
 ---
 
@@ -709,7 +740,7 @@ cannot write a repeating data element: the active service string advice
 declares no repetition separator
 ```
 
-**When**: A `Segment` carrying an `Element` with repetitions (ISO 9735-1 §8.6) was
+**When**: A `Segment` carrying an `Element` with repetitions (ISO 9735-1 §8.7) was
 handed to a `Writer` whose `ServiceStringAdvice` holds the space "not used"
 sentinel at UNA position 7.
 
@@ -754,8 +785,8 @@ and continue.
 character repertoire 'UNOX' is not supported
 ```
 
-**When**: An interchange declares `UNOX` (ISO 2022 code extension) or `KECA`
-(Korean) in `UNB` S001 DE 0001.
+**When**: An interchange declares `UNOX` (ISO/IEC 2022 code extension) or `KECA`
+(a Korean identifier outside ISO 9735) in `UNB` S001 DE 0001.
 
 **Why**: Every repertoire this crate supports is single-byte and
 ASCII-transparent, which is what makes byte-level delimiter scanning sound.
@@ -812,7 +843,7 @@ interchange reveals why.
 interchange IC4711 contains no message or group
 ```
 
-**When**: A `UNB`/`UNZ` pair encloses nothing. ISO 9735-1 §7.1 requires an
+**When**: A `UNB`/`UNZ` pair encloses nothing. ISO 9735-1 §7.2 requires an
 interchange to "contain at least one group, or one message or one package".
 
 **Why**: `UNZ+0` makes the control count agree with the (absent) content, so no
@@ -832,13 +863,17 @@ a delivery, acknowledges it, and nothing arrives.
 message MSG1 has no segments between UNH and UNT
 ```
 
-**When**: A `UNH`/`UNT` pair encloses nothing. ISO 9735-1 §7.3 requires a message
+**When**: A `UNH`/`UNT` pair encloses nothing. ISO 9735-1 §7.4 requires a message
 to "contain at least one additional segment".
 
 **Why**: As with E042, `UNT+2` is internally consistent, so the segment-count
 check confirms the message rather than rejecting it.
 
 **Fields**: `message_ref: String` (`UNH` DE 0062), `span: Span` of the `UNH`.
+
+**CONTRL**: reported on the message's `UCM` as `13` "missing" — the body
+segments are what is missing. ISO 9735-4 Annex A permits `32` "lower level
+empty" only on `UCI`/`UCF`.
 
 **Fix**: Omit the message entirely if it has no content.
 
@@ -850,7 +885,7 @@ check confirms the message rather than rejecting it.
 segment UNO opens or closes a package, which this crate does not parse
 ```
 
-**When**: The interchange carries a package — `UNO`…`UNP` (ISO 9735-1 §7.9,
+**When**: The interchange carries a package — `UNO`…`UNP` (ISO 9735-1 §7.10,
 elaborated by ISO 9735-8).
 
 **Why**: The object inside a package is arbitrary binary data whose length is
@@ -873,10 +908,10 @@ so the header and trailer themselves can be read by data element identifier.
 segment FTX element 1 component 0: value is only spaces
 ```
 
-**When**: A data element value consists of nothing but spaces. ISO 9735-1 §9.3:
+**When**: A data element value consists of nothing but spaces. ISO 9735-1 §9.4:
 "A data element value containing only space(s) shall not be allowed."
 
-**Why**: Trailing spaces are insignificant and must be suppressed (§9.1), so a
+**Why**: Trailing spaces are insignificant and must be suppressed (§9.2), so a
 value made only of spaces is an element that should have been omitted. It is a
 classic artefact of a fixed-width source record copied into a variable-length
 field — and a receiver comparing it against a code list will not treat it as
@@ -898,14 +933,14 @@ Raised as a **warning**, not an error: the value is still readable.
 segment DTM contains no data element
 ```
 
-**When**: A segment carries nothing but its tag. ISO 9735-1 §7.5: "A segment
+**When**: A segment carries nothing but its tag. ISO 9735-1 §7.6: "A segment
 shall contain at least one data element in addition to the segment tag."
 
-**Why**: §8.5 adds that a conditional segment whose only content is the tag
+**Why**: §8.6 adds that a conditional segment whose only content is the tag
 "shall be omitted in its entirety" — so `DTM'` is either a mandatory segment that
 lost its data or a conditional one that should not have been sent. Note that
 `DTM+'` is *not* this error: an empty data element is present, which is how
-EDIFACT spells a mandatory segment with no data to carry (§8.4).
+EDIFACT spells a mandatory segment with no data to carry (§8.5).
 
 **Fields**: `tag: String`, `span: Span`.
 
@@ -921,7 +956,7 @@ segment RFF element 0 occurs 3 times, at most 1 allowed
 ```
 
 **When**: A data element occurred more times than its definition's `max_repeat`
-allows. ISO 9735-1 §7.5 requires a segment specification to state each element's
+allows. ISO 9735-1 §7.6 requires a segment specification to state each element's
 maximum number of occurrences.
 
 **Why**: `max_repeat` had been carried on every `ElementRef` and read by nothing,
@@ -1007,14 +1042,14 @@ segment BGM ends in a separator that carries no value
 **When**: A segment ends in an empty data element, or a composite ends in an
 empty component — `BGM+220+'` and `DTM+137:20260101:'`.
 
-**Why**: ISO 9735-1 §8.7.1: "If one or more non-repeating composite data elements
+**Why**: ISO 9735-1 §8.8.2: "If one or more non-repeating composite data elements
 or stand-alone data elements at the end of a segment are omitted, the data
 element separators which would normally follow them shall also be omitted."
-§8.7.2 says the same for components at the end of a composite.
+§8.8.3 says the same for components at the end of a composite.
 
 Note the contrast with an **interior** omission, which must keep its separator
-(§8.7.1 Figure 1): `BGM+220++9'` is correct and is not reported. So is `BGM+'` —
-§8.4 spells a mandatory segment with no data to carry exactly that way.
+(§8.8.2): `BGM+220++9'` is correct and is not reported. So is `BGM+'` —
+§8.5 spells a mandatory segment with no data to carry exactly that way.
 
 Raised as a **warning**: a correct parser reads the value anyway.
 
@@ -1036,7 +1071,7 @@ interchange mixes groups with ungrouped messages
 **When**: A `UNH` appears outside every `UNG`…`UNE` in an interchange that uses
 groups.
 
-**Why**: ISO 9735-1 §7.1 lists what an interchange may contain, and the entries
+**Why**: ISO 9735-1 §7.2 lists what an interchange may contain, and the entries
 are exclusive — groups containing messages, *or* bare messages, never both. A
 message outside every group has no group to be counted in, so `UNZ` DE 0036
 cannot describe the interchange at all.
@@ -1055,7 +1090,7 @@ as code 30 — the code that exists for precisely this, rather than the general
 segment ZZZ element 0 component 0: leading zeroes are not suppressed
 ```
 
-**When**: A **variable-length** value carries characters ISO 9735-1 §9.1 requires
+**When**: A **variable-length** value carries characters ISO 9735-1 §9.2 requires
 the sender to suppress: leading zeroes in a numeric value, trailing spaces in an
 alphabetic or alphanumeric one.
 
@@ -1064,7 +1099,7 @@ variable-length field. The value is readable, so this is a warning — but a
 receiver comparing `007` against the code `7`, or `"ACME "` against `"ACME"`,
 will not match them.
 
-Two deliberate exemptions. §9.1 allows "a single zero before a decimal mark", so
+Two deliberate exemptions. §9.2 allows "a single zero before a decimal mark", so
 `0.5` is correct while `00.5` is not. And it governs *variable* length elements
 only: a **fixed**-length numeric field is zero-padded by design and a fixed text
 one space-padded, so neither is reported.
@@ -1079,10 +1114,138 @@ Requires a declared [representation](@/docs/validation.md#data-element-represent
 
 ---
 
+### E066 — `ActionNotPermitted`
+
+```text
+CONTRL UCI action code 8 is not permitted by the action policy
+```
+
+**When**: A `CONTRL` built with `ContrlOptions` (`receipt_with`,
+`acknowledgement_with`, `from_report_with`, `from_recovered`) would carry a
+DE 0083 action code on `UCI`, `UCF` or `UCM` that the configured `ActionPolicy`
+does not admit — a receipt (`8`) under a policy admitting only `7` and `4`, or a
+warning-only `UCM` (`7`) under one admitting only `4`.
+
+**Why**: A `CONTRL` the partner's guide does not admit is one it rejects, and
+rewriting the verdict into a permitted code would say something that is not
+true. The first violation (`UCI`, then each `UCF` and `UCM` in document order)
+is returned.
+
+**Fields**: `segment_tag: &'static str` (`UCI`, `UCF`, `UCM`),
+`action: &'static str` (`4`, `7`, `8`).
+
+**Fix**: Permit the code at that level, or report what the policy admits — for
+example turn warnings off with `ContrlOptions::report_warnings(false)` when
+`UCM` admits only `4`. Not a fault of the subject interchange, so it has no
+`CONTRL` location.
+
+---
+
+### E067 — `InvalidContrlIdentifier`
+
+```text
+CONTRL message identifier: data element 0057 value "2.0b-xx" is not valid
+```
+
+**When**: `ContrlIdentifier::new` or `with_association` received a component
+that violates its S009 representation: DE 0052, DE 0054 or DE 0051 empty or
+longer than three characters, DE 0057 empty or longer than six.
+
+**Fields**: `data_element: &'static str` (`0052`, `0054`, `0051`, `0057`),
+`value: String`.
+
+**Fix**: Use the identifier the partner agreement names, within those lengths.
+Not a fault of the subject interchange, so it has no `CONTRL` location.
+
+---
+
+### E068 — `SegmentNotPlaced`
+
+```text
+segment LOC is not placed: out of order: it fits a place already passed
+```
+
+**When**: Resolving a message against a group schema
+(`GroupSchema::resolve(..).findings(..)`, `PlacementValidator`), a segment fits
+no entry of the **ordered** group it arrived in, nor any place of an enclosing
+group. It is skipped — never attached to a wrong group — and recorded on the
+instance it was skipped in (`SegmentGroupIndexed::unplaced`).
+
+**Fields**: `tag: String`, `reason: UnplacedReason` (`OutOfOrder` — it fits a
+place already passed; `NotHere` — it fits a place elsewhere in the schema;
+`Unknown` — it fits no place), `span: Span`. The issue carries kind
+`placement`, layer `structure`, the `group_path` of the instance and, when the
+slice starts at `UNH`, the `segment_position`.
+
+**Fix**: Move the segment to the place the implementation guide gives it, or
+remove it. An ordered root that does not declare `UNT` reports the trailer this
+way — declare it, or resolve `MessageWindow::body()`.
+
+---
+
+### E069 — `TooManySegmentOccurrences`
+
+```text
+segment DTM occurs more than 1 time(s) in its group
+```
+
+**When**: A segment place occurs in one group instance more often than its
+`max`, and no later entry of the group matches the extra occurrence (a place at
+its `max` yields to a later matching entry first). One issue per extra
+occurrence, kind `count`; a place `id` is in the context under `place`.
+
+**Fields**: `tag: String`, `max: u32`, `span: Span` (the extra occurrence).
+
+**Fix**: Reduce the repetitions to the guide's maximum.
+
+---
+
+### E070 — `TooManyGroupOccurrences`
+
+```text
+segment group SG5 occurs more than 1 time(s)
+```
+
+**When**: A segment group occurs in its parent instance more often than its
+`max`. One issue per extra instance, kind `count`, with the `group_path` of the
+extra instance.
+
+**Fields**: `group: String`, `max: u32`, `span: Span` (the extra instance's
+trigger segment).
+
+**Fix**: Reduce the group's repetitions to the guide's maximum.
+
+---
+
+### E071 — `InvalidGroupSchema`
+
+```text
+invalid group schema at "SG5": max is 0
+```
+
+**When**: `GroupDefBuilder::build`, `GroupSchema::new` or `GroupSchema::ordered`
+found a malformed schema: an empty group or root name, a tag that is not three
+upper-case ASCII letters, `min` greater than `max`, `max` 0, a
+`Discriminator::one_of` with no code, or groups nested deeper than 64 levels.
+`GroupSchema` also checks groups built with the `const` constructors, which
+bypass the builder.
+
+**Fields**: `group: String` (the group at fault, or the root name),
+`reason: &'static str`.
+
+**Fix**: Correct the schema. A configuration fault, not a fault of a message:
+it has no `CONTRL` location.
+
+A place or group below its `min` is reported as
+[`E015 MissingSegment`](#e015-missingsegment), kind `missing`, with the
+instance's `group_path` and the group's trigger tag.
+
+---
+
 ## Retired codes
 
-These codes were used by variants that no longer exist.  They are never reissued,
-so a stored code always identifies the same condition:
+Retired codes are never reissued, so a stored code always identifies the same
+condition:
 
 | Code | Former variant | Retired because |
 |---|---|---|

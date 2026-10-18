@@ -30,7 +30,7 @@
       "name": "Does edifact-rs parse without allocating?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Segment tags and component values borrow directly from the input byte slice. Only the per-segment element vector is allocated, and an owned string is created solely for values that contained a release-character escape."
+        "text": "Segment tags and component values borrow directly from the input byte slice. Each segment allocates its element vector once, and an owned string is created only for values that contained a release-character escape. The allocation budget is enforced by tests."
       }
     },
     {
@@ -38,7 +38,7 @@
       "name": "Can edifact-rs stream files larger than memory?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Yes. The reader-based APIs yield one owned segment at a time, and message windows group them into UNH..UNT units, so peak memory stays proportional to a single message rather than the whole interchange."
+        "text": "Yes. The reader-based APIs hold one owned segment at a time, at most max_segment_bytes. Message windows hold one UNH..UNT message, which ReaderConfig::max_segments_per_message caps however long the stream runs."
       }
     },
     {
@@ -46,7 +46,7 @@
       "name": "Does edifact-rs support EDIFACT syntax version 4 repeating data elements?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Yes. The repetition separator is read from the UNA service string advice, or — when an interchange has no UNA — from the syntax version in UNB S001, which makes it an asterisk for syntax version 4. Repeating data elements are then split into separate occurrences rather than left glued into the value, per ISO 9735-1 clause 8.6."
+        "text": "Yes. The repetition separator is read from the UNA service string advice, or — when an interchange has no UNA — from the syntax version in UNB S001, which makes it an asterisk for syntax version 4. Repeating data elements are then split into separate occurrences rather than left glued into the value, per ISO 9735-1:2002 clause 8.7."
       }
     }
   ]
@@ -113,15 +113,15 @@ struct Nad {
   <ul class="feature-grid">
     <li>
       <h3>Zero-copy by default</h3>
-      <p>Tags and component values borrow from the input slice. The only per-segment
-      allocation is the element vector; owned strings appear solely where a release
-      escape had to be resolved.</p>
+      <p>Tags and component values borrow from the input slice. Each segment allocates
+      its element vector once; a value is copied only where a release escape had to
+      be resolved.</p>
     </li>
     <li>
-      <h3>Constant-memory streaming</h3>
-      <p>Reader iterators yield one segment at a time and message windows group them
-      into <code>UNH</code>…<code>UNT</code> units, so a multi-gigabyte interchange
-      costs one message of peak memory.</p>
+      <h3>Bounded streaming</h3>
+      <p>Reader iterators hold one segment at a time; message windows hold one
+      <code>UNH</code>…<code>UNT</code> message, capped by
+      <code>max_segments_per_message</code> however long the stream runs.</p>
     </li>
     <li>
       <h3>Identifiers over indices</h3>
@@ -131,8 +131,10 @@ struct Nad {
     </li>
     <li>
       <h3>Syntax v4 repetitions</h3>
-      <p>When a <code>UNA</code> declares a repetition separator, repeating data elements
-      are split into real occurrences — not left glued into the value as literal text.</p>
+      <p>The repetition separator comes from the <code>UNA</code> or, without a
+      <code>UNA</code>, from the syntax version in <code>UNB</code> S001. Repeating data
+      elements are split into real occurrences — not left glued into the value as
+      literal text.</p>
     </li>
     <li>
       <h3>Limits that speak up</h3>
@@ -142,7 +144,7 @@ struct Nad {
     </li>
     <li>
       <h3>Layered, composable validation</h3>
-      <p>Envelope, structure, code-list, and profile layers write into one report with
+      <p>Envelope, syntax, charset, structure, code-list and profile layers write into one report with
       stable error codes, byte spans, and rule identifiers you can filter on.</p>
     </li>
   </ul>
@@ -172,15 +174,17 @@ struct Nad {
 
   <details>
     <summary>Is it safe against hostile input?</summary>
-    <p>The crate forbids <code>unsafe</code>. Parsing is guarded by a per-segment size
-    limit plus optional segment-count, message-count, and byte budgets, and the
-    parser, writer, and validators are exercised by property and fuzz tests on every
-    commit. <a href="{{ get_url(path='@/docs/parsing.md') }}">See Parsing</a>.</p>
+    <p>The crate denies <code>unsafe</code>. Parsing is guarded by a per-segment size
+    limit plus optional segment, per-message, message-count and byte budgets, and the
+    parser, writer and validators run property and fuzz tests on every push and
+    pull request. <a href="{{ get_url(path='@/docs/parsing.md') }}">See Parsing</a>.</p>
   </details>
 
   <details>
     <summary>Does it ship UN/EDIFACT directories?</summary>
-    <p>No — directory data is versioned, large, and licensed separately. The crate
+    <p>No — the UNTDID licence forbids distributing modified copies of the
+    Directory without UNECE's permission, so the crate takes the conservative
+    reading and ships none. The crate
     provides the validation engine and the table types; supply your own definitions
     at compile time or load them at startup.
     <a href="{{ get_url(path='@/docs/validation.md') }}">See Validation</a>.</p>
@@ -191,9 +195,7 @@ struct Nad {
   <h2 id="cta-heading">Start reading</h2>
   <ul class="guide-grid">
     {% set docs = get_section(path="docs/_index.md") %}
-    {# `loop.index` rather than a `slice` filter: `slice` was dropped in Zola
-       0.23, and pinning the site build to an older Zola just to keep one filter
-       is not a trade worth making. #}
+    {# loop.index: Zola ≥0.23 has no slice filter #}
     {% for p in docs.pages %}{% if loop.index <= 6 %}
     <li>
       <a href="{{ p.permalink }}">

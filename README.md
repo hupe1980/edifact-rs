@@ -32,7 +32,7 @@ cargo add edifact-rs --no-default-features    # core parse + write only
 ## Quick start
 
 Parsing borrows straight from the input — segment tags and component values are
-`&str` slices into your buffer:
+`Cow<'_, str>` that borrow from your buffer unless a release escape forced a copy:
 
 ```rust
 use edifact_rs::from_bytes;
@@ -105,24 +105,23 @@ assert_eq!(wire, "BGM+220'");
 
 ## What makes it different
 
-EDIFACT is deceptively simple — flat text, a handful of delimiters — which is
-why hand-rolled parsers are common and quietly wrong. The delimiters are
-redefinable per interchange, any of them may appear *inside* a value when
-release-escaped, and syntax version 4 adds a repetition separator that changes
-an element's shape rather than its text. `edifact-rs` takes a position on each
-of the places that usually goes wrong:
+EDIFACT looks simple, but its delimiters are redefinable per interchange, any
+of them may appear inside a value when release-escaped, and syntax version 4 adds
+a repetition separator that changes an element's shape. Where hand-rolled parsers
+usually go wrong, `edifact-rs` takes a position (clause numbers refer to
+ISO 9735-1:2002):
 
 | | |
 |---|---|
-| **One segment type, borrowed or owned** | `Segment<'a>` holds its text as `Cow`, so `from_bytes` borrows from your buffer and `from_reader` owns (`OwnedSegment` is `Segment<'static>`). Covariance means a `&[OwnedSegment]` goes anywhere a `&[Segment<'_>]` does: one function per job, no `_owned` twin to remember, and no conversion step between the two paths. |
-| **Zero-copy by default** | Tags and values borrow from the input slice. The only per-segment allocation is the element vector; an owned string appears solely where a release escape had to be resolved. |
-| **Constant-memory streaming** | Reader iterators yield one segment at a time; message windows group them into `UNH`…`UNT` units. A multi-gigabyte interchange costs one message of peak memory. |
+| **One segment type, borrowed or owned** | `Segment<'a>` holds `Cow` text: `from_bytes` borrows, `from_reader` owns (`OwnedSegment` = `Segment<'static>`). One API serves both. |
+| **Zero-copy by default** | `from_bytes` borrows tags and values from the input and allocates each segment's element vector once; a value is copied only where a release escape was resolved. The [allocation budget](https://hupe1980.github.io/edifact-rs/docs/performance/) is enforced by tests. |
+| **Bounded streaming** | Reader iterators hold one segment, at most `max_segment_bytes`; message windows hold one `UNH`…`UNT` message, which `ReaderConfig::max_segments_per_message` caps however long the stream runs. |
 | **Identifiers, not indices** | Address a field by its UN/EDIFACT data element identifier. The derive resolves it during const evaluation, so a stale identifier fails the build instead of reading the element next door. |
-| **Repetitions survive the round trip** | The repetition separator splits an element into real occurrences (ISO 9735-1 §8.6) instead of leaving `1*ON` in the value as literal text — read from the `UNA`, or from the syntax version in `UNB` S001 when there is none. `#[edifact(repeat)]` maps those occurrences onto a `Vec<T>` and writes them back byte-for-byte. |
-| **The envelope is checked against the standard, not a guess** | `UNB`/`UNG`/`UNH` structure, control-reference pairing, all three control counts, and the two rules no count can catch: an interchange with no content (§7.1) and a message with no body (§7.3). |
+| **Repetitions survive the round trip** | The repetition separator splits an element into real occurrences (ISO 9735-1 §8.7) instead of leaving `1*ON` in the value as literal text — read from the `UNA`, or from the syntax version in `UNB` S001 when there is none. `#[edifact(repeat)]` maps those occurrences onto a `Vec<T>` and writes them back byte-for-byte. |
+| **The envelope is checked against the standard, not a guess** | `UNB`/`UNG`/`UNH` structure, control-reference pairing, all three control counts, and the two rules no count can catch: an interchange with no content (§7.2) and a message with no body (§7.4). |
 | **`CONTRL` is generated, not hand-rolled** | The acknowledgement is built from the validation report, so what you send back cannot disagree with what you found. Each finding lands at the lowest reporting level that can both locate it and legally carry its code (ISO 9735-4 Annex A). |
 | **Limits report, never truncate** | Segment, message, and byte budgets raise an error. A budget that quietly ended iteration is indistinguishable from clean end-of-input, so a caller would accept a truncated interchange as a whole one. |
-| **Layered validation** | Envelope, structure, code-list, and profile checks write into one report carrying stable error codes, byte spans, and filterable rule identifiers. |
+| **Layered validation** | Envelope, syntax, charset, structure, code-list and profile checks write into one report with stable error codes, byte spans and filterable rule identifiers. |
 | **Representations are enforced, not just recorded** | `an..35`, `n8`, `a1` — the column every directory prints and partners actually reject on. Length is counted in characters, not bytes (§6), and a numeric value excludes its sign, decimal mark and exponent (§10), so `-123.45` fits `n..5`. Where the syntax versions disagree — `S004` DE 0017 is `n6` in v3 and `n8` in v4 — each is checked against its own version rather than collapsed into a range that fits neither. |
 | **A layout can be checked against reality** | A hand-written definition that disagrees with the wire fails silently — it resolves to the wrong component and returns a plausible value. `SegmentLayout::audit` points it at a corpus and separates *disproved* from *unconfirmed*, so thin fixtures cannot masquerade as approval. |
 | **Character sets are decoded, not assumed** | UTF-8 is not a superset of `UNOC`, so a conformant German interchange is unparseable as UTF-8. `decode_interchange` reads the repertoire from `UNB` S001 and transcodes — borrowing, not copying, when the payload is already ASCII. |
@@ -162,8 +161,9 @@ The derive performs the same resolution at compile time — see
 ## Documentation
 
 Full guides live at **[hupe1980.github.io/edifact-rs](https://hupe1980.github.io/edifact-rs/docs/)**.
-Every Rust snippet on the site is compiled and run as part of the test suite, so
-none of it can drift from the crate.
+Rust snippets in the guides are doctests: compiled and run, except `no_run`
+blocks (file and network I/O), which are compiled only, and three `ignore`d
+fragments.
 
 | Guide | |
 |---|---|
@@ -174,13 +174,13 @@ none of it can drift from the crate.
 | [Writing](https://hupe1980.github.io/edifact-rs/docs/writing/) | `Writer`, escaping, custom UNA, repeating elements |
 | [Typed Derive](https://hupe1980.github.io/edifact-rs/docs/typed-derive/) | Every derive attribute, including identifier-addressed fields |
 | [Streaming](https://hupe1980.github.io/edifact-rs/docs/streaming/) | Reader iterators, message windows, typed extraction |
-| [Validation](https://hupe1980.github.io/edifact-rs/docs/validation/) | `Validator`, `ValidationContext`, the four layers |
+| [Validation](https://hupe1980.github.io/edifact-rs/docs/validation/) | `Validator`, `ValidationContext`, the validation layers (envelope, syntax, charset, structure, code list, profile) |
 | [CONTRL](https://hupe1980.github.io/edifact-rs/docs/contrl/) | Acknowledgements and rejections from a validation report |
 | [Profile Packs](https://hupe1980.github.io/edifact-rs/docs/profile-packs/) | Authoring, composing, and filtering business rules |
 | [Diagnostics](https://hupe1980.github.io/edifact-rs/docs/diagnostics/) | `miette` integration |
 | [Async Integration](https://hupe1980.github.io/edifact-rs/docs/async-integration/) | Bridging to `tokio` |
-| [Error Reference](https://hupe1980.github.io/edifact-rs/docs/error-reference/) | Every stable code `E001`–`E053` |
-| [Performance](https://hupe1980.github.io/edifact-rs/docs/performance/) | Allocation budgets, benchmarks, tuning |
+| [Error Reference](https://hupe1980.github.io/edifact-rs/docs/error-reference/) | Every stable code: `E001`–`E053`, `E066`–`E071` |
+| [Performance](https://hupe1980.github.io/edifact-rs/docs/performance/) | Allocation budget, memory bounds, benchmarks, tuning |
 
 Runnable cookbooks live in
 [`crates/edifact-rs/examples/`](crates/edifact-rs/examples) — try one with
@@ -191,7 +191,7 @@ Runnable cookbooks live in
 `edifact-rs` is the **engine**, not a directory distribution.
 
 It ships the parser, writer, validation pipeline, the table types for segment
-definitions, and every **ISO 9735-1 batch service segment** — `UNB`, `UNG`,
+definitions, and every **batch service segment** of ISO 9735 — `UNB`, `UNG`,
 `UNH`, `UNT`, `UNE`, `UNZ`, `UNS`, `UNO`, `UNP`, `UGH`, `UGT` — as ready-to-use
 layouts in `edifact_rs::service`. Those are fixed by the syntax standard rather
 than by a directory release, so there is one correct answer and no version to
@@ -229,13 +229,13 @@ assert!(wire.contains("UCI+IC4711+SENDER+RECEIVER+7'"));
 # Ok::<(), edifact_rs::EdifactError>(())
 ```
 
-It does **not** ship UN/EDIFACT *directory* data — `BGM`, `DTM`, `NAD`, `C507`
-and the rest. That is a licensing boundary, not a workload one: the
-[UN UNTDID licence](https://service.unece.org/trade/untdid/license.htm) permits
-redistributing the Directory unmodified, with its copyright notice, to the
-country where you acquired it — and states that you may not modify it and
-distribute it. Transcribing it into `const` tables and publishing that on
-crates.io is exactly what it forbids.
+It does **not** ship UN/EDIFACT *directory* data (`BGM`, `DTM`, `NAD`, `C507`, …).
+The [UN UNTDID licence](https://service.unece.org/trade/untdid/license.htm) lets
+you copy the Directory and pass on the file as downloaded, with the licence and
+copyright notice; it limits *use* to the country of acquisition and forbids
+modifying and distributing it without UNECE's written permission. Whether derived
+Rust tables are such a modification is unsettled — other open-source EDIFACT
+projects do publish them — so this crate takes the conservative reading.
 
 Supply the subset you touch as `static` tables at compile time, or load them at
 startup with `DirectoryValidatorBuilder` — then point
@@ -245,7 +245,7 @@ fails silently.
 
 Nor does it cover the remaining parts of ISO 9735: interactive EDI (part 3), the
 `AUTACK` and `KEYMAN` security messages (parts 6 and 9), or the security segments
-(parts 5 and 7). Packages (§7.9) are recognised and reported rather than parsed
+(parts 5 and 7). Packages (ISO 9735-1 §7.10) are recognised and reported rather than parsed
 — the object inside a `UNO`…`UNP` pair is arbitrary binary data, not EDIFACT, so
 the header tells you its length and the bytes are yours to lift out.
 

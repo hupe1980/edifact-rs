@@ -82,7 +82,7 @@ fn main() -> Result<(), edifact_rs::EdifactError> {
 ```
 
 `from_bytes` returns an **iterator** of `Result<Segment<'_>, EdifactError>`.
-Each `Segment` borrows directly from `input` — zero heap allocation for tag and element text.
+Each `Segment` borrows its tag and element text from `input`.
 
 ---
 
